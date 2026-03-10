@@ -1,6 +1,6 @@
 services:
   # Contenedor 1: Bob (Legit user)
-  bob:
+  bob: #SERVICE NAME
     image: alpine:latest
     container_name: bob-legit
     networks:
@@ -13,7 +13,7 @@ services:
     command: /bin/sh -c "while true; do sleep 3600; done"
 
   # Contenedor 2: Mallory (Attacker)
-  mallory:
+  mallory: #SERVICE NAME
     image: alpine:latest
     container_name: mallory-attacker
     networks:
