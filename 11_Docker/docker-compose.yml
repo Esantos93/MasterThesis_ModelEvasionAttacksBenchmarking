@@ -1,13 +1,11 @@
-version: '3.8'
-
 services:
   # Contenedor 1: Bob (Legit user)
   bob:
     image: alpine:latest
     container_name: bob-legit
     networks:
-      thesis_net:
-        ipv4_address: 172.17.0.2
+      master_thesis_net:
+        ipv4_address: 172.20.0.2
     # It tells Docker to assign a virtual terminal to the container. It is as if you were connecting a virtual "screen" to it.
     tty: true 
     # It keeps the standard input (stdin) open, allowing you to interact with the container through the terminal. This is useful for running commands or scripts inside the container.
@@ -19,8 +17,8 @@ services:
     image: alpine:latest
     container_name: mallory-attacker
     networks:
-      thesis_net:
-        ipv4_address: 172.17.0.3
+      master_thesis_net:
+        ipv4_address: 172.20.0.3
     # It tells Docker to assign a virtual terminal to the container. It is as if you were connecting a virtual "screen" to it.
     tty: true 
     # It keeps the standard input (stdin) open, allowing you to interact with the container through the terminal. This is useful for running commands or scripts inside the container.
@@ -33,5 +31,5 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.17.0.0/24
-          gateway: 172.17.0.1
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
