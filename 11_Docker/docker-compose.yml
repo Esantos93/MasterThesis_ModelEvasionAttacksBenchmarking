@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # Contenedor 1: Bob (Legit user)
+  bob:
+    image: alpine:latest
+    container_name: bob-legit
+    networks:
+      thesis_net:
+        ipv4_address: 172.17.0.2
+    # It tells Docker to assign a virtual terminal to the container. It is as if you were connecting a virtual "screen" to it.
+    tty: true 
+    # It keeps the standard input (stdin) open, allowing you to interact with the container through the terminal. This is useful for running commands or scripts inside the container.
+    stdin_open: true
+    command: /bin/sh -c "while true; do sleep 3600; done"
+
+  # Contenedor 2: Mallory (Attacker)
+  mallory:
+    image: alpine:latest
+    container_name: mallory-attacker
+    networks:
+      thesis_net:
+        ipv4_address: 172.17.0.3
+    # It tells Docker to assign a virtual terminal to the container. It is as if you were connecting a virtual "screen" to it.
+    tty: true 
+    # It keeps the standard input (stdin) open, allowing you to interact with the container through the terminal. This is useful for running commands or scripts inside the container.
+    stdin_open: true
+    command: /bin/sh -c "while true; do sleep 3600; done"
+
+networks:
+  # Definition of the custom network
+  master_thesis_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.17.0.0/24
+          gateway: 172.17.0.1
