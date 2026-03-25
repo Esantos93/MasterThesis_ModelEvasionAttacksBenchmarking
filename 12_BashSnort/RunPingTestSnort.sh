@@ -19,11 +19,10 @@ sudo snort -c "$CONFIG_FILE" \
         --lua "ips.include = '/home/santos/Desktop/Local_Rules_Copy.rules'"\
         --plugin-path "$PLUGIN_PATH" \
         --daq-dir "$DAQ_DIR" \
+        -k none \
         -r "$PCAP_PATH" \
         #--pcap-dir "$PCAP_DIR" \
         #--pcap-filter "$PCAP_FILTER" \
-        -l "$LOG_DIR" \
-        -k none
 
 # Change ownership and permissions of the log files to ensure they are accessible
 sudo chown -R santos:santos /home/santos/Desktop/Snort_Logs

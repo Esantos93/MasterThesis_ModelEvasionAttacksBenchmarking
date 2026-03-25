@@ -2,7 +2,7 @@
 
 # --- Configuration Paths ---
 LOG_DIR="/home/santos/Desktop/Snort_Logs"
-PCAP_PATH="/home/santos/Desktop/Traffic_Files/Edge-IIoTset_dataset/Attack_traffic/DDoS_ICMP_Flood_Attacks.pcap"
+PCAP_PATH="/home/santos/Desktop/Traffic_Files/Edge-IIoTset_dataset/Attack_traffic/DDoS_HTTP_Flood_Attacks.pcap"
 # To be used if we want to loop through multiple pcap files in a directory instead of a single file
 PCAP_DIR=""
 PCAP_FILTER="*.pcap"
