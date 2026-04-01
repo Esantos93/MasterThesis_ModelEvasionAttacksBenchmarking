@@ -24,7 +24,7 @@ keywords = [
 
 
 input_file = '/home/santos/Desktop/Snort/rules/combined.rules' # Original ruleset from PulledPork [cite: 140]
-output_file = '/home/santos/Desktop/Snort/rules/ddos_ransomware_filtered.rules'
+output_file = '/home/santos/Desktop/Snort/rules/backdoor_ransomware_filtered.rules'
 
 def filter_snort_rules():
     total_rules = 0
