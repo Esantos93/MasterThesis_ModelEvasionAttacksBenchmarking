@@ -1,5 +1,5 @@
-import Run_Snort
-import Process_Logs
+import Snort_Execution
+import Snort_Logs_Postprocessing
 
 def main():
     print("-" * 40)
@@ -7,16 +7,17 @@ def main():
     print("-" * 40)
 
     # STEP 1: Run Snort and capture the returned arguments
-    # The Run_Snort script handles interaction and execution
-    config_used = Run_Snort.execute_snort()
+    # The Snort_Execution script handles interaction and execution
+    config_used = Snort_Execution.execute_snort()
 
     # STEP 2: Process the results
     # We pass the captured arguments to the processor
     if config_used:
-            Process_Logs.rename_json(
+            Snort_Logs_Postprocessing.rename_json(
                 pcap=config_used["pcap"],
                 ruleset=config_used["ruleset"],
-                builtin=config_used["builtin"]
+                builtin=config_used["builtin"],
+                log_dir=config_used["log_dir"],
             )
             print("\n[Main] All tasks completed successfully.")
     else:

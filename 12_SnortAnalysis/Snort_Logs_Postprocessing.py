@@ -1,21 +1,19 @@
 import os
 import subprocess
 
-LOG_DIR = "/home/santos/Desktop/Snort_Logs"
-
 # This function is used to rename the JSON output file with the configuration details
-def rename_json(pcap, ruleset, builtin):
-    old_file = os.path.join(LOG_DIR, "alert_json.txt")
+def rename_json(pcap, ruleset, builtin, log_dir):
+    old_file = os.path.join(log_dir, "alert_json.txt")
     new_name = f"json_{pcap}_{ruleset}_{builtin}.json"
-    new_file = os.path.join(LOG_DIR, new_name)
+    new_file = os.path.join(log_dir, new_name)
 
     if os.path.exists(old_file):
         # We change the name of the file to include the configuration details
         os.rename(old_file, new_file)
 
         # Adjust user, group & permissions of the files within the $LOG_DIR
-        subprocess.run(["sudo", "chown", "-R", "santos:santos", LOG_DIR], check=True)
-        subprocess.run(f"sudo chmod -R 666 {LOG_DIR}/*", shell=True)
+        subprocess.run(["sudo", "chown", "-R", "santos:santos", log_dir], check=True)
+        subprocess.run(f"sudo chmod -R 666 {log_dir}/*", shell=True)
 
         # From JSONL to JSON array format
         fix_json_syntax(new_file)

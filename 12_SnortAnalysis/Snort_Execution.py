@@ -100,7 +100,8 @@ def execute_snort():
     return {
         "pcap": selected_pcap.split('.')[0],
         "ruleset": rule_name.replace(".rules", ""),
-        "builtin": bi_label
+        "builtin": bi_label,
+        "log_dir": LOG_DIR,
     }
 
 # if __name__ == "__main__":
