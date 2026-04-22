@@ -1,25 +1,35 @@
 import time
-from llama_cpp import Llama
+from llama_cpp import Llama, ChatCompletionRequestMessage
 
-def llm_call(ruta, nombre, template_tipo):
-    print(f"\n--- TEST: {nombre} ---")
-    llm = Llama(model_path=ruta, n_gpu_layers=-1, n_ctx=2048, add_bos=False, verbose=False)
+def llm_call(path, name):
+    print(f"\n--- TEST: {name} ---")
+    llm = Llama(model_path=path, n_gpu_layers=-1, n_ctx=2048, add_bos=False, verbose=False)
     
-    # Definimos el mensaje
-    system_msg = "Eres un analista de seguridad de RISE."
-    user_msg = "Genera un JSON simple de un paquete TCP."
+    # We define the content of the prompt as a list of messages with roles
+    messages: list[ChatCompletionRequestMessage] = [
+        {"role": "system", "content": "You are a security analyst at RISE."},
+        {"role": "user", "content": "Generate a simple JSON of a TCP packet."}
+    ]
+    
+    start = time.time() # We measure the time taken for the response
+    res = llm.create_chat_completion(
+            messages=messages,
+            max_tokens=1000,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False
+        )
 
-    # Aplicamos el formato según el modelo
-    if template_tipo == "llama":
-        prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_msg}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user_msg}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
-    else: # gemma
-        prompt = f"<bos><|turn>system\n{system_msg}<turn|>\n<|turn>user\n{user_msg}<turn|>\n<|turn>model\n"
+    duration = time.time() - start
 
-    start = time.time()
-    res = llm(prompt, max_tokens=1000, temperature=0.0, top_p = 0.95)
-    print(f"Respuesta ({time.time()-start:.2f}s):\n{res['choices'][0]['text']}")
+    # We check if the response is a dictionary, which is the expected format for the output
+    assert isinstance(res, dict)
+    # The answer lies in a different path within the resulting JSON
+    text_response = res["choices"][0]["message"]["content"]
+    
+    print(f"The generation of the answer took ({duration:.2f}s):\n{text_response}")
     del llm
 
-# Ejecutar cuando terminen las descargas
-llm_call("./Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", "Llama 3.1", "llama")
-llm_call("./google_gemma-4-E4B-it-Q4_K_M.gguf", "Gemma 4", "gemma")
+# Function calls for testing the models
+llm_call("./Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", "Llama 3.1")
+llm_call("./google_gemma-4-E4B-it-Q4_K_M.gguf", "Gemma 4")
