@@ -7,7 +7,7 @@ PLUGIN_PATH="/usr/local/etc/snort/so_rules/"
 DAQ_DIR="/usr/local/lib/daq"
 
 # Directories for dynamic selection 
-PCAP_DIR="/home/santos/Desktop/Traffic_Files"
+PCAP_DIR="/home/santos/Desktop/Data_Sets/21_To_Snort3"
 RULES_DIR="/usr/local/etc/snort/rules"
 
 # --- Create log directory if it doesn't exist ---
