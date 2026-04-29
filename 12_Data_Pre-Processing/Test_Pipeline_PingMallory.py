@@ -29,7 +29,7 @@ def main():
             with open(json_path, 'r', encoding='utf-8') as f:
                 data_from_file = f.read()
             
-            # Procesamos los datos
+            # We process the JSON string to reconstruct the PCAP file
             json_to_pcap(data_from_file, pcap_reconstructed)
             print(f"PCAP reconstruction successful. File saved to: {pcap_reconstructed}")
 
