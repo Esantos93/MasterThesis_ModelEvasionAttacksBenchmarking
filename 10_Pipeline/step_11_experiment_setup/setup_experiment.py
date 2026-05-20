@@ -30,7 +30,7 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def validate_config_shape(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "dataset", "snort", "llm", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["dataset"], ["pcap_path", "flow_csv_paths", "attack_labels"], "dataset")
+    require_keys(config["dataset"], ["pcap_path", "flow_csv_dir", "attack_labels"], "dataset")
     require_keys(config["snort"], ["snort_binary", "config_path", "ruleset_path"], "snort")
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
     require_keys(config["pipeline"], ["target_os", "grouping_mode", "validation_policy"], "pipeline")
@@ -54,8 +54,8 @@ def collect_input_checks(config: dict[str, Any]) -> list[dict[str, Any]]:
         ("llm.model_path", llm["model_path"]),
     ]
 
-    for index, csv_path in enumerate(dataset["flow_csv_paths"]):
-        paths_to_check.append((f"dataset.flow_csv_paths[{index}]", csv_path))
+    if dataset.get("flow_csv_dir"):
+        paths_to_check.append(("dataset.flow_csv_dir", dataset["flow_csv_dir"]))
 
     for label, raw_path in paths_to_check:
         path = Path(raw_path).expanduser()

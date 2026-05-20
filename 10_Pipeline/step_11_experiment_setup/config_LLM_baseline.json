@@ -5,16 +5,14 @@
     "output_root": "/home/santos/experiments"
   },
   "dataset": {
+    "pcap_dir": "/home/santos/Desktop/Data_Sets/02_CICIDS2017",
     "pcap_path": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Thursday-WorkingHours.pcap",
-    "flow_csv_paths": [
-      "/data/cicids2017/Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
-      "/data/cicids2017/Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv"
-    ],
+    "flow_csv_dir": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Flows",
     "attack_labels": [
       "Web Attack - Brute Force",
       "Web Attack - XSS",
       "Web Attack - Sql Injection",
-      "Infiltration"
+      "Backdoor"
     ]
   },
   "snort": {
