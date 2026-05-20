@@ -1,11 +1,11 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_thursday_example_001",
+    "experiment_id": "exp_cicids2017_thursday_baseline_001",
     "description": "First narrow CICIDS2017 Thursday baseline modification benchmark.",
-    "output_root": "/opt/tfm_benchmark/experiments"
+    "output_root": "/home/santos/experiments"
   },
   "dataset": {
-    "pcap_path": "/data/cicids2017/Thursday-WorkingHours.pcap",
+    "pcap_path": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Thursday-WorkingHours.pcap",
     "flow_csv_paths": [
       "/data/cicids2017/Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
       "/data/cicids2017/Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv"
