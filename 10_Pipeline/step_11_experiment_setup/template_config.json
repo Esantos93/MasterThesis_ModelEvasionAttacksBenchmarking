@@ -12,7 +12,7 @@
       "Web Attack - Brute Force",
       "Web Attack - XSS",
       "Web Attack - Sql Injection",
-      "Backdoor"
+      "Infiltration"
     ]
   },
   "snort": {

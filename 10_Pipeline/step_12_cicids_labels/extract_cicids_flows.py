@@ -36,10 +36,13 @@ PROTOCOL_NAMES = {
     "58": "ICMPv6",
 }
 
+FLOW_CSV_ENCODING = "cp1252"
+FLOW_CSV_DELIMITER = ";"
+
 
 def open_dict_reader(csv_path: Path) -> tuple[Any, csv.DictReader[str]]:
-    csv_file = csv_path.open("r", encoding="utf-8-sig", newline="")
-    return csv_file, csv.DictReader(csv_file, delimiter=",", skipinitialspace=True)
+    csv_file = csv_path.open("r", encoding=FLOW_CSV_ENCODING, newline="")
+    return csv_file, csv.DictReader(csv_file, delimiter=FLOW_CSV_DELIMITER, skipinitialspace=True)
 
 
 def normalise_text(value: Any) -> str:
@@ -54,7 +57,6 @@ def normalise_column_name(value: str) -> str:
 
 def normalise_label(value: Any) -> str:
     value = normalise_text(value).lower()
-    value = value.replace("\ufffd", " ")
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return normalise_text(value)
 
@@ -73,10 +75,6 @@ def build_column_map(fieldnames: Sequence[str] | None) -> dict[str, str]:
                 column_map[canonical_name] = normalised_to_original[alias]
                 break
     return column_map
-
-
-def split_embedded_csv_row(value: str) -> list[str]:
-    return next(csv.reader([value], delimiter=",", skipinitialspace=True))
 
 
 def require_flow_columns(column_map: dict[str, str], csv_path: Path) -> None:
@@ -141,27 +139,11 @@ def extract_selected_flows(config: dict[str, Any]) -> dict[str, Any]:
 
         csv_file, reader = open_dict_reader(csv_path)
         with csv_file:
-            reader_fieldnames = reader.fieldnames
-            if (
-                reader_fieldnames is not None
-                and len(reader_fieldnames) == 1
-                and "," in reader_fieldnames[0]
-            ):
-                raw_header = reader_fieldnames[0]
-                fieldnames = split_embedded_csv_row(raw_header)
-                rows = (
-                    dict(zip(fieldnames, split_embedded_csv_row(raw_row.get(raw_header, ""))))
-                    for raw_row in reader
-                )
-            else:
-                fieldnames = reader_fieldnames
-                rows = reader
-
-            column_map = build_column_map(fieldnames)
+            column_map = build_column_map(reader.fieldnames)
             require_flow_columns(column_map, csv_path)
             column_maps[str(csv_path)] = column_map
 
-            for source_row_number, row in enumerate(rows, start=2):
+            for source_row_number, row in enumerate(reader, start=2):
                 rows_read += 1
                 label = get_cell(row, column_map, "label")
                 label_normalised = normalise_label(label)
@@ -212,6 +194,8 @@ def extract_selected_flows(config: dict[str, Any]) -> dict[str, Any]:
             "selected_label_counts": dict(sorted(selected_label_counts.items())),
             "skipped_files": skipped_files,
             "column_maps": column_maps,
+            "flow_csv_encoding": FLOW_CSV_ENCODING,
+            "flow_csv_delimiter": FLOW_CSV_DELIMITER,
             "matching_scope": "CSV flow selection only. Packet-to-flow mapping is performed in step_13_traffic_selection.",
         },
         "flows": flows,
