@@ -2,7 +2,7 @@
   "experiment": {
     "experiment_id": "exp_cicids2017_thursday_baseline_001",
     "description": "First narrow CICIDS2017 Thursday baseline modification benchmark.",
-    "output_root": "/home/santos/experiments"
+    "output_root": "/home/santos/Experiments"
   },
   "dataset": {
     "pcap_dir": "/home/santos/Desktop/Data_Sets/02_CICIDS2017",
