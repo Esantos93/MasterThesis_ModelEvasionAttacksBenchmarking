@@ -37,6 +37,11 @@ PROTOCOL_NAMES = {
 }
 
 
+def open_dict_reader(csv_path: Path) -> tuple[Any, csv.DictReader[str]]:
+    csv_file = csv_path.open("r", encoding="utf-8-sig", newline="")
+    return csv_file, csv.DictReader(csv_file, delimiter=",", skipinitialspace=True)
+
+
 def normalise_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).strip())
 
@@ -68,6 +73,10 @@ def build_column_map(fieldnames: Sequence[str] | None) -> dict[str, str]:
                 column_map[canonical_name] = normalised_to_original[alias]
                 break
     return column_map
+
+
+def split_embedded_csv_row(value: str) -> list[str]:
+    return next(csv.reader([value], delimiter=",", skipinitialspace=True))
 
 
 def require_flow_columns(column_map: dict[str, str], csv_path: Path) -> None:
@@ -130,13 +139,29 @@ def extract_selected_flows(config: dict[str, Any]) -> dict[str, Any]:
             skipped_files.append({"path": str(csv_path), "reason": "file_not_found"})
             continue
 
-        with csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            reader = csv.DictReader(csv_file)
-            column_map = build_column_map(reader.fieldnames)
+        csv_file, reader = open_dict_reader(csv_path)
+        with csv_file:
+            reader_fieldnames = reader.fieldnames
+            if (
+                reader_fieldnames is not None
+                and len(reader_fieldnames) == 1
+                and "," in reader_fieldnames[0]
+            ):
+                raw_header = reader_fieldnames[0]
+                fieldnames = split_embedded_csv_row(raw_header)
+                rows = (
+                    dict(zip(fieldnames, split_embedded_csv_row(raw_row.get(raw_header, ""))))
+                    for raw_row in reader
+                )
+            else:
+                fieldnames = reader_fieldnames
+                rows = reader
+
+            column_map = build_column_map(fieldnames)
             require_flow_columns(column_map, csv_path)
             column_maps[str(csv_path)] = column_map
 
-            for source_row_number, row in enumerate(reader, start=2):
+            for source_row_number, row in enumerate(rows, start=2):
                 rows_read += 1
                 label = get_cell(row, column_map, "label")
                 label_normalised = normalise_label(label)
