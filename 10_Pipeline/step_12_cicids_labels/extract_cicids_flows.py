@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# This allows the script to find the folder common/ with shared code, even if the script is run from a different working directory.
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
@@ -18,15 +19,15 @@ from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 
 
-COLUMN_ALIASES = {
-    "flow_id": ["flow id", "flowid"],
-    "src_ip": ["source ip", "src ip", "src_ip"],
-    "dst_ip": ["destination ip", "dst ip", "dst_ip"],
-    "src_port": ["source port", "src port", "sport", "src_port"],
-    "dst_port": ["destination port", "dst port", "dport", "dst_port"],
-    "protocol": ["protocol", "proto"],
-    "timestamp": ["timestamp", "time stamp"],
-    "label": ["label", "class"],
+EXPECTED_COLUMNS = {
+    "flow_id": "Flow ID",
+    "src_ip": "Source IP",
+    "src_port": "Source Port",
+    "dst_ip": "Destination IP",
+    "dst_port": "Destination Port",
+    "protocol": "Protocol",
+    "timestamp": "Timestamp",
+    "label": "Label",
 }
 
 PROTOCOL_NAMES = {
@@ -49,12 +50,6 @@ def normalise_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).strip())
 
 
-def normalise_column_name(value: str) -> str:
-    value = value.replace("\ufeff", "")
-    value = normalise_text(value).lower()
-    return value.replace("-", " ").replace("/", " ")
-
-
 def normalise_label(value: Any) -> str:
     value = normalise_text(value).lower()
     value = re.sub(r"[^a-z0-9]+", " ", value)
@@ -65,20 +60,17 @@ def build_column_map(fieldnames: Sequence[str] | None) -> dict[str, str]:
     if not fieldnames:
         raise ValueError("CSV file has no header row.")
 
-    normalised_to_original = {
-        normalise_column_name(original): original for original in fieldnames
+    available_columns = set(fieldnames)
+    column_map = {
+        canonical_name: expected_name
+        for canonical_name, expected_name in EXPECTED_COLUMNS.items()
+        if expected_name in available_columns
     }
-    column_map = {}
-    for canonical_name, aliases in COLUMN_ALIASES.items():
-        for alias in aliases:
-            if alias in normalised_to_original:
-                column_map[canonical_name] = normalised_to_original[alias]
-                break
     return column_map
 
 
 def require_flow_columns(column_map: dict[str, str], csv_path: Path) -> None:
-    required = ["src_ip", "dst_ip", "src_port", "dst_port", "protocol", "label"]
+    required = list(EXPECTED_COLUMNS)
     missing = [name for name in required if name not in column_map]
     if missing:
         joined = ", ".join(missing)
