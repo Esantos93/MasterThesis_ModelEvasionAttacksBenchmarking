@@ -45,6 +45,7 @@ FLOW_CSV_DELIMITER = ";"
 #It uses the specified encoding and delimiter for the CICIDS2017 flow CSV files.
 def open_dict_reader(csv_path: Path) -> tuple[Any, csv.DictReader[str]]:
     csv_file = csv_path.open("r", encoding=FLOW_CSV_ENCODING, newline="")
+    # DictReader will read the first row of the CSV file as the header and use it to create dictionaries for each subsequent row, where the keys are the column names from the header.
     return csv_file, csv.DictReader(csv_file, delimiter=FLOW_CSV_DELIMITER, skipinitialspace=True)
 
 # Removes spaces. Converts any value to a string, removes leading and trailing spaces, 
