@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -573,6 +574,9 @@ def select_packets(
     matching_policy: str,
     output_pcap: str | Path,
     max_packets: int | None,
+    max_source_packets: int | None,
+    max_seconds: float | None,
+    progress_every: int,
     timestamp_window_seconds: float,
     csv_timestamp_offset_seconds: float,
 ) -> dict[str, Any]:
@@ -599,12 +603,34 @@ def select_packets(
     packets_with_ip_key = 0
     selected_packet_index = 0
     selection_truncated = False
+    termination_reason = "source_pcap_exhausted"
+    start_monotonic = time.monotonic()
 
     writer = PcapWriter(str(output_pcap_path), sync=True)
     try:
         with PcapReader(str(pcap_path)) as reader:
             for original_packet_number, packet in enumerate(reader, start=1):
                 packets_seen += 1
+                if progress_every > 0 and packets_seen % progress_every == 0:
+                    elapsed_seconds = round(time.monotonic() - start_monotonic, 1)
+                    print(
+                        "Progress: "
+                        f"source_packets_seen={packets_seen}, "
+                        f"selected_packets={selected_packet_index}, "
+                        f"elapsed_seconds={elapsed_seconds}",
+                        flush=True,
+                    )
+
+                if max_source_packets is not None and packets_seen > max_source_packets:
+                    selection_truncated = True
+                    termination_reason = "max_source_packets"
+                    break
+
+                if max_seconds is not None and (time.monotonic() - start_monotonic) >= max_seconds:
+                    selection_truncated = True
+                    termination_reason = "max_seconds"
+                    break
+
                 packet_key = packet_flow_key(packet, scapy)
                 if packet_key is None:
                     continue
@@ -634,6 +660,7 @@ def select_packets(
 
                 if max_packets is not None and selected_packet_index >= max_packets:
                     selection_truncated = True
+                    termination_reason = "max_selected_packets"
                     break
     finally:
         writer.close()
@@ -672,7 +699,12 @@ def select_packets(
                 "Duplicate dataset_flow_id records are then analysed with CSV timestamps and PCAP packet timestamps."
             ),
             "max_packets": max_packets,
+            "max_source_packets": max_source_packets,
+            "max_seconds": max_seconds,
+            "progress_every": progress_every,
             "selection_truncated_by_max_packets": selection_truncated,
+            "termination_reason": termination_reason,
+            "elapsed_seconds": round(time.monotonic() - start_monotonic, 3),
             "timestamp_window_seconds": timestamp_window_seconds,
             "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
             "flow_mapping_statuses": FLOW_MAPPING_STATUSES,
@@ -712,6 +744,9 @@ def run_selection(
     output_manifest: str | Path | None,
     matching_policy: str,
     max_packets: int | None,
+    max_source_packets: int | None,
+    max_seconds: float | None,
+    progress_every: int,
     timestamp_window_seconds: float,
     csv_timestamp_offset_seconds: float,
 ) -> dict[str, Any]:
@@ -728,6 +763,9 @@ def run_selection(
         matching_policy=matching_policy,
         output_pcap=output_pcap_file,
         max_packets=max_packets,
+        max_source_packets=max_source_packets,
+        max_seconds=max_seconds,
+        progress_every=progress_every,
         timestamp_window_seconds=timestamp_window_seconds,
         csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
     )
@@ -741,6 +779,7 @@ def run_selection(
         "matched_flow_count": manifest["metadata"]["matched_flow_count"],
         "unmatched_flow_count": manifest["metadata"]["unmatched_flow_count"],
         "mapping_status_counts": manifest["metadata"]["mapping_status_counts"],
+        "termination_reason": manifest["metadata"]["termination_reason"],
     }
 
 
@@ -768,7 +807,23 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-packets",
         type=int,
-        help="Optional cap for smoke tests. The full benchmark should omit this.",
+        help="Optional cap on selected packets for smoke tests. The full benchmark should omit this.",
+    )
+    parser.add_argument(
+        "--max-source-packets",
+        type=int,
+        help="Optional cap on packets scanned from the source PCAP for quick smoke tests.",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help="Optional wall-clock limit in seconds for quick smoke tests.",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100000,
+        help="Print progress after this many source packets. Use 0 to disable. Defaults to 100000.",
     )
     parser.add_argument(
         "--timestamp-window-seconds",
@@ -800,6 +855,9 @@ def main() -> None:
         output_manifest=args.output_manifest,
         matching_policy=args.matching_policy,
         max_packets=args.max_packets,
+        max_source_packets=args.max_source_packets,
+        max_seconds=args.max_seconds,
+        progress_every=args.progress_every,
         timestamp_window_seconds=args.timestamp_window_seconds,
         csv_timestamp_offset_seconds=args.csv_timestamp_offset_seconds,
     )
@@ -807,6 +865,7 @@ def main() -> None:
     print(f"Matched flows: {result['matched_flow_count']}")
     print(f"Unmatched selected flows: {result['unmatched_flow_count']}")
     print(f"Flow mapping statuses: {result['mapping_status_counts']}")
+    print(f"Termination reason: {result['termination_reason']}")
     print(f"Selected PCAP written to: {result['output_pcap']}")
     print(f"Packet manifest written to: {result['output_manifest']}")
 
