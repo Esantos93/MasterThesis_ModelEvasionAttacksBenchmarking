@@ -99,7 +99,7 @@ def get_cell(row: dict[str, str], column_map: dict[str, str], canonical_name: st
 def protocol_name(protocol_value: str) -> str:
     return PROTOCOL_NAMES.get(protocol_value, protocol_value)
 
-
+# This function builds a summary of duplicate dataset_flow_id values among the extracted flows.
 def build_duplicate_summary(flows: list[dict[str, Any]]) -> dict[str, Any]:
     dataset_flow_id_counts: Counter[str] = Counter(
         flow["dataset_flow_id"] for flow in flows if flow.get("dataset_flow_id")
