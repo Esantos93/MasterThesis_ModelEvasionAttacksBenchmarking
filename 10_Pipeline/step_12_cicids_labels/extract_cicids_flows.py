@@ -99,6 +99,25 @@ def get_cell(row: dict[str, str], column_map: dict[str, str], canonical_name: st
 def protocol_name(protocol_value: str) -> str:
     return PROTOCOL_NAMES.get(protocol_value, protocol_value)
 
+
+def build_duplicate_summary(flows: list[dict[str, Any]]) -> dict[str, Any]:
+    dataset_flow_id_counts: Counter[str] = Counter(
+        flow["dataset_flow_id"] for flow in flows if flow.get("dataset_flow_id")
+    )
+    duplicate_counts = {
+        dataset_flow_id: count
+        for dataset_flow_id, count in sorted(dataset_flow_id_counts.items())
+        if count > 1
+    }
+
+    return {
+        "unique_dataset_flow_ids": len(dataset_flow_id_counts),
+        "dataset_flow_id_duplicate_groups": len(duplicate_counts),
+        "records_in_dataset_flow_id_duplicate_groups": sum(duplicate_counts.values()),
+        "dataset_flow_id_duplicate_counts": duplicate_counts,
+        "note": "Duplicate dataset_flow_id values can occur because the public CICIDS2017 flow CSV may contain multiple flow records with the same 5-tuple. The pipeline flow_id remains a unique internal identifier for each selected CSV flow record.",
+    }
+
 # This function discovers all CSV files in the configured flow_csv_dir directory. 
 # It checks that the directory exists and contains CSV files, and returns a sorted list of their paths.
 def discover_csv_paths(dataset_config: dict[str, Any]) -> list[Path]:
@@ -225,6 +244,7 @@ def extract_selected_flows(config: dict[str, Any]) -> dict[str, Any]:
             "column_maps": column_maps,
             "flow_csv_encoding": FLOW_CSV_ENCODING,
             "flow_csv_delimiter": FLOW_CSV_DELIMITER,
+            "duplicate_summary": build_duplicate_summary(flows),
             "matching_scope": "CSV flow selection only. Packet-to-flow mapping is performed in step_13_traffic_selection.",
         },
         "flows": flows,
