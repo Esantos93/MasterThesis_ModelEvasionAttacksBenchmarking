@@ -33,7 +33,7 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "grouping_mode": "fixed_packet_count",
+    "grouping_policy": "fixed_packet_count",
     "group_size_packets": 25,
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0
