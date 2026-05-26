@@ -153,7 +153,9 @@ def append_flow_once(
 
 def import_scapy() -> dict[str, Any]:
     try:
-        from scapy.all import ICMP, IP, IPv6, PcapReader, PcapWriter, TCP, UDP
+        from scapy.layers.inet import ICMP, IP, TCP, UDP
+        from scapy.layers.inet6 import IPv6
+        from scapy.utils import PcapReader, PcapWriter
     except ImportError as exc:
         raise RuntimeError(
             "Scapy is required for step_13_traffic_selection. Install it in the Ubuntu "
