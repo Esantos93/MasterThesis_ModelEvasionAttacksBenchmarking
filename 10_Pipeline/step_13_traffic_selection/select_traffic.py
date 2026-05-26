@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 import time
@@ -324,7 +323,6 @@ def build_selected_packet_record(
     selected_packet_index: int,
     matched_flows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    packet_bytes = bytes(packet)
     packet_id = f"packet_{selected_packet_index:06d}"
     candidate_flow_ids = [str(flow.get("flow_id", "")) for flow in matched_flows]
     timestamp_epoch_pcap = float(getattr(packet, "time", 0.0))
@@ -334,8 +332,7 @@ def build_selected_packet_record(
         "packet_id": packet_id,
         "original_packet_number": original_packet_number,
         "timestamp_epoch_pcap": timestamp_epoch_pcap,
-        "packet_sha256": hashlib.sha256(packet_bytes).hexdigest(),
-        "packet_length_bytes": len(packet_bytes),
+        "packet_length_bytes": len(bytes(packet)),
         "candidate_flow_ids": candidate_flow_ids,
     }
 
