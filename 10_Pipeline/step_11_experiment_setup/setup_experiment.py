@@ -33,7 +33,11 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     require_keys(config["dataset"], ["pcap_path", "flow_csv_dir", "attack_labels"], "dataset")
     require_keys(config["snort"], ["snort_binary", "config_path", "ruleset_path"], "snort")
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
-    require_keys(config["pipeline"], ["target_os", "grouping_policy", "validation_policy"], "pipeline")
+    require_keys(
+        config["pipeline"],
+        ["target_os", "grouping_policy", "traffic_selection_policy", "validation_policy"],
+        "pipeline",
+    )
 
 #If the previous functions are responsible for validating keys in the configuration, 
 #this function is responsible for checking the existance of the values of those keys. 

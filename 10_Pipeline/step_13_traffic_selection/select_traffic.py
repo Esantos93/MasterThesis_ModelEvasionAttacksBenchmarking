@@ -57,6 +57,24 @@ def read_json(path: str | Path) -> Any:
         return json.load(input_file)
 
 
+# This helper resolves a policy name such as conservative_v1 to the JSON file stored beside this script.
+def policy_path_from_name(policy_name: str) -> Path:
+    return Path(__file__).with_name(f"mapping_policy_{policy_name}.json")
+
+
+# This function chooses the mapping policy path. CLI overrides config; config overrides the step default.
+def resolve_mapping_policy_path(config: dict[str, Any], cli_policy_path: str | Path | None) -> Path:
+    if cli_policy_path:
+        return Path(cli_policy_path).expanduser()
+
+    policy_value = str(config.get("pipeline", {}).get("traffic_selection_policy", "")).strip()
+    if not policy_value:
+        return DEFAULT_MAPPING_POLICY_FILE
+    if policy_value.endswith(".json") or "/" in policy_value or "\\" in policy_value:
+        return Path(policy_value).expanduser()
+    return policy_path_from_name(policy_value)
+
+
 # This function writes one compact JSON object per line. It is used for the packet index so that the output stays easier to stream and inspect than a huge JSON array.
 def write_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
     output_path = Path(path)
@@ -320,16 +338,17 @@ def packet_flow_key(packet: Any, scapy: dict[str, Any]) -> tuple[str, str, str, 
 def build_selected_packet_record(
     packet: Any,
     original_packet_number: int,
-    selected_packet_index: int,
+    reduced_packet_index: int,
     matched_flows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    packet_id = f"packet_{selected_packet_index:06d}"
+    packet_id = f"packet_{reduced_packet_index:06d}"
     candidate_flow_ids = [str(flow.get("flow_id", "")) for flow in matched_flows]
     timestamp_epoch_pcap = float(getattr(packet, "time", 0.0))
 
-    # packet_id is based on the selected PCAP order, while original_packet_number preserves the position in the source PCAP.
+    # packet_id and reduced_packet_index are based on the reduced PCAP order; original_packet_number preserves the source PCAP position.
     return {
         "packet_id": packet_id,
+        "reduced_packet_index": reduced_packet_index,
         "original_packet_number": original_packet_number,
         "timestamp_epoch_pcap": timestamp_epoch_pcap,
         "packet_length_bytes": len(bytes(packet)),
@@ -338,10 +357,10 @@ def build_selected_packet_record(
 
 
 # This function creates the lightweight packet reference used by the flow-mapping evidence tables.
-def packet_ref_from_record(record: dict[str, Any], selected_packet_index: int) -> dict[str, Any]:
+def packet_ref_from_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "packet_id": record["packet_id"],
-        "selected_packet_index": selected_packet_index,
+        "reduced_packet_index": record["reduced_packet_index"],
         "original_packet_number": record["original_packet_number"],
         "timestamp_epoch": record["timestamp_epoch_pcap"],
     }
@@ -567,13 +586,13 @@ def build_artifact_paths(output_manifest: Path) -> dict[str, Path]:
     if output_manifest.name == "selected_packet_manifest.json":
         return {
             "flow_table": output_manifest.with_name("selected_flow_table.json"),
-            "packet_index": output_manifest.with_name("selected_packet_index.jsonl"),
+            "packet_index": output_manifest.with_name("reduced_packet_index.jsonl"),
             "sample": output_manifest.with_name("selected_packet_manifest_sample.json"),
         }
 
     return {
         "flow_table": output_manifest.with_name(f"{output_manifest.stem}_flow_table.json"),
-        "packet_index": output_manifest.with_name(f"{output_manifest.stem}_packet_index.jsonl"),
+        "packet_index": output_manifest.with_name(f"{output_manifest.stem}_reduced_packet_index.jsonl"),
         "sample": output_manifest.with_name(f"{output_manifest.stem}_sample.json"),
     }
 
@@ -631,7 +650,7 @@ def select_packets(
     protocol_counts: Counter[str] = Counter()
     packets_seen = 0
     packets_with_ip_key = 0
-    selected_packet_index = 0
+    reduced_packet_index = 0
     selection_truncated = False
     termination_reason = "source_pcap_exhausted"
     start_monotonic = time.monotonic()
@@ -647,7 +666,7 @@ def select_packets(
                     print(
                         "Progress: "
                         f"source_packets_seen={packets_seen}, "
-                        f"selected_packets={selected_packet_index}, "
+                        f"selected_packets={reduced_packet_index}, "
                         f"elapsed_seconds={elapsed_seconds}",
                         flush=True,
                     )
@@ -671,16 +690,16 @@ def select_packets(
                 if not matched_flows:
                     continue
 
-                selected_packet_index += 1
+                reduced_packet_index += 1
                 writer.write(packet)
                 record = build_selected_packet_record(
                     packet=packet,
                     original_packet_number=original_packet_number,
-                    selected_packet_index=selected_packet_index,
+                    reduced_packet_index=reduced_packet_index,
                     matched_flows=matched_flows,
                 )
                 selected_packets.append(record)
-                packet_ref = packet_ref_from_record(record, selected_packet_index)
+                packet_ref = packet_ref_from_record(record)
 
                 # Store lightweight packet references per flow. These references are later used to evaluate duplicate flow rows.
                 protocol_counts[packet_key[4]] += 1
@@ -689,7 +708,7 @@ def select_packets(
                     matched_flow_counts[flow_id] += 1
                     flow_packet_refs[flow_id].append(packet_ref)
 
-                if max_packets is not None and selected_packet_index >= max_packets:
+                if max_packets is not None and reduced_packet_index >= max_packets:
                     selection_truncated = True
                     termination_reason = "max_selected_packets"
                     break
@@ -784,7 +803,7 @@ def run_selection(
     csv_timestamp_offset_seconds: float | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
-    mapping_policy = load_mapping_policy(mapping_policy_path)
+    mapping_policy = load_mapping_policy(resolve_mapping_policy_path(config, mapping_policy_path))
     paths = default_paths(config)
     flow_manifest_file = Path(flow_manifest_path) if flow_manifest_path else paths["flow_manifest"]
     output_pcap_file = Path(output_pcap) if output_pcap else paths["output_pcap"]
@@ -890,7 +909,7 @@ def parse_cli_args() -> argparse.Namespace:
     )
     add(
         "--mapping-policy-file",
-        help="Path to a JSON packet mapping policy. Defaults to mapping_policy_conservative_v1.json.",
+        help="Optional JSON packet mapping policy override. Defaults to pipeline.traffic_selection_policy.",
     )
     add(
         "--matching-policy",

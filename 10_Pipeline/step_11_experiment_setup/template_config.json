@@ -35,6 +35,7 @@
     "target_os": "Ubuntu",
     "grouping_policy": "fixed_packet_count",
     "group_size_packets": 25,
+    "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0
   }
