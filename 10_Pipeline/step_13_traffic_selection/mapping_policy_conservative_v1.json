@@ -7,7 +7,7 @@
     "mapped_unique",
     "mapped_duplicate_distinct_window",
     "ambiguous_duplicate_overlapping",
-    "unmapped_by_time_window",
+    "unassigned_time_window_mismatch",
     "unmapped"
   ],
   "rules": [
@@ -28,7 +28,7 @@
     },
     {
       "case": "multiple_candidates_no_time_window_match",
-      "packet_mapping_status": "unmapped_by_time_window",
+      "packet_mapping_status": "unassigned_time_window_mismatch",
       "assign": []
     },
     {

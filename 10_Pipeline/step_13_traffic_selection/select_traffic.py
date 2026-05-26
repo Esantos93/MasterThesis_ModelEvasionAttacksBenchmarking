@@ -30,7 +30,7 @@ PACKET_MAPPING_STATUSES = [
     "mapped_unique",
     "mapped_duplicate_distinct_window",
     "ambiguous_duplicate_overlapping",
-    "unmapped_by_time_window",
+    "unassigned_time_window_mismatch",
     "unmapped",
 ]
 DEFAULT_MAPPING_POLICY_FILE = Path(__file__).with_name("mapping_policy_conservative_v1.json")
@@ -630,7 +630,7 @@ def packet_status_and_assignment(
         return "mapped_duplicate_distinct_window", time_window_matches
     if len(time_window_matches) > 1:
         return "ambiguous_duplicate_overlapping", []
-    return "unmapped_by_time_window", []
+    return "unassigned_time_window_mismatch", []
 
 
 def build_packet_index(
