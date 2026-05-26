@@ -82,8 +82,8 @@ def integer_or_none(value: Any) -> int | None:
         return None
 
 
-# This function derives the selected packet index from the stable step 13 packet_id format.
-def selected_index_from_packet_id(packet_id: Any) -> int:
+# This function derives the reduced packet index from the stable step 13 packet_id format.
+def reduced_index_from_packet_id(packet_id: Any) -> int:
     text = str(packet_id).strip()
     if not text.startswith("packet_"):
         raise ValueError(f"Invalid packet_id in packet index: {packet_id}")
@@ -108,6 +108,12 @@ def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     }
 
 
+# This function decides whether step 14 should export flow metadata and per-packet flow context for the selected experiment.
+def should_include_flow_context(config: dict[str, Any]) -> bool:
+    grouping_policy = str(config.get("pipeline", {}).get("grouping_policy", "")).strip()
+    return grouping_policy != "fixed_packet_count"
+
+
 # This function converts the step 13 flow table into a lookup keyed by flow_id.
 def flow_table_by_id(flow_table: dict[str, Any]) -> dict[str, dict[str, Any]]:
     flows = flow_table.get("flows")
@@ -117,7 +123,10 @@ def flow_table_by_id(flow_table: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 # This function loads the definitive compact_v1 artifacts produced by step 13.
-def load_step13_context(packet_manifest_path: str | Path) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+def load_step13_context(
+    packet_manifest_path: str | Path,
+    include_flow_context: bool,
+) -> tuple[dict[int, dict[str, Any]], dict[str, dict[str, Any]]]:
     manifest_path = Path(packet_manifest_path)
     manifest = read_json(manifest_path)
     if manifest.get("metadata", {}).get("artifact_format") != "compact_v1":
@@ -125,22 +134,21 @@ def load_step13_context(packet_manifest_path: str | Path) -> tuple[dict[int, dic
 
     artifacts = manifest.get("artifacts", {})
     packet_index_path = resolve_artifact_path(manifest_path, artifacts.get("packet_index", ""))
-    flow_table_path = resolve_artifact_path(manifest_path, artifacts.get("flow_table", ""))
     packet_records = read_jsonl(packet_index_path)
-    flow_lookup = flow_table_by_id(read_json(flow_table_path))
+    flow_lookup = {}
+    if include_flow_context:
+        flow_table_path = resolve_artifact_path(manifest_path, artifacts.get("flow_table", ""))
+        flow_lookup = flow_table_by_id(read_json(flow_table_path))
 
-    # Each packet keeps only flow IDs. The flow metadata itself is emitted once in a separate table.
     context_by_index = {}
     for record in packet_records:
-        selected_index = selected_index_from_packet_id(record.get("packet_id", ""))
-        candidate_flow_ids = [str(flow_id) for flow_id in record.get("candidate_flow_ids", [])]
-        assigned_flow_ids = [str(flow_id) for flow_id in record.get("assigned_flow_ids", [])]
-        context_by_index[selected_index] = {
+        reduced_index = reduced_index_from_packet_id(record.get("packet_id", ""))
+        context_by_index[reduced_index] = {
             **record,
-        "reduced_packet_index": selected_index,
+            "reduced_packet_index": reduced_index,
         }
 
-    return context_by_index, {"flows": [flow_lookup[flow_id] for flow_id in sorted(flow_lookup)]}
+    return context_by_index, flow_lookup
 
 
 # This function extracts Ethernet fields using the same direct style as the original 90_Testing prototype.
@@ -241,34 +249,9 @@ def extract_payload_hex(packet: Any, scapy: dict[str, Any]) -> str:
     return bytes_to_hex(bytes(payload))
 
 
-# This function estimates JSON size using the same compact separators later used for grouping estimates.
+# This function estimates JSON size with compact separators without changing the record itself.
 def compact_record_size(record: dict[str, Any]) -> int:
     return len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-
-
-# This function estimates the JSON size of fixed packet-count groups before step 15 exists.
-def estimate_group_sizes(records: list[dict[str, Any]], group_size_packets: int) -> dict[str, Any]:
-    if group_size_packets <= 0 or not records:
-        return {
-            "group_size_packets": group_size_packets,
-            "group_count": 0,
-            "min_group_json_bytes": 0,
-            "max_group_json_bytes": 0,
-            "average_group_json_bytes": 0,
-        }
-
-    sizes = []
-    for start in range(0, len(records), group_size_packets):
-        group_doc = {"traffic": records[start : start + group_size_packets]}
-        sizes.append(len(json.dumps(group_doc, sort_keys=True, separators=(",", ":")).encode("utf-8")))
-
-    return {
-        "group_size_packets": group_size_packets,
-        "group_count": len(sizes),
-        "min_group_json_bytes": min(sizes),
-        "max_group_json_bytes": max(sizes),
-        "average_group_json_bytes": round(sum(sizes) / len(sizes), 2),
-    }
 
 
 # This function builds one JSON packet record by combining Scapy packet fields with step 13 identity and flow context.
@@ -276,8 +259,8 @@ def build_json_record(
     packet: Any,
     reduced_packet_index: int,
     packet_context: dict[str, Any],
-    input_pcap: Path,
     include_frame_hex: bool,
+    include_flow_context: bool,
     scapy: dict[str, Any],
 ) -> dict[str, Any]:
     packet_bytes = bytes(packet)
@@ -293,17 +276,27 @@ def build_json_record(
         **extract_transport(packet, scapy),
         "payload_hex": payload_hex,
         "payload_length_bytes": len(payload_hex) // 2,
-        "flow_context": {
+        "packet_length_bytes": len(packet_bytes),
+    }
+    if include_flow_context:
+        record["flow_context"] = {
             "candidate_flow_ids": packet_context.get("candidate_flow_ids", []),
             "assigned_flow_ids": packet_context.get("assigned_flow_ids", []),
             "packet_mapping_status": packet_context.get("packet_mapping_status", ""),
-        },
-        "packet_length_bytes": len(packet_bytes),
-    }
+        }
     if include_frame_hex:
         record["packet_bytes_hex"] = bytes_to_hex(packet_bytes)
-    record["record_size_bytes_compact"] = compact_record_size(record)
     return record
+
+
+# This helper returns the sorted flow IDs referenced by the exported packet records.
+def referenced_flow_ids(records: list[dict[str, Any]]) -> list[str]:
+    flow_ids = set()
+    for record in records:
+        context = record.get("flow_context", {})
+        flow_ids.update(str(flow_id) for flow_id in context.get("candidate_flow_ids", []))
+        flow_ids.update(str(flow_id) for flow_id in context.get("assigned_flow_ids", []))
+    return sorted(flow_ids)
 
 
 # This function reads the selected PCAP and converts each selected packet into a traceable JSON record.
@@ -319,27 +312,28 @@ def convert_pcap_to_json_records(
 
     scapy = import_scapy()
     PcapReader = scapy["PcapReader"]
+    include_flow_context = should_include_flow_context(config)
     input_pcap_path = Path(input_pcap).expanduser()
     if not input_pcap_path.exists():
         raise FileNotFoundError(f"Selected PCAP does not exist: {input_pcap_path}")
 
-    context_by_index, flow_table = load_step13_context(packet_manifest_path)
+    context_by_index, flow_lookup = load_step13_context(packet_manifest_path, include_flow_context)
     records = []
     protocol_counts: Counter[str] = Counter()
 
     with PcapReader(str(input_pcap_path)) as reader:
-        for selected_packet_index, packet in enumerate(reader, start=1):
-            if max_packets is not None and selected_packet_index > max_packets:
+        for reduced_packet_index, packet in enumerate(reader, start=1):
+            if max_packets is not None and reduced_packet_index > max_packets:
                 break
-            packet_context = context_by_index.get(selected_packet_index)
+            packet_context = context_by_index.get(reduced_packet_index)
             if packet_context is None:
-                raise ValueError(f"Step 13 packet index has no record for selected_packet_index={selected_packet_index}.")
+                raise ValueError(f"Step 13 packet index has no record for reduced_packet_index={reduced_packet_index}.")
             record = build_json_record(
                 packet=packet,
-                reduced_packet_index=selected_packet_index,
+                reduced_packet_index=reduced_packet_index,
                 packet_context=packet_context,
-                input_pcap=input_pcap_path,
                 include_frame_hex=include_frame_hex,
+                include_flow_context=include_flow_context,
                 scapy=scapy,
             )
             records.append(record)
@@ -351,14 +345,15 @@ def convert_pcap_to_json_records(
             f"Selected PCAP packet count ({len(records)}) does not match step 13 packet index count ({expected_count})."
         )
 
-    group_size_packets = int(config.get("pipeline", {}).get("group_size_packets", 25))
-    record_sizes = [record["record_size_bytes_compact"] for record in records]
-    return {
+    record_sizes = [compact_record_size(record) for record in records]
+    output = {
         "metadata": {
             "experiment_id": config["experiment"]["experiment_id"],
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "config_source": config.get("_config_path", ""),
             "schema_version": SCHEMA_VERSION,
+            "grouping_policy": config.get("pipeline", {}).get("grouping_policy", ""),
+            "include_flow_context": include_flow_context,
             "source_selected_pcap": str(input_pcap_path),
             "packet_manifest_path": str(packet_manifest_path),
             "packet_count": len(records),
@@ -370,7 +365,6 @@ def convert_pcap_to_json_records(
                 "min": min(record_sizes) if record_sizes else 0,
                 "max": max(record_sizes) if record_sizes else 0,
             },
-            "estimated_group_sizes": estimate_group_sizes(records, group_size_packets),
             "protocol_counts": dict(sorted(protocol_counts.items())),
         },
         "immutable_fields": [
@@ -379,14 +373,18 @@ def convert_pcap_to_json_records(
             "reduced_packet_index",
             "timestamp_epoch_pcap",
         ],
-        "flow_context_fields": [
+        "traffic": records,
+    }
+    if include_flow_context:
+        flow_ids = referenced_flow_ids(records)
+        output["flow_context_fields"] = [
             "candidate_flow_ids",
             "assigned_flow_ids",
             "packet_mapping_status",
-        ],
-        "flows": flow_table["flows"],
-        "traffic": records,
-    }
+        ]
+        output["flows"] = [flow_lookup[flow_id] for flow_id in flow_ids if flow_id in flow_lookup]
+        output["metadata"]["flow_count"] = len(output["flows"])
+    return output
 
 
 # This function runs the full conversion and writes the output JSON artifact.
@@ -421,7 +419,6 @@ def run_conversion(
         "packet_count": packet_json["metadata"]["packet_count"],
         "output_json_size_bytes": output_json_file.stat().st_size,
         "average_record_size_bytes": packet_json["metadata"]["packet_record_size_bytes_compact"]["average"],
-        "estimated_group_sizes": packet_json["metadata"]["estimated_group_sizes"],
     }
 
 
@@ -438,7 +435,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# This is the command-line entry point. It prints the size measurements needed before step 15 and step 17 tuning.
+# This is the command-line entry point. It prints the packet-level conversion summary.
 def main() -> None:
     args = parse_cli_args()
     result = run_conversion(
@@ -449,15 +446,8 @@ def main() -> None:
         include_frame_hex=args.include_frame_hex,
         max_packets=args.max_packets,
     )
-    group_sizes = result["estimated_group_sizes"]
     print(f"Packet JSON records: {result['packet_count']}")
     print(f"Average compact record size: {result['average_record_size_bytes']} bytes")
-    print(
-        "Estimated group size "
-        f"({group_sizes['group_size_packets']} packets): "
-        f"avg={group_sizes['average_group_json_bytes']} bytes, "
-        f"max={group_sizes['max_group_json_bytes']} bytes"
-    )
     print(f"Packet JSON written to: {result['output_json']}")
 
 
