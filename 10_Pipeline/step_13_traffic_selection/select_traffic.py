@@ -18,6 +18,7 @@ from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 
 
+# Protocol names are converted to the same numeric values used by Scapy and by the CICIDS2017 Flow ID field.
 PROTOCOL_NUMBERS = {
     "ICMP": "1",
     "TCP": "6",
@@ -45,16 +46,19 @@ CSV_TIMESTAMP_FORMATS = [
 ]
 
 
+# This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
 def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
 
+# This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
+# This function writes one compact JSON object per line. It is used for the packet index so that the output stays easier to stream and inspect than a huge JSON array.
 def write_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +68,7 @@ def write_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
             output_file.write("\n")
 
 
+# This function loads the packet mapping policy. The policy defines the time-window parameters and the status names used when duplicate flow IDs need to be resolved.
 def load_mapping_policy(policy_path: str | Path | None) -> dict[str, Any]:
     path = Path(policy_path).expanduser() if policy_path else DEFAULT_MAPPING_POLICY_FILE
     policy = read_json(path)
@@ -75,6 +80,7 @@ def load_mapping_policy(policy_path: str | Path | None) -> dict[str, Any]:
     return policy
 
 
+# This function normalises protocol values so that names like TCP and numeric values like 6 are compared consistently.
 def normalise_protocol(value: Any) -> str:
     text = str(value).strip()
     if not text:
@@ -82,6 +88,7 @@ def normalise_protocol(value: Any) -> str:
     return PROTOCOL_NUMBERS.get(text.upper(), text)
 
 
+# This function normalises ports from CSV-like values. Some parsers may expose integer-looking ports as values such as "80.0".
 def normalise_port(value: Any) -> str:
     text = str(value).strip()
     if text.endswith(".0"):
@@ -89,6 +96,7 @@ def normalise_port(value: Any) -> str:
     return text
 
 
+# This function builds the canonical 5-tuple used for packet-to-flow matching.
 def make_flow_key(
     src_ip: Any,
     dst_ip: Any,
@@ -105,11 +113,13 @@ def make_flow_key(
     )
 
 
+# This function reverses a 5-tuple so response-direction packets can be matched to the same selected flow.
 def reverse_flow_key(key: tuple[str, str, str, str, str]) -> tuple[str, str, str, str, str]:
     src_ip, dst_ip, src_port, dst_port, protocol_number = key
     return (dst_ip, src_ip, dst_port, src_port, protocol_number)
 
 
+# This function extracts the 5-tuple from one selected flow record produced by step 12.
 def flow_key_from_manifest_flow(flow: dict[str, Any]) -> tuple[str, str, str, str, str]:
     flow_key = flow.get("flow_key")
     if not isinstance(flow_key, dict):
@@ -124,6 +134,7 @@ def flow_key_from_manifest_flow(flow: dict[str, Any]) -> tuple[str, str, str, st
     )
 
 
+# This function builds an index from 5-tuples to selected flow records. With bidirectional matching, each flow is indexed in both directions.
 def build_flow_index(
     flows: list[dict[str, Any]],
     matching_policy: str,
@@ -140,6 +151,7 @@ def build_flow_index(
     return flow_index
 
 
+# This helper appends a flow to a 5-tuple bucket only once. This avoids duplicates when exact and reversed keys happen to be identical.
 def append_flow_once(
     flow_index: dict[tuple[str, str, str, str, str], list[dict[str, Any]]],
     key: tuple[str, str, str, str, str],
@@ -151,6 +163,7 @@ def append_flow_once(
         bucket.append(flow)
 
 
+# This function imports the Scapy classes used by the selector. The import is delayed so --help and basic parsing can work before Scapy is installed.
 def import_scapy() -> dict[str, Any]:
     try:
         from scapy.layers.inet import ICMP, IP, TCP, UDP
@@ -172,27 +185,16 @@ def import_scapy() -> dict[str, Any]:
     }
 
 
-def packet_timestamp_fields(packet: Any) -> dict[str, Any]:
-    timestamp_epoch = float(getattr(packet, "time", 0.0))
-    return {
-        "timestamp_epoch": timestamp_epoch,
-        "timestamp_iso_utc": datetime.fromtimestamp(timestamp_epoch, tz=timezone.utc).isoformat(),
-    }
-
-
-def timestamp_iso(timestamp_epoch: float) -> str:
-    return datetime.fromtimestamp(timestamp_epoch, tz=timezone.utc).isoformat()
-
-
+# This function parses the CSV timestamp using all supported CICIDS2017 formats and applies the configured offset before comparing it with PCAP time.
 def parse_flow_timestamp_candidates(
     value: Any,
     csv_timestamp_offset_seconds: float,
-) -> list[dict[str, Any]]:
+) -> list[float]:
     text = str(value).strip()
     if not text:
         return []
 
-    candidates_by_epoch: dict[float, dict[str, Any]] = {}
+    candidates = set()
     for timestamp_format in CSV_TIMESTAMP_FORMATS:
         try:
             parsed = datetime.strptime(text, timestamp_format)
@@ -200,22 +202,18 @@ def parse_flow_timestamp_candidates(
             continue
 
         parsed = parsed.replace(tzinfo=timezone.utc)
+        # The offset compensates for the empirical mismatch between CICFlowMeter CSV timestamps and PCAP timestamps.
         timestamp_epoch = parsed.timestamp() + csv_timestamp_offset_seconds
-        candidates_by_epoch[timestamp_epoch] = {
-            "raw_timestamp": text,
-            "format": timestamp_format,
-            "timestamp_epoch": timestamp_epoch,
-            "timestamp_iso_utc": timestamp_iso(timestamp_epoch),
-            "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
-        }
+        candidates.add(timestamp_epoch)
 
-    return [candidates_by_epoch[key] for key in sorted(candidates_by_epoch)]
+    return sorted(candidates)
 
 
+# This function chooses the timestamp interpretation closest to the packet range for a flow. This matters when a CSV timestamp format is ambiguous.
 def choose_timestamp_candidate(
-    candidates: list[dict[str, Any]],
+    candidates: list[float],
     packet_refs: list[dict[str, Any]],
-) -> dict[str, Any] | None:
+) -> float | None:
     if not candidates or not packet_refs:
         return None
 
@@ -225,8 +223,7 @@ def choose_timestamp_candidate(
 
     best_candidate = None
     best_distance = None
-    for candidate in candidates:
-        candidate_time = float(candidate["timestamp_epoch"])
+    for candidate_time in candidates:
         if first_packet_time <= candidate_time <= last_packet_time:
             distance = 0.0
         else:
@@ -234,12 +231,12 @@ def choose_timestamp_candidate(
 
         if best_distance is None or distance < best_distance:
             best_distance = distance
-            best_candidate = dict(candidate)
-            best_candidate["distance_to_packet_range_seconds"] = round(distance, 6)
+            best_candidate = candidate_time
 
     return best_candidate
 
 
+# This function selects the packet references that fall inside the time window around a CSV-derived flow timestamp.
 def packet_refs_inside_window(
     packet_refs: list[dict[str, Any]],
     center_epoch: float,
@@ -254,36 +251,7 @@ def packet_refs_inside_window(
     ]
 
 
-def packet_ref_summary(packet_refs: list[dict[str, Any]]) -> dict[str, Any]:
-    if not packet_refs:
-        return {
-            "packet_count": 0,
-            "first_packet": None,
-            "last_packet": None,
-            "first_timestamp_iso_utc": "",
-            "last_timestamp_iso_utc": "",
-        }
-
-    sorted_refs = sorted(packet_refs, key=lambda ref: int(ref["selected_packet_index"]))
-    first = sorted_refs[0]
-    last = sorted_refs[-1]
-    return {
-        "packet_count": len(sorted_refs),
-        "first_packet": {
-            "packet_id": first["packet_id"],
-            "selected_packet_index": first["selected_packet_index"],
-            "original_packet_number": first["original_packet_number"],
-        },
-        "last_packet": {
-            "packet_id": last["packet_id"],
-            "selected_packet_index": last["selected_packet_index"],
-            "original_packet_number": last["original_packet_number"],
-        },
-        "first_timestamp_iso_utc": timestamp_iso(float(first["timestamp_epoch"])),
-        "last_timestamp_iso_utc": timestamp_iso(float(last["timestamp_epoch"])),
-    }
-
-
+# This function groups selected step 12 records by dataset_flow_id. Duplicates are handled here instead of being discarded.
 def build_dataset_flow_groups(flows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for flow in flows:
@@ -292,10 +260,12 @@ def build_dataset_flow_groups(flows: list[dict[str, Any]]) -> dict[str, list[dic
     return dict(groups)
 
 
+# This helper extracts only the CSV file name so policy offsets do not depend on machine-specific absolute paths.
 def source_csv_basename(flow: dict[str, Any]) -> str:
     return Path(str(flow.get("source_csv", ""))).name
 
 
+# This function resolves the timestamp offset for a flow. A CLI value overrides the per-source-CSV policy values.
 def get_flow_timestamp_offset_seconds(
     flow: dict[str, Any],
     csv_timestamp_offset_seconds: float | None,
@@ -309,6 +279,7 @@ def get_flow_timestamp_offset_seconds(
     return 0.0
 
 
+# This function extracts the packet 5-tuple from a Scapy packet. Non-IP packets return None and are not selected.
 def packet_flow_key(packet: Any, scapy: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
     IP = scapy["IP"]
     IPv6 = scapy["IPv6"]
@@ -329,6 +300,7 @@ def packet_flow_key(packet: Any, scapy: dict[str, Any]) -> tuple[str, str, str, 
     else:
         return None
 
+    # TCP and UDP carry ports, while ICMP is matched only by IP endpoints and protocol number.
     src_port = ""
     dst_port = ""
     if TCP in packet:
@@ -345,83 +317,43 @@ def packet_flow_key(packet: Any, scapy: dict[str, Any]) -> tuple[str, str, str, 
     return make_flow_key(src_ip, dst_ip, src_port, dst_port, protocol_number)
 
 
-def format_flow_key(key: tuple[str, str, str, str, str] | None) -> dict[str, str]:
-    if key is None:
-        return {
-            "src_ip": "",
-            "dst_ip": "",
-            "src_port": "",
-            "dst_port": "",
-            "protocol_number": "",
-        }
-    src_ip, dst_ip, src_port, dst_port, protocol_number = key
-    return {
-        "src_ip": src_ip,
-        "dst_ip": dst_ip,
-        "src_port": src_port,
-        "dst_port": dst_port,
-        "protocol_number": protocol_number,
-    }
-
-
-def flow_reference(flow: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "flow_id": flow.get("flow_id", ""),
-        "dataset_flow_id": flow.get("dataset_flow_id", ""),
-        "label": flow.get("label", ""),
-        "label_normalised": flow.get("label_normalised", ""),
-        "source_csv": flow.get("source_csv", ""),
-        "source_row_number": flow.get("source_row_number", ""),
-        "flow_key": flow.get("flow_key", {}),
-    }
-
-
-def build_packet_record(
+# This function builds the compact selected-packet record used internally and later written to packet_index.jsonl.
+def build_selected_packet_record(
     packet: Any,
     original_packet_number: int,
     selected_packet_index: int,
-    pcap_path: Path,
-    packet_key: tuple[str, str, str, str, str],
     matched_flows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     packet_bytes = bytes(packet)
     packet_id = f"packet_{selected_packet_index:06d}"
-    matched_flow_ids = [str(flow.get("flow_id", "")) for flow in matched_flows]
-    dataset_flow_ids = [str(flow.get("dataset_flow_id", "")) for flow in matched_flows]
-    source_labels = [str(flow.get("label", "")) for flow in matched_flows]
+    candidate_flow_ids = [str(flow.get("flow_id", "")) for flow in matched_flows]
+    timestamp_epoch_pcap = float(getattr(packet, "time", 0.0))
 
+    # packet_id is based on the selected PCAP order, while original_packet_number preserves the position in the source PCAP.
     return {
         "packet_id": packet_id,
-        "record_id": packet_id,
-        "selected_packet_index": selected_packet_index,
         "original_packet_number": original_packet_number,
-        "original_pcap_path": str(pcap_path),
+        "timestamp_epoch_pcap": timestamp_epoch_pcap,
         "packet_sha256": hashlib.sha256(packet_bytes).hexdigest(),
         "packet_length_bytes": len(packet_bytes),
-        "flow_id": matched_flow_ids[0] if matched_flow_ids else "",
-        "matched_flow_ids": matched_flow_ids,
-        "dataset_flow_ids": dataset_flow_ids,
-        "source_labels": source_labels,
-        "flow_key": format_flow_key(packet_key),
-        "timestamps": packet_timestamp_fields(packet),
-        "matched_flows": [flow_reference(flow) for flow in matched_flows],
+        "candidate_flow_ids": candidate_flow_ids,
     }
 
 
-def build_packet_ref(record: dict[str, Any]) -> dict[str, Any]:
-    timestamps = record.get("timestamps", {})
+# This function creates the lightweight packet reference used by the flow-mapping evidence tables.
+def packet_ref_from_record(record: dict[str, Any], selected_packet_index: int) -> dict[str, Any]:
     return {
         "packet_id": record["packet_id"],
-        "selected_packet_index": record["selected_packet_index"],
+        "selected_packet_index": selected_packet_index,
         "original_packet_number": record["original_packet_number"],
-        "timestamp_epoch": timestamps.get("timestamp_epoch", 0.0),
+        "timestamp_epoch": record["timestamp_epoch_pcap"],
     }
 
 
-def build_initial_flow_mapping(
+# This function builds the first mapping evidence for one flow: all 5-tuple candidate packets and the subset inside its timestamp window.
+def build_flow_mapping(
     flow: dict[str, Any],
     packet_refs: list[dict[str, Any]],
-    duplicate_group_size: int,
     timestamp_window_seconds: float,
     csv_timestamp_offset_seconds: float | None,
     csv_timestamp_offsets_by_source_csv: dict[str, Any],
@@ -440,33 +372,17 @@ def build_initial_flow_mapping(
     if chosen_timestamp is not None:
         window_packet_refs = packet_refs_inside_window(
             packet_refs,
-            center_epoch=float(chosen_timestamp["timestamp_epoch"]),
+            center_epoch=chosen_timestamp,
             window_seconds=timestamp_window_seconds,
         )
 
+    # The mapping status is assigned later after comparing this flow with the other records sharing the same dataset_flow_id.
     return {
         "flow_id": flow.get("flow_id", ""),
-        "dataset_flow_id": flow.get("dataset_flow_id", ""),
-        "source_csv": flow.get("source_csv", ""),
-        "source_row_number": flow.get("source_row_number", ""),
-        "label": flow.get("label", ""),
-        "timestamp": flow.get("timestamp", ""),
-        "flow_key": flow.get("flow_key", {}),
-        "duplicate_dataset_flow_id_group_size": duplicate_group_size,
-        "timestamp_candidates": timestamp_candidates,
         "chosen_timestamp": chosen_timestamp,
-        "timestamp_window_seconds": timestamp_window_seconds,
-        "resolved_csv_timestamp_offset_seconds": resolved_offset,
-        "csv_timestamp_offset_source": (
-            "cli_global_override"
-            if csv_timestamp_offset_seconds is not None
-            else f"source_csv:{source_csv_basename(flow)}"
-        ),
-        "candidate_5tuple_packet_summary": packet_ref_summary(packet_refs),
-        "time_window_packet_summary": packet_ref_summary(window_packet_refs),
+        "candidate_packet_count": len(packet_refs),
         "time_window_packet_ids": [ref["packet_id"] for ref in window_packet_refs],
         "mapping_status": "",
-        "mapping_notes": [],
     }
 
 
@@ -477,19 +393,20 @@ def resolve_flow_mappings(
     csv_timestamp_offset_seconds: float | None,
     csv_timestamp_offsets_by_source_csv: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    # This function resolves mapping evidence at flow level. It does not force ambiguous packets into a single flow.
     dataset_flow_groups = build_dataset_flow_groups(flows)
     mappings_by_flow_id: dict[str, dict[str, Any]] = {}
 
     for dataset_flow_id, group_flows in dataset_flow_groups.items():
+        # Each dataset_flow_id group is evaluated separately because duplicate dataset_flow_id values are the source of ambiguity.
         duplicate_group_size = len(group_flows)
         group_mappings = []
         for flow in group_flows:
             flow_id = str(flow.get("flow_id", ""))
             packet_refs = flow_packet_refs.get(flow_id, [])
-            mapping = build_initial_flow_mapping(
+            mapping = build_flow_mapping(
                 flow=flow,
                 packet_refs=packet_refs,
-                duplicate_group_size=duplicate_group_size,
                 timestamp_window_seconds=timestamp_window_seconds,
                 csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
                 csv_timestamp_offsets_by_source_csv=csv_timestamp_offsets_by_source_csv,
@@ -497,23 +414,20 @@ def resolve_flow_mappings(
             group_mappings.append(mapping)
 
         if duplicate_group_size == 1:
+            # If the dataset_flow_id is unique, the 5-tuple evidence is enough for flow-level mapping.
             mapping = group_mappings[0]
-            if mapping["candidate_5tuple_packet_summary"]["packet_count"] == 0:
+            if mapping["candidate_packet_count"] == 0:
                 mapping["mapping_status"] = "unmapped"
-                mapping["mapping_notes"].append("No packets matched this flow's 5-tuple.")
             else:
                 mapping["mapping_status"] = "mapped_unique"
-                mapping["time_window_packet_summary"] = mapping["candidate_5tuple_packet_summary"]
                 mapping["time_window_packet_ids"] = [
                     ref["packet_id"]
                     for ref in flow_packet_refs.get(str(mapping["flow_id"]), [])
                 ]
-                mapping["mapping_notes"].append(
-                    "Dataset flow ID is unique in the selected manifest; all 5-tuple matched packets are assigned."
-                )
             mappings_by_flow_id[str(mapping["flow_id"])] = mapping
             continue
 
+        # For duplicate dataset_flow_id groups, the time-window packet sets show whether the duplicated CSV rows can be separated.
         window_sets = {
             str(mapping["flow_id"]): set(mapping["time_window_packet_ids"])
             for mapping in group_mappings
@@ -525,6 +439,7 @@ def resolve_flow_mappings(
 
         overlapping_flow_ids: set[str] = set()
         if complete_timestamp_mapping:
+            # Overlap means two duplicate flow records claim at least one of the same packets after applying timestamp windows.
             for left_index, left_mapping in enumerate(group_mappings):
                 left_id = str(left_mapping["flow_id"])
                 for right_mapping in group_mappings[left_index + 1 :]:
@@ -534,87 +449,22 @@ def resolve_flow_mappings(
                         overlapping_flow_ids.add(right_id)
 
         for mapping in group_mappings:
+            # The statuses here describe flow-level evidence. The final per-packet status is computed later in build_packet_index().
             flow_id = str(mapping["flow_id"])
-            if mapping["candidate_5tuple_packet_summary"]["packet_count"] == 0:
+            if mapping["candidate_packet_count"] == 0:
                 mapping["mapping_status"] = "unmapped"
-                mapping["mapping_notes"].append("No packets matched this duplicate flow's 5-tuple.")
             elif not complete_timestamp_mapping:
                 mapping["mapping_status"] = "ambiguous_duplicate_dataset_flow_id"
-                if mapping["chosen_timestamp"] is None:
-                    mapping["mapping_notes"].append("CSV timestamp could not be parsed or aligned to PCAP timestamps.")
-                if not window_sets[flow_id]:
-                    mapping["mapping_notes"].append("No 5-tuple matched packets fell inside the timestamp window.")
             elif flow_id in overlapping_flow_ids:
                 mapping["mapping_status"] = "ambiguous_duplicate_overlapping"
-                mapping["mapping_notes"].append(
-                    "Timestamp-window packet set overlaps with another selected record sharing the same dataset_flow_id."
-                )
             else:
                 mapping["mapping_status"] = "mapped_duplicate_distinct_window"
-                mapping["mapping_notes"].append(
-                    "Duplicate dataset_flow_id was separated by CSV timestamp and PCAP packet timestamp window."
-                )
             mappings_by_flow_id[flow_id] = mapping
 
     return [mappings_by_flow_id[str(flow.get("flow_id", ""))] for flow in flows]
 
 
-def enrich_packet_records_with_mapping(
-    selected_packets: list[dict[str, Any]],
-    flow_mappings: list[dict[str, Any]],
-    flow_lookup: dict[str, dict[str, Any]],
-) -> None:
-    resolved_flow_ids_by_packet: dict[str, list[str]] = defaultdict(list)
-    mapping_status_by_flow_id = {
-        str(mapping["flow_id"]): mapping["mapping_status"]
-        for mapping in flow_mappings
-    }
-
-    for mapping in flow_mappings:
-        status = mapping["mapping_status"]
-        if status not in {"mapped_unique", "mapped_duplicate_distinct_window", "mapped_duplicate_overlapping"}:
-            continue
-        for packet_id in mapping["time_window_packet_ids"]:
-            resolved_flow_ids_by_packet[packet_id].append(str(mapping["flow_id"]))
-
-    for record in selected_packets:
-        candidate_flow_ids = list(record.get("matched_flow_ids", []))
-        record["candidate_flow_ids_5tuple"] = candidate_flow_ids
-        record["candidate_dataset_flow_ids_5tuple"] = list(record.get("dataset_flow_ids", []))
-        record["candidate_matched_flows_5tuple"] = list(record.get("matched_flows", []))
-        record["candidate_flow_mapping_statuses"] = {
-            flow_id: mapping_status_by_flow_id.get(flow_id, "")
-            for flow_id in candidate_flow_ids
-        }
-
-        resolved_flow_ids = [
-            flow_id
-            for flow_id in resolved_flow_ids_by_packet.get(record["packet_id"], [])
-            if flow_id in candidate_flow_ids
-        ]
-        if not resolved_flow_ids:
-            record["mapping_resolution"] = "candidate_5tuple_only_unresolved"
-            continue
-
-        resolved_flows = [
-            flow_lookup[flow_id]
-            for flow_id in resolved_flow_ids
-            if flow_id in flow_lookup
-        ]
-        record["mapping_resolution"] = "resolved_by_unique_or_timestamp_window"
-        record["flow_id"] = resolved_flow_ids[0]
-        record["matched_flow_ids"] = resolved_flow_ids
-        record["dataset_flow_ids"] = [
-            str(flow.get("dataset_flow_id", ""))
-            for flow in resolved_flows
-        ]
-        record["source_labels"] = [
-            str(flow.get("label", ""))
-            for flow in resolved_flows
-        ]
-        record["matched_flows"] = [flow_reference(flow) for flow in resolved_flows]
-
-
+# This function writes one compact flow table row per selected flow_id from step 12. Packet records refer to this table by flow_id.
 def build_flow_table(flows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "metadata": {
@@ -641,16 +491,18 @@ def build_flow_table(flows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# This function applies the conservative packet assignment policy using the candidate flow IDs and each flow's timestamp-window packet set.
 def packet_status_and_assignment(
     packet_record: dict[str, Any],
     time_window_packet_ids_by_flow_id: dict[str, set[str]],
 ) -> tuple[str, list[str]]:
-    candidate_flow_ids = [str(flow_id) for flow_id in packet_record.get("matched_flow_ids", [])]
+    candidate_flow_ids = [str(flow_id) for flow_id in packet_record.get("candidate_flow_ids", [])]
     if not candidate_flow_ids:
         return "unmapped", []
     if len(candidate_flow_ids) == 1:
         return "mapped_unique", candidate_flow_ids
 
+    # Multiple candidates means the 5-tuple alone is not enough. The timestamp window can assign the packet only if exactly one candidate contains it.
     packet_id = packet_record["packet_id"]
     time_window_matches = [
         flow_id
@@ -664,6 +516,7 @@ def packet_status_and_assignment(
     return "unassigned_time_window_mismatch", []
 
 
+# This function converts the selected packet records into the final compact JSONL index used by later steps.
 def build_packet_index(
     selected_packets: list[dict[str, Any]],
     flow_mappings: list[dict[str, Any]],
@@ -676,25 +529,17 @@ def build_packet_index(
     status_counts: Counter[str] = Counter()
 
     for record in selected_packets:
+        # Each packet keeps candidates and assigned flows separately so later steps can preserve ambiguity instead of hiding it.
         packet_mapping_status, assigned_flow_ids = packet_status_and_assignment(record, time_window_packet_ids_by_flow_id)
         status_counts[packet_mapping_status] += 1
-        timestamps = record.get("timestamps", {})
-        packet_index.append(
-            {
-                "packet_id": record["packet_id"],
-                "original_packet_number": record["original_packet_number"],
-                "timestamp_epoch_pcap": timestamps.get("timestamp_epoch", 0.0),
-                "packet_sha256": record["packet_sha256"],
-                "packet_length_bytes": record["packet_length_bytes"],
-                "candidate_flow_ids": [str(flow_id) for flow_id in record.get("matched_flow_ids", [])],
-                "assigned_flow_ids": assigned_flow_ids,
-                "packet_mapping_status": packet_mapping_status,
-            }
-        )
+        record["assigned_flow_ids"] = assigned_flow_ids
+        record["packet_mapping_status"] = packet_mapping_status
+        packet_index.append(record)
 
     return packet_index, status_counts
 
 
+# This function creates a small JSON sample for human inspection without opening the full packet index.
 def build_manifest_sample(
     metadata: dict[str, Any],
     flow_table: dict[str, Any],
@@ -702,6 +547,7 @@ def build_manifest_sample(
 ) -> dict[str, Any]:
     examples_by_status = {}
     for packet in packet_index:
+        # Keep the first example for each status so the sample covers the main mapping cases.
         status = packet["packet_mapping_status"]
         if status not in examples_by_status:
             examples_by_status[status] = packet
@@ -719,6 +565,7 @@ def build_manifest_sample(
     }
 
 
+# This function chooses the companion artifact names derived from the selected_packet_manifest path.
 def build_artifact_paths(output_manifest: Path) -> dict[str, Path]:
     if output_manifest.name == "selected_packet_manifest.json":
         return {
@@ -734,6 +581,7 @@ def build_artifact_paths(output_manifest: Path) -> dict[str, Path]:
     }
 
 
+# This helper stores artifact paths relative to the manifest folder when possible, making the manifest portable with its output directory.
 def path_for_manifest(path: Path, base_dir: Path) -> str:
     try:
         return str(path.relative_to(base_dir))
@@ -741,6 +589,7 @@ def path_for_manifest(path: Path, base_dir: Path) -> str:
         return str(path)
 
 
+# This function checks the minimum config and manifest structure required before scanning the PCAP.
 def validate_inputs(config: dict[str, Any], flow_manifest: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "dataset"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
@@ -763,6 +612,7 @@ def select_packets(
     csv_timestamp_offset_seconds: float | None,
     csv_timestamp_offsets_by_source_csv: dict[str, Any],
 ) -> dict[str, Any]:
+    # This is the main packet selection function. It scans the source PCAP once and writes matching packets to a reduced PCAP.
     validate_inputs(config, flow_manifest)
     scapy = import_scapy()
     PcapReader = scapy["PcapReader"]
@@ -773,6 +623,7 @@ def select_packets(
         raise FileNotFoundError(f"Configured PCAP does not exist: {pcap_path}")
 
     flows = flow_manifest["flows"]
+    # The index lets each packet lookup be a direct 5-tuple lookup instead of comparing against every selected flow.
     flow_index = build_flow_index(flows, matching_policy)
     output_pcap_path = Path(output_pcap)
     output_pcap_path.parent.mkdir(parents=True, exist_ok=True)
@@ -792,6 +643,7 @@ def select_packets(
     try:
         with PcapReader(str(pcap_path)) as reader:
             for original_packet_number, packet in enumerate(reader, start=1):
+                # original_packet_number preserves the packet position in the original Thursday PCAP.
                 packets_seen += 1
                 if progress_every > 0 and packets_seen % progress_every == 0:
                     elapsed_seconds = round(time.monotonic() - start_monotonic, 1)
@@ -813,6 +665,7 @@ def select_packets(
                     termination_reason = "max_seconds"
                     break
 
+                # Packets are selected only when their 5-tuple matches at least one malicious flow selected by step 12.
                 packet_key = packet_flow_key(packet, scapy)
                 if packet_key is None:
                     continue
@@ -823,17 +676,16 @@ def select_packets(
 
                 selected_packet_index += 1
                 writer.write(packet)
-                record = build_packet_record(
+                record = build_selected_packet_record(
                     packet=packet,
                     original_packet_number=original_packet_number,
                     selected_packet_index=selected_packet_index,
-                    pcap_path=pcap_path,
-                    packet_key=packet_key,
                     matched_flows=matched_flows,
                 )
                 selected_packets.append(record)
-                packet_ref = build_packet_ref(record)
+                packet_ref = packet_ref_from_record(record, selected_packet_index)
 
+                # Store lightweight packet references per flow. These references are later used to evaluate duplicate flow rows.
                 protocol_counts[packet_key[4]] += 1
                 for flow in matched_flows:
                     flow_id = str(flow.get("flow_id", ""))
@@ -847,6 +699,7 @@ def select_packets(
     finally:
         writer.close()
 
+    # After the scan, resolve mapping evidence and compress the output into separate flow and packet artifacts.
     flow_mappings = resolve_flow_mappings(
         flows=flows,
         flow_packet_refs=dict(flow_packet_refs),
@@ -862,13 +715,12 @@ def select_packets(
         for flow in flows
         if matched_flow_counts[str(flow.get("flow_id", ""))] == 0
     ]
-    flow_mapping_status_counts = Counter(mapping["mapping_status"] for mapping in flow_mappings)
 
+    # Metadata records the exact policy and parameters used so PRE/POST traceability can be audited later.
     metadata = {
             "experiment_id": config["experiment"]["experiment_id"],
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "config_source": config.get("_config_path", ""),
-            "source_flow_manifest": flow_manifest.get("metadata", {}),
             "source_pcap": str(pcap_path),
             "selected_pcap": str(output_pcap_path),
             "artifact_format": "compact_v1",
@@ -885,22 +737,13 @@ def select_packets(
                 },
             },
             "matching_policy": matching_policy,
-            "matching_scope": (
-                "Packets are matched by 5-tuple against selected CICFlowMeter rows. "
-                "The bidirectional policy also matches response-direction packets. "
-                "Duplicate dataset_flow_id records are then assigned according to the configured mapping policy."
-            ),
             "max_packets": max_packets,
             "max_source_packets": max_source_packets,
             "max_seconds": max_seconds,
             "progress_every": progress_every,
-            "selection_truncated_by_max_packets": selection_truncated,
+            "selection_truncated": selection_truncated,
             "termination_reason": termination_reason,
             "elapsed_seconds": round(time.monotonic() - start_monotonic, 3),
-            "timestamp_window_seconds": timestamp_window_seconds,
-            "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
-            "csv_timestamp_offsets_by_source_csv": csv_timestamp_offsets_by_source_csv,
-            "packet_mapping_statuses": PACKET_MAPPING_STATUSES,
             "packets_seen": packets_seen,
             "packets_with_ip_key": packets_with_ip_key,
             "selected_packet_count": len(selected_packets),
@@ -909,12 +752,7 @@ def select_packets(
             "unmatched_flow_count": len(unmatched_flow_ids),
             "unmatched_flow_ids": unmatched_flow_ids,
             "packet_mapping_status_counts": dict(sorted(packet_mapping_status_counts.items())),
-            "flow_mapping_evidence_status_counts": dict(sorted(flow_mapping_status_counts.items())),
             "protocol_number_counts": dict(sorted(protocol_counts.items())),
-            "duplicate_flow_key_policy": (
-                "If multiple selected flow rows share the same 5-tuple, the packet is selected once. "
-                "The packet index preserves candidate flow IDs and assigned flow IDs according to the mapping policy."
-            ),
     }
     return {
         "metadata": metadata,
@@ -923,6 +761,7 @@ def select_packets(
     }
 
 
+# This function returns the default input and output paths derived from the experiment directory created in step 11.
 def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
@@ -932,6 +771,7 @@ def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     }
 
 
+# This function orchestrates the whole step: load config, resolve paths, run selection, and write compact artifacts.
 def run_selection(
     config_path: str | Path,
     flow_manifest_path: str | Path | None,
@@ -963,6 +803,7 @@ def run_selection(
         if csv_timestamp_offset_seconds is not None
         else None
     )
+    # If no global CLI offset is provided, per-source-CSV offsets from the policy are used by get_flow_timestamp_offset_seconds().
     csv_timestamp_offsets_by_source_csv = mapping_policy.get("csv_timestamp_offsets_by_source_csv", {})
     if not isinstance(csv_timestamp_offsets_by_source_csv, dict):
         raise ValueError("mapping policy csv_timestamp_offsets_by_source_csv must be an object when present.")
@@ -991,6 +832,7 @@ def run_selection(
         "sample": str(artifact_paths["sample"]),
     }
     manifest_base_dir = output_manifest_file.parent
+    # The top-level manifest stays small and points to the heavier flow table and packet index.
     compact_manifest = {
         "metadata": metadata,
         "artifacts": {
@@ -1009,6 +851,7 @@ def run_selection(
         },
     }
 
+    # The flow table and packet index are separated to avoid repeating flow metadata for every packet.
     write_json(artifact_paths["flow_table"], result["flow_table"])
     write_jsonl(artifact_paths["packet_index"], result["packet_index"])
     write_json(
@@ -1031,76 +874,70 @@ def run_selection(
     }
 
 
+# This function defines the CLI arguments used for full runs and smoke tests.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Select malicious CICIDS2017 packets from a PCAP.")
-    parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
-    parser.add_argument(
+    add = parser.add_argument
+    add("--config", required=True, help="Path to the experiment JSON config.")
+    add(
         "--flow-manifest",
         help="Path to selected_flows_manifest.json. Defaults to the experiment 01_labels folder.",
     )
-    parser.add_argument(
+    add(
         "--output-pcap",
         help="Path for the reduced selected PCAP. Defaults to the experiment 02_selected_traffic folder.",
     )
-    parser.add_argument(
+    add(
         "--output-manifest",
         help="Path for selected_packet_manifest.json. Defaults to the experiment 02_selected_traffic folder.",
     )
-    parser.add_argument(
+    add(
         "--mapping-policy-file",
-        help=(
-            "Path to a JSON packet mapping policy. Defaults to "
-            "step_13_traffic_selection/mapping_policy_conservative_v1.json."
-        ),
+        help="Path to a JSON packet mapping policy. Defaults to mapping_policy_conservative_v1.json.",
     )
-    parser.add_argument(
+    add(
         "--matching-policy",
         choices=MATCHING_POLICIES,
         default="bidirectional_5tuple",
         help="Packet-to-flow matching policy.",
     )
-    parser.add_argument(
+    add(
         "--max-packets",
         type=int,
         help="Optional cap on selected packets for smoke tests. The full benchmark should omit this.",
     )
-    parser.add_argument(
+    add(
         "--max-source-packets",
         type=int,
         help="Optional cap on packets scanned from the source PCAP for quick smoke tests.",
     )
-    parser.add_argument(
+    add(
         "--max-seconds",
         type=float,
         help="Optional wall-clock limit in seconds for quick smoke tests.",
     )
-    parser.add_argument(
+    add(
         "--progress-every",
         type=int,
         default=100000,
         help="Print progress after this many source packets. Use 0 to disable. Defaults to 100000.",
     )
-    parser.add_argument(
+    add(
         "--timestamp-window-seconds",
         type=float,
         default=None,
-        help=(
-            "Half-window around each CSV flow timestamp used to separate duplicate dataset_flow_id "
-            "records. Defaults to the mapping policy value."
-        ),
+        help="Half-window around each CSV flow timestamp. Defaults to the mapping policy value.",
     )
-    parser.add_argument(
+    add(
         "--csv-timestamp-offset-seconds",
         type=float,
         default=None,
-        help=(
-            "Optional offset applied to parsed CSV timestamps before comparing them with PCAP "
-            "packet timestamps. Defaults to the mapping policy value."
-        ),
+        help="Optional global offset applied to parsed CSV timestamps before PCAP timestamp comparison.",
     )
     return parser.parse_args()
 
 
+# This is the command-line entry point. It runs the selector and prints the paths and summary counts needed for the diary.
 def main() -> None:
     args = parse_cli_args()
     result = run_selection(
