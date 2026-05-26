@@ -18,7 +18,6 @@ from common.io_utils import write_json
 
 
 SCHEMA_VERSION = "packet_json_v2"
-STEP_17_DEFAULT_PREFLIGHT_LIMIT_BYTES = 20480
 
 
 # This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
@@ -118,7 +117,7 @@ def flow_table_by_id(flow_table: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 # This function loads the definitive compact_v1 artifacts produced by step 13.
-def load_step13_context(packet_manifest_path: str | Path) -> dict[int, dict[str, Any]]:
+def load_step13_context(packet_manifest_path: str | Path) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
     manifest_path = Path(packet_manifest_path)
     manifest = read_json(manifest_path)
     if manifest.get("metadata", {}).get("artifact_format") != "compact_v1":
@@ -130,33 +129,18 @@ def load_step13_context(packet_manifest_path: str | Path) -> dict[int, dict[str,
     packet_records = read_jsonl(packet_index_path)
     flow_lookup = flow_table_by_id(read_json(flow_table_path))
 
-    # Each packet record keeps candidate and assigned flow IDs. Flow table fields are attached once here for step 14 output.
+    # Each packet keeps only flow IDs. The flow metadata itself is emitted once in a separate table.
     context_by_index = {}
     for record in packet_records:
         selected_index = selected_index_from_packet_id(record.get("packet_id", ""))
         candidate_flow_ids = [str(flow_id) for flow_id in record.get("candidate_flow_ids", [])]
         assigned_flow_ids = [str(flow_id) for flow_id in record.get("assigned_flow_ids", [])]
-        trace_flow_ids = assigned_flow_ids if assigned_flow_ids else candidate_flow_ids
-        trace_flows = [flow_lookup[flow_id] for flow_id in trace_flow_ids if flow_id in flow_lookup]
-
         context_by_index[selected_index] = {
             **record,
-            "selected_packet_index": selected_index,
-            "flow_id": assigned_flow_ids[0] if len(assigned_flow_ids) == 1 else "",
-            "dataset_flow_ids": sorted({str(flow.get("dataset_flow_id", "")) for flow in trace_flows}),
-            "source_labels": sorted({str(flow.get("label", "")) for flow in trace_flows}),
-            "source_csv_rows": [
-                {
-                    "flow_id": flow.get("flow_id", ""),
-                    "source_csv": flow.get("source_csv", ""),
-                    "source_row_number": flow.get("source_row_number", ""),
-                    "label": flow.get("label", ""),
-                }
-                for flow in trace_flows
-            ],
+        "reduced_packet_index": selected_index,
         }
 
-    return context_by_index
+    return context_by_index, {"flows": [flow_lookup[flow_id] for flow_id in sorted(flow_lookup)]}
 
 
 # This function extracts Ethernet fields using the same direct style as the original 90_Testing prototype.
@@ -257,15 +241,6 @@ def extract_payload_hex(packet: Any, scapy: dict[str, Any]) -> str:
     return bytes_to_hex(bytes(payload))
 
 
-# This function returns the packet timestamp using the PCAP timestamp as the authoritative source.
-def packet_timestamp_fields(packet: Any) -> dict[str, Any]:
-    timestamp_epoch = float(getattr(packet, "time", 0.0))
-    return {
-        "timestamp_epoch_pcap": timestamp_epoch,
-        "timestamp_iso_utc": datetime.fromtimestamp(timestamp_epoch, tz=timezone.utc).isoformat(),
-    }
-
-
 # This function estimates JSON size using the same compact separators later used for grouping estimates.
 def compact_record_size(record: dict[str, Any]) -> int:
     return len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
@@ -296,10 +271,10 @@ def estimate_group_sizes(records: list[dict[str, Any]], group_size_packets: int)
     }
 
 
-# This function builds one JSON packet record by combining Scapy packet fields with step 13 traceability context.
+# This function builds one JSON packet record by combining Scapy packet fields with step 13 identity and flow context.
 def build_json_record(
     packet: Any,
-    selected_packet_index: int,
+    reduced_packet_index: int,
     packet_context: dict[str, Any],
     input_pcap: Path,
     include_frame_hex: bool,
@@ -310,42 +285,23 @@ def build_json_record(
     payload_hex = extract_payload_hex(packet, scapy)
     record = {
         "packet_id": packet_id,
-        "record_id": packet_id,
         "original_packet_number": packet_context.get("original_packet_number", ""),
-        "selected_packet_index": selected_packet_index,
-        "flow_id": packet_context.get("flow_id", ""),
-        "candidate_flow_ids": packet_context.get("candidate_flow_ids", []),
-        "assigned_flow_ids": packet_context.get("assigned_flow_ids", []),
-        "packet_mapping_status": packet_context.get("packet_mapping_status", ""),
-        "dataset_flow_ids": packet_context.get("dataset_flow_ids", []),
-        "source_labels": packet_context.get("source_labels", []),
+        "reduced_packet_index": reduced_packet_index,
+        "timestamp_epoch_pcap": packet_context.get("timestamp_epoch_pcap", 0.0),
         **extract_ethernet(packet),
         **extract_ip(packet, scapy),
         **extract_transport(packet, scapy),
         "payload_hex": payload_hex,
         "payload_length_bytes": len(payload_hex) // 2,
-        "identity": {
-            "packet_id": packet_id,
-            "original_packet_number": packet_context.get("original_packet_number", ""),
-            "selected_packet_index": selected_packet_index,
-            "packet_mapping_status": packet_context.get("packet_mapping_status", ""),
+        "flow_context": {
             "candidate_flow_ids": packet_context.get("candidate_flow_ids", []),
             "assigned_flow_ids": packet_context.get("assigned_flow_ids", []),
-            "source_csv_rows": packet_context.get("source_csv_rows", []),
+            "packet_mapping_status": packet_context.get("packet_mapping_status", ""),
         },
-        "immutable": {
-            "selected_pcap_path": str(input_pcap),
-            "packet_length_bytes": len(packet_bytes),
-            **packet_timestamp_fields(packet),
-        },
-        "reconstruction": {
-            "source_selected_pcap": str(input_pcap),
-            "source_selected_packet_index": selected_packet_index,
-            "requires_original_selected_pcap": not include_frame_hex,
-            "packet_bytes_hex": bytes_to_hex(packet_bytes) if include_frame_hex else "",
-            "checksum_policy": "Recalculate checksums and lengths during reconstruction after modifications.",
-        },
+        "packet_length_bytes": len(packet_bytes),
     }
+    if include_frame_hex:
+        record["packet_bytes_hex"] = bytes_to_hex(packet_bytes)
     record["record_size_bytes_compact"] = compact_record_size(record)
     return record
 
@@ -367,7 +323,7 @@ def convert_pcap_to_json_records(
     if not input_pcap_path.exists():
         raise FileNotFoundError(f"Selected PCAP does not exist: {input_pcap_path}")
 
-    context_by_index = load_step13_context(packet_manifest_path)
+    context_by_index, flow_table = load_step13_context(packet_manifest_path)
     records = []
     protocol_counts: Counter[str] = Counter()
 
@@ -380,7 +336,7 @@ def convert_pcap_to_json_records(
                 raise ValueError(f"Step 13 packet index has no record for selected_packet_index={selected_packet_index}.")
             record = build_json_record(
                 packet=packet,
-                selected_packet_index=selected_packet_index,
+                reduced_packet_index=selected_packet_index,
                 packet_context=packet_context,
                 input_pcap=input_pcap_path,
                 include_frame_hex=include_frame_hex,
@@ -415,9 +371,20 @@ def convert_pcap_to_json_records(
                 "max": max(record_sizes) if record_sizes else 0,
             },
             "estimated_group_sizes": estimate_group_sizes(records, group_size_packets),
-            "step_17_default_preflight_limit_bytes": STEP_17_DEFAULT_PREFLIGHT_LIMIT_BYTES,
             "protocol_counts": dict(sorted(protocol_counts.items())),
         },
+        "immutable_fields": [
+            "packet_id",
+            "original_packet_number",
+            "reduced_packet_index",
+            "timestamp_epoch_pcap",
+        ],
+        "flow_context_fields": [
+            "candidate_flow_ids",
+            "assigned_flow_ids",
+            "packet_mapping_status",
+        ],
+        "flows": flow_table["flows"],
         "traffic": records,
     }
 
