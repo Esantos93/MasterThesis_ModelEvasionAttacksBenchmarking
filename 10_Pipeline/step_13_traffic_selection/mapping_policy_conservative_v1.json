@@ -1,0 +1,40 @@
+{
+  "policy_id": "conservative_v1",
+  "description": "Assign packets to selected CICIDS2017 flows only when the 5-tuple mapping is unique or exactly one duplicate candidate matches the configured timestamp window.",
+  "timestamp_window_seconds": 60,
+  "csv_timestamp_offset_seconds": 0,
+  "packet_statuses": [
+    "mapped_unique",
+    "mapped_duplicate_distinct_window",
+    "ambiguous_duplicate_overlapping",
+    "unmapped_by_time_window",
+    "unmapped"
+  ],
+  "rules": [
+    {
+      "case": "single_candidate_flow",
+      "packet_mapping_status": "mapped_unique",
+      "assign": "candidate_flow_ids"
+    },
+    {
+      "case": "multiple_candidates_one_time_window_match",
+      "packet_mapping_status": "mapped_duplicate_distinct_window",
+      "assign": "time_window_matched_flow_id"
+    },
+    {
+      "case": "multiple_candidates_multiple_time_window_matches",
+      "packet_mapping_status": "ambiguous_duplicate_overlapping",
+      "assign": []
+    },
+    {
+      "case": "multiple_candidates_no_time_window_match",
+      "packet_mapping_status": "unmapped_by_time_window",
+      "assign": []
+    },
+    {
+      "case": "no_candidate_flow",
+      "packet_mapping_status": "unmapped",
+      "assign": []
+    }
+  ]
+}

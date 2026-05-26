@@ -26,13 +26,15 @@ PROTOCOL_NUMBERS = {
 }
 
 MATCHING_POLICIES = ["bidirectional_5tuple", "exact_5tuple"]
-FLOW_MAPPING_STATUSES = [
+PACKET_MAPPING_STATUSES = [
     "mapped_unique",
     "mapped_duplicate_distinct_window",
-    "mapped_duplicate_overlapping",
-    "ambiguous_duplicate_dataset_flow_id",
+    "ambiguous_duplicate_overlapping",
+    "unmapped_by_time_window",
     "unmapped",
 ]
+DEFAULT_MAPPING_POLICY_FILE = Path(__file__).with_name("mapping_policy_conservative_v1.json")
+SAMPLE_RECORD_LIMIT = 5
 CSV_TIMESTAMP_FORMATS = [
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M",
@@ -51,6 +53,26 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
+
+
+def write_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as output_file:
+        for record in records:
+            json.dump(record, output_file, sort_keys=True, separators=(",", ":"))
+            output_file.write("\n")
+
+
+def load_mapping_policy(policy_path: str | Path | None) -> dict[str, Any]:
+    path = Path(policy_path).expanduser() if policy_path else DEFAULT_MAPPING_POLICY_FILE
+    policy = read_json(path)
+    if not isinstance(policy, dict):
+        raise ValueError(f"Mapping policy root must be a JSON object: {path}")
+    if not policy.get("policy_id"):
+        raise ValueError(f"Mapping policy must define policy_id: {path}")
+    policy["_policy_path"] = str(path)
+    return policy
 
 
 def normalise_protocol(value: Any) -> str:
@@ -490,7 +512,7 @@ def resolve_flow_mappings(
                 if not window_sets[flow_id]:
                     mapping["mapping_notes"].append("No 5-tuple matched packets fell inside the timestamp window.")
             elif flow_id in overlapping_flow_ids:
-                mapping["mapping_status"] = "mapped_duplicate_overlapping"
+                mapping["mapping_status"] = "ambiguous_duplicate_overlapping"
                 mapping["mapping_notes"].append(
                     "Timestamp-window packet set overlaps with another selected record sharing the same dataset_flow_id."
                 )
@@ -560,6 +582,132 @@ def enrich_packet_records_with_mapping(
         record["matched_flows"] = [flow_reference(flow) for flow in resolved_flows]
 
 
+def build_flow_table(flows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "metadata": {
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "flow_count": len(flows),
+            "description": (
+                "One record per selected step_12 flow_id. Packet records reference these rows "
+                "through candidate_flow_ids and assigned_flow_ids."
+            ),
+        },
+        "flows": [
+            {
+                "flow_id": flow.get("flow_id", ""),
+                "dataset_flow_id": flow.get("dataset_flow_id", ""),
+                "label": flow.get("label", ""),
+                "label_normalised": flow.get("label_normalised", ""),
+                "timestamp_csv": flow.get("timestamp", ""),
+                "source_csv": flow.get("source_csv", ""),
+                "source_row_number": flow.get("source_row_number", ""),
+                "flow_key": flow.get("flow_key", {}),
+            }
+            for flow in flows
+        ],
+    }
+
+
+def packet_status_and_assignment(
+    packet_record: dict[str, Any],
+    time_window_packet_ids_by_flow_id: dict[str, set[str]],
+) -> tuple[str, list[str]]:
+    candidate_flow_ids = [str(flow_id) for flow_id in packet_record.get("matched_flow_ids", [])]
+    if not candidate_flow_ids:
+        return "unmapped", []
+    if len(candidate_flow_ids) == 1:
+        return "mapped_unique", candidate_flow_ids
+
+    packet_id = packet_record["packet_id"]
+    time_window_matches = [
+        flow_id
+        for flow_id in candidate_flow_ids
+        if packet_id in time_window_packet_ids_by_flow_id.get(flow_id, set())
+    ]
+    if len(time_window_matches) == 1:
+        return "mapped_duplicate_distinct_window", time_window_matches
+    if len(time_window_matches) > 1:
+        return "ambiguous_duplicate_overlapping", []
+    return "unmapped_by_time_window", []
+
+
+def build_packet_index(
+    selected_packets: list[dict[str, Any]],
+    flow_mappings: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    time_window_packet_ids_by_flow_id = {
+        str(mapping["flow_id"]): set(mapping.get("time_window_packet_ids", []))
+        for mapping in flow_mappings
+    }
+    packet_index = []
+    status_counts: Counter[str] = Counter()
+
+    for record in selected_packets:
+        packet_mapping_status, assigned_flow_ids = packet_status_and_assignment(record, time_window_packet_ids_by_flow_id)
+        status_counts[packet_mapping_status] += 1
+        timestamps = record.get("timestamps", {})
+        packet_index.append(
+            {
+                "packet_id": record["packet_id"],
+                "original_packet_number": record["original_packet_number"],
+                "timestamp_epoch_pcap": timestamps.get("timestamp_epoch", 0.0),
+                "packet_sha256": record["packet_sha256"],
+                "packet_length_bytes": record["packet_length_bytes"],
+                "candidate_flow_ids": [str(flow_id) for flow_id in record.get("matched_flow_ids", [])],
+                "assigned_flow_ids": assigned_flow_ids,
+                "packet_mapping_status": packet_mapping_status,
+            }
+        )
+
+    return packet_index, status_counts
+
+
+def build_manifest_sample(
+    metadata: dict[str, Any],
+    flow_table: dict[str, Any],
+    packet_index: list[dict[str, Any]],
+) -> dict[str, Any]:
+    examples_by_status = {}
+    for packet in packet_index:
+        status = packet["packet_mapping_status"]
+        if status not in examples_by_status:
+            examples_by_status[status] = packet
+
+    return {
+        "metadata": metadata,
+        "sample_limits": {
+            "first_flows": SAMPLE_RECORD_LIMIT,
+            "first_packets": SAMPLE_RECORD_LIMIT,
+            "examples_per_packet_mapping_status": 1,
+        },
+        "first_flows": flow_table["flows"][:SAMPLE_RECORD_LIMIT],
+        "first_packets": packet_index[:SAMPLE_RECORD_LIMIT],
+        "packet_examples_by_status": examples_by_status,
+    }
+
+
+def build_artifact_paths(output_manifest: Path) -> dict[str, Path]:
+    if output_manifest.name == "selected_packet_manifest.json":
+        return {
+            "flow_table": output_manifest.with_name("selected_flow_table.json"),
+            "packet_index": output_manifest.with_name("selected_packet_index.jsonl"),
+            "sample": output_manifest.with_name("selected_packet_manifest_sample.json"),
+        }
+
+    return {
+        "flow_table": output_manifest.with_name(f"{output_manifest.stem}_flow_table.json"),
+        "packet_index": output_manifest.with_name(f"{output_manifest.stem}_packet_index.jsonl"),
+        "sample": output_manifest.with_name(f"{output_manifest.stem}_sample.json"),
+    }
+
+
+def path_for_manifest(path: Path, base_dir: Path) -> str:
+    try:
+        return str(path.relative_to(base_dir))
+    except ValueError:
+        return str(path)
+
+
 def validate_inputs(config: dict[str, Any], flow_manifest: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "dataset"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
@@ -571,6 +719,7 @@ def validate_inputs(config: dict[str, Any], flow_manifest: dict[str, Any]) -> No
 def select_packets(
     config: dict[str, Any],
     flow_manifest: dict[str, Any],
+    mapping_policy: dict[str, Any],
     matching_policy: str,
     output_pcap: str | Path,
     max_packets: int | None,
@@ -590,7 +739,6 @@ def select_packets(
         raise FileNotFoundError(f"Configured PCAP does not exist: {pcap_path}")
 
     flows = flow_manifest["flows"]
-    flow_lookup = {str(flow.get("flow_id", "")): flow for flow in flows}
     flow_index = build_flow_index(flows, matching_policy)
     output_pcap_path = Path(output_pcap)
     output_pcap_path.parent.mkdir(parents=True, exist_ok=True)
@@ -671,32 +819,40 @@ def select_packets(
         timestamp_window_seconds=timestamp_window_seconds,
         csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
     )
-    enrich_packet_records_with_mapping(
-        selected_packets=selected_packets,
-        flow_mappings=flow_mappings,
-        flow_lookup=flow_lookup,
-    )
+    flow_table = build_flow_table(flows)
+    packet_index, packet_mapping_status_counts = build_packet_index(selected_packets, flow_mappings)
 
     unmatched_flow_ids = [
         str(flow.get("flow_id", ""))
         for flow in flows
         if matched_flow_counts[str(flow.get("flow_id", ""))] == 0
     ]
-    mapping_status_counts = Counter(mapping["mapping_status"] for mapping in flow_mappings)
+    flow_mapping_status_counts = Counter(mapping["mapping_status"] for mapping in flow_mappings)
 
-    return {
-        "metadata": {
+    metadata = {
             "experiment_id": config["experiment"]["experiment_id"],
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "config_source": config.get("_config_path", ""),
             "source_flow_manifest": flow_manifest.get("metadata", {}),
             "source_pcap": str(pcap_path),
             "selected_pcap": str(output_pcap_path),
+            "artifact_format": "compact_v1",
+            "mapping_policy": {
+                "policy_id": mapping_policy.get("policy_id", ""),
+                "source_file": mapping_policy.get("_policy_path", ""),
+                "description": mapping_policy.get("description", ""),
+                "packet_statuses": mapping_policy.get("packet_statuses", PACKET_MAPPING_STATUSES),
+                "rules": mapping_policy.get("rules", []),
+                "resolved_parameters": {
+                    "timestamp_window_seconds": timestamp_window_seconds,
+                    "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
+                },
+            },
             "matching_policy": matching_policy,
             "matching_scope": (
                 "Packets are matched by 5-tuple against selected CICFlowMeter rows. "
                 "The bidirectional policy also matches response-direction packets. "
-                "Duplicate dataset_flow_id records are then analysed with CSV timestamps and PCAP packet timestamps."
+                "Duplicate dataset_flow_id records are then assigned according to the configured mapping policy."
             ),
             "max_packets": max_packets,
             "max_source_packets": max_source_packets,
@@ -707,7 +863,7 @@ def select_packets(
             "elapsed_seconds": round(time.monotonic() - start_monotonic, 3),
             "timestamp_window_seconds": timestamp_window_seconds,
             "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
-            "flow_mapping_statuses": FLOW_MAPPING_STATUSES,
+            "packet_mapping_statuses": PACKET_MAPPING_STATUSES,
             "packets_seen": packets_seen,
             "packets_with_ip_key": packets_with_ip_key,
             "selected_packet_count": len(selected_packets),
@@ -715,16 +871,18 @@ def select_packets(
             "matched_flow_count": len(matched_flow_counts),
             "unmatched_flow_count": len(unmatched_flow_ids),
             "unmatched_flow_ids": unmatched_flow_ids,
-            "mapping_status_counts": dict(sorted(mapping_status_counts.items())),
+            "packet_mapping_status_counts": dict(sorted(packet_mapping_status_counts.items())),
+            "flow_mapping_evidence_status_counts": dict(sorted(flow_mapping_status_counts.items())),
             "protocol_number_counts": dict(sorted(protocol_counts.items())),
             "duplicate_flow_key_policy": (
                 "If multiple selected flow rows share the same 5-tuple, the packet is selected once. "
-                "The manifest preserves candidate 5-tuple matches and records a per-flow mapping status. "
-                "Resolved packet records use timestamp-window mappings when a duplicate can be separated."
+                "The packet index preserves candidate flow IDs and assigned flow IDs according to the mapping policy."
             ),
-        },
-        "flow_mappings": flow_mappings,
-        "packets": selected_packets,
+    }
+    return {
+        "metadata": metadata,
+        "flow_table": flow_table,
+        "packet_index": packet_index,
     }
 
 
@@ -742,44 +900,93 @@ def run_selection(
     flow_manifest_path: str | Path | None,
     output_pcap: str | Path | None,
     output_manifest: str | Path | None,
+    mapping_policy_path: str | Path | None,
     matching_policy: str,
     max_packets: int | None,
     max_source_packets: int | None,
     max_seconds: float | None,
     progress_every: int,
-    timestamp_window_seconds: float,
-    csv_timestamp_offset_seconds: float,
+    timestamp_window_seconds: float | None,
+    csv_timestamp_offset_seconds: float | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
+    mapping_policy = load_mapping_policy(mapping_policy_path)
     paths = default_paths(config)
     flow_manifest_file = Path(flow_manifest_path) if flow_manifest_path else paths["flow_manifest"]
     output_pcap_file = Path(output_pcap) if output_pcap else paths["output_pcap"]
     output_manifest_file = Path(output_manifest) if output_manifest else paths["output_manifest"]
+    artifact_paths = build_artifact_paths(output_manifest_file)
+    resolved_timestamp_window_seconds = (
+        timestamp_window_seconds
+        if timestamp_window_seconds is not None
+        else float(mapping_policy.get("timestamp_window_seconds", 60.0))
+    )
+    resolved_csv_timestamp_offset_seconds = (
+        csv_timestamp_offset_seconds
+        if csv_timestamp_offset_seconds is not None
+        else float(mapping_policy.get("csv_timestamp_offset_seconds", 0.0))
+    )
 
     flow_manifest = read_json(flow_manifest_file)
-    manifest = select_packets(
+    result = select_packets(
         config=config,
         flow_manifest=flow_manifest,
+        mapping_policy=mapping_policy,
         matching_policy=matching_policy,
         output_pcap=output_pcap_file,
         max_packets=max_packets,
         max_source_packets=max_source_packets,
         max_seconds=max_seconds,
         progress_every=progress_every,
-        timestamp_window_seconds=timestamp_window_seconds,
-        csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
+        timestamp_window_seconds=resolved_timestamp_window_seconds,
+        csv_timestamp_offset_seconds=resolved_csv_timestamp_offset_seconds,
     )
-    manifest["metadata"]["flow_manifest_path"] = str(flow_manifest_file)
-    write_json(output_manifest_file, manifest)
+    metadata = result["metadata"]
+    metadata["flow_manifest_path"] = str(flow_manifest_file)
+    metadata["artifacts"] = {
+        "selected_pcap": str(output_pcap_file),
+        "flow_table": str(artifact_paths["flow_table"]),
+        "packet_index": str(artifact_paths["packet_index"]),
+        "sample": str(artifact_paths["sample"]),
+    }
+    manifest_base_dir = output_manifest_file.parent
+    compact_manifest = {
+        "metadata": metadata,
+        "artifacts": {
+            "selected_pcap": path_for_manifest(output_pcap_file, manifest_base_dir),
+            "flow_table": path_for_manifest(artifact_paths["flow_table"], manifest_base_dir),
+            "packet_index": path_for_manifest(artifact_paths["packet_index"], manifest_base_dir),
+            "sample": path_for_manifest(artifact_paths["sample"], manifest_base_dir),
+        },
+        "summary": {
+            "selected_packet_count": metadata["selected_packet_count"],
+            "selected_flow_count": metadata["selected_flow_count"],
+            "matched_flow_count": metadata["matched_flow_count"],
+            "unmatched_flow_count": metadata["unmatched_flow_count"],
+            "packet_mapping_status_counts": metadata["packet_mapping_status_counts"],
+            "termination_reason": metadata["termination_reason"],
+        },
+    }
+
+    write_json(artifact_paths["flow_table"], result["flow_table"])
+    write_jsonl(artifact_paths["packet_index"], result["packet_index"])
+    write_json(
+        artifact_paths["sample"],
+        build_manifest_sample(metadata, result["flow_table"], result["packet_index"]),
+    )
+    write_json(output_manifest_file, compact_manifest)
 
     return {
         "output_pcap": str(output_pcap_file),
         "output_manifest": str(output_manifest_file),
-        "selected_packet_count": manifest["metadata"]["selected_packet_count"],
-        "matched_flow_count": manifest["metadata"]["matched_flow_count"],
-        "unmatched_flow_count": manifest["metadata"]["unmatched_flow_count"],
-        "mapping_status_counts": manifest["metadata"]["mapping_status_counts"],
-        "termination_reason": manifest["metadata"]["termination_reason"],
+        "flow_table": str(artifact_paths["flow_table"]),
+        "packet_index": str(artifact_paths["packet_index"]),
+        "sample": str(artifact_paths["sample"]),
+        "selected_packet_count": metadata["selected_packet_count"],
+        "matched_flow_count": metadata["matched_flow_count"],
+        "unmatched_flow_count": metadata["unmatched_flow_count"],
+        "packet_mapping_status_counts": metadata["packet_mapping_status_counts"],
+        "termination_reason": metadata["termination_reason"],
     }
 
 
@@ -797,6 +1004,13 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-manifest",
         help="Path for selected_packet_manifest.json. Defaults to the experiment 02_selected_traffic folder.",
+    )
+    parser.add_argument(
+        "--mapping-policy-file",
+        help=(
+            "Path to a JSON packet mapping policy. Defaults to "
+            "step_13_traffic_selection/mapping_policy_conservative_v1.json."
+        ),
     )
     parser.add_argument(
         "--matching-policy",
@@ -828,19 +1042,19 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--timestamp-window-seconds",
         type=float,
-        default=60.0,
+        default=None,
         help=(
             "Half-window around each CSV flow timestamp used to separate duplicate dataset_flow_id "
-            "records. Defaults to 60 seconds."
+            "records. Defaults to the mapping policy value."
         ),
     )
     parser.add_argument(
         "--csv-timestamp-offset-seconds",
         type=float,
-        default=0.0,
+        default=None,
         help=(
             "Optional offset applied to parsed CSV timestamps before comparing them with PCAP "
-            "packet timestamps. Defaults to 0."
+            "packet timestamps. Defaults to the mapping policy value."
         ),
     )
     return parser.parse_args()
@@ -853,6 +1067,7 @@ def main() -> None:
         flow_manifest_path=args.flow_manifest,
         output_pcap=args.output_pcap,
         output_manifest=args.output_manifest,
+        mapping_policy_path=args.mapping_policy_file,
         matching_policy=args.matching_policy,
         max_packets=args.max_packets,
         max_source_packets=args.max_source_packets,
@@ -864,10 +1079,13 @@ def main() -> None:
     print(f"Selected packets: {result['selected_packet_count']}")
     print(f"Matched flows: {result['matched_flow_count']}")
     print(f"Unmatched selected flows: {result['unmatched_flow_count']}")
-    print(f"Flow mapping statuses: {result['mapping_status_counts']}")
+    print(f"Packet mapping statuses: {result['packet_mapping_status_counts']}")
     print(f"Termination reason: {result['termination_reason']}")
     print(f"Selected PCAP written to: {result['output_pcap']}")
     print(f"Packet manifest written to: {result['output_manifest']}")
+    print(f"Flow table written to: {result['flow_table']}")
+    print(f"Packet index written to: {result['packet_index']}")
+    print(f"Sample manifest written to: {result['sample']}")
 
 
 if __name__ == "__main__":
