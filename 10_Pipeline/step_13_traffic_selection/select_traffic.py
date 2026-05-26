@@ -292,6 +292,23 @@ def build_dataset_flow_groups(flows: list[dict[str, Any]]) -> dict[str, list[dic
     return dict(groups)
 
 
+def source_csv_basename(flow: dict[str, Any]) -> str:
+    return Path(str(flow.get("source_csv", ""))).name
+
+
+def get_flow_timestamp_offset_seconds(
+    flow: dict[str, Any],
+    csv_timestamp_offset_seconds: float | None,
+    csv_timestamp_offsets_by_source_csv: dict[str, Any],
+) -> float:
+    if csv_timestamp_offset_seconds is not None:
+        return float(csv_timestamp_offset_seconds)
+    source_name = source_csv_basename(flow)
+    if source_name in csv_timestamp_offsets_by_source_csv:
+        return float(csv_timestamp_offsets_by_source_csv[source_name])
+    return 0.0
+
+
 def packet_flow_key(packet: Any, scapy: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
     IP = scapy["IP"]
     IPv6 = scapy["IPv6"]
@@ -406,11 +423,17 @@ def build_initial_flow_mapping(
     packet_refs: list[dict[str, Any]],
     duplicate_group_size: int,
     timestamp_window_seconds: float,
-    csv_timestamp_offset_seconds: float,
+    csv_timestamp_offset_seconds: float | None,
+    csv_timestamp_offsets_by_source_csv: dict[str, Any],
 ) -> dict[str, Any]:
+    resolved_offset = get_flow_timestamp_offset_seconds(
+        flow=flow,
+        csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
+        csv_timestamp_offsets_by_source_csv=csv_timestamp_offsets_by_source_csv,
+    )
     timestamp_candidates = parse_flow_timestamp_candidates(
         flow.get("timestamp", ""),
-        csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
+        csv_timestamp_offset_seconds=resolved_offset,
     )
     chosen_timestamp = choose_timestamp_candidate(timestamp_candidates, packet_refs)
     window_packet_refs = []
@@ -433,6 +456,12 @@ def build_initial_flow_mapping(
         "timestamp_candidates": timestamp_candidates,
         "chosen_timestamp": chosen_timestamp,
         "timestamp_window_seconds": timestamp_window_seconds,
+        "resolved_csv_timestamp_offset_seconds": resolved_offset,
+        "csv_timestamp_offset_source": (
+            "cli_global_override"
+            if csv_timestamp_offset_seconds is not None
+            else f"source_csv:{source_csv_basename(flow)}"
+        ),
         "candidate_5tuple_packet_summary": packet_ref_summary(packet_refs),
         "time_window_packet_summary": packet_ref_summary(window_packet_refs),
         "time_window_packet_ids": [ref["packet_id"] for ref in window_packet_refs],
@@ -445,7 +474,8 @@ def resolve_flow_mappings(
     flows: list[dict[str, Any]],
     flow_packet_refs: dict[str, list[dict[str, Any]]],
     timestamp_window_seconds: float,
-    csv_timestamp_offset_seconds: float,
+    csv_timestamp_offset_seconds: float | None,
+    csv_timestamp_offsets_by_source_csv: dict[str, Any],
 ) -> list[dict[str, Any]]:
     dataset_flow_groups = build_dataset_flow_groups(flows)
     mappings_by_flow_id: dict[str, dict[str, Any]] = {}
@@ -462,6 +492,7 @@ def resolve_flow_mappings(
                 duplicate_group_size=duplicate_group_size,
                 timestamp_window_seconds=timestamp_window_seconds,
                 csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
+                csv_timestamp_offsets_by_source_csv=csv_timestamp_offsets_by_source_csv,
             )
             group_mappings.append(mapping)
 
@@ -729,7 +760,8 @@ def select_packets(
     max_seconds: float | None,
     progress_every: int,
     timestamp_window_seconds: float,
-    csv_timestamp_offset_seconds: float,
+    csv_timestamp_offset_seconds: float | None,
+    csv_timestamp_offsets_by_source_csv: dict[str, Any],
 ) -> dict[str, Any]:
     validate_inputs(config, flow_manifest)
     scapy = import_scapy()
@@ -820,6 +852,7 @@ def select_packets(
         flow_packet_refs=dict(flow_packet_refs),
         timestamp_window_seconds=timestamp_window_seconds,
         csv_timestamp_offset_seconds=csv_timestamp_offset_seconds,
+        csv_timestamp_offsets_by_source_csv=csv_timestamp_offsets_by_source_csv,
     )
     flow_table = build_flow_table(flows)
     packet_index, packet_mapping_status_counts = build_packet_index(selected_packets, flow_mappings)
@@ -848,6 +881,7 @@ def select_packets(
                 "resolved_parameters": {
                     "timestamp_window_seconds": timestamp_window_seconds,
                     "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
+                    "csv_timestamp_offsets_by_source_csv": csv_timestamp_offsets_by_source_csv,
                 },
             },
             "matching_policy": matching_policy,
@@ -865,6 +899,7 @@ def select_packets(
             "elapsed_seconds": round(time.monotonic() - start_monotonic, 3),
             "timestamp_window_seconds": timestamp_window_seconds,
             "csv_timestamp_offset_seconds": csv_timestamp_offset_seconds,
+            "csv_timestamp_offsets_by_source_csv": csv_timestamp_offsets_by_source_csv,
             "packet_mapping_statuses": PACKET_MAPPING_STATUSES,
             "packets_seen": packets_seen,
             "packets_with_ip_key": packets_with_ip_key,
@@ -926,8 +961,11 @@ def run_selection(
     resolved_csv_timestamp_offset_seconds = (
         csv_timestamp_offset_seconds
         if csv_timestamp_offset_seconds is not None
-        else float(mapping_policy.get("csv_timestamp_offset_seconds", 0.0))
+        else None
     )
+    csv_timestamp_offsets_by_source_csv = mapping_policy.get("csv_timestamp_offsets_by_source_csv", {})
+    if not isinstance(csv_timestamp_offsets_by_source_csv, dict):
+        raise ValueError("mapping policy csv_timestamp_offsets_by_source_csv must be an object when present.")
 
     flow_manifest = read_json(flow_manifest_file)
     result = select_packets(
@@ -942,6 +980,7 @@ def run_selection(
         progress_every=progress_every,
         timestamp_window_seconds=resolved_timestamp_window_seconds,
         csv_timestamp_offset_seconds=resolved_csv_timestamp_offset_seconds,
+        csv_timestamp_offsets_by_source_csv=csv_timestamp_offsets_by_source_csv,
     )
     metadata = result["metadata"]
     metadata["flow_manifest_path"] = str(flow_manifest_file)

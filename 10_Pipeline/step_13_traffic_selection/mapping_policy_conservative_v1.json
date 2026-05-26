@@ -3,6 +3,10 @@
   "description": "Assign packets to selected CICIDS2017 flows only when the 5-tuple mapping is unique or exactly one duplicate candidate matches the configured timestamp window.",
   "timestamp_window_seconds": 60,
   "csv_timestamp_offset_seconds": 0,
+  "csv_timestamp_offsets_by_source_csv": {
+    "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv": 10800,
+    "Thursday-WorkingHours-Afternoon-Infiltration.pcap_ISCX.csv": 54000
+  },
   "packet_statuses": [
     "mapped_unique",
     "mapped_duplicate_distinct_window",
