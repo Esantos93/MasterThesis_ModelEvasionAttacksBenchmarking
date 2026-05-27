@@ -151,7 +151,7 @@ def build_baseline_v1_messages(prompt_input_json: dict[str, Any], immutable_fiel
         "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
         "Return the same top-level JSON structure as the input object.\n"
         "Keep the same number of records in the traffic list.\n"
-        f"Preserve these immutable identity fields in every traffic record: {immutable_field_text}.\n"
+        #f"Preserve these immutable identity fields in every traffic record: {immutable_field_text}.\n"
         "Input JSON:\n"
         f"{input_json_text}"
     )
