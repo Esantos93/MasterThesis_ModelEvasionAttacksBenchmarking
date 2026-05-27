@@ -215,9 +215,9 @@ def build_manifest(
     }
 
 
-#This function removes previous group_XXXXXX.json files from the output directory.
-#It avoids leaving stale group files when the grouping step is rerun with a different group size.
-def clear_previous_group_files(output_dir: Path) -> None:
+#This function removes previous Step 15 output JSON files from the output directory.
+#It avoids leaving stale group or manifest files when the grouping step is rerun with a different group size.
+def clear_previous_output_files(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for path in output_dir.glob("group_*.json"):
         path.unlink()
@@ -249,7 +249,7 @@ def run_grouping(
         group_size_packets=effective_group_size,
     )
 
-    clear_previous_group_files(output_group_dir)
+    clear_previous_output_files(output_group_dir)
     group_summaries = []
     for group_index, records in enumerate(groups, start=1):
         group_id = f"group_{group_index:06d}"
