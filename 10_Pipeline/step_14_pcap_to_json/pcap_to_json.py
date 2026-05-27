@@ -102,9 +102,9 @@ def resolve_artifact_path(manifest_path: Path, artifact_value: Any) -> Path:
 def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
-        "input_pcap": experiment_root / "02_selected_traffic" / "selected_malicious_traffic.pcap",
-        "packet_manifest": experiment_root / "02_selected_traffic" / "selected_packet_manifest.json",
-        "output_json": experiment_root / "03_packet_json" / "selected_packet_records.json",
+        "input_pcap": experiment_root / "03_selected_traffic" / "selected_malicious_traffic.pcap",
+        "packet_manifest": experiment_root / "03_selected_traffic" / "selected_packet_manifest.json",
+        "output_json": experiment_root / "04_packet_json" / "selected_packet_records.json",
     }
 
 

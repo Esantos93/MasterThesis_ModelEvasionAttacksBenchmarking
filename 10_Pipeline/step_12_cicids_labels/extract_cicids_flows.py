@@ -258,7 +258,7 @@ def run_extraction(config_path: str | Path, output_path: str | Path | None) -> d
 
     if output_path is None:
         experiment_root = build_experiment_root(config)
-        output_path = experiment_root / "01_labels" / "selected_flows_manifest.json"
+        output_path = experiment_root / "02_labels" / "selected_flows_manifest.json"
 
     write_json(output_path, manifest)
     return {
@@ -274,7 +274,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
     parser.add_argument(
         "--output",
-        help="Optional output path for selected_flows_manifest.json. Defaults to the experiment 01_labels folder.",
+        help="Optional output path for selected_flows_manifest.json. Defaults to the experiment 02_labels folder.",
     )
     return parser.parse_args()
 

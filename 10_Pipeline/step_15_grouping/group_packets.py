@@ -47,8 +47,8 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
-        "input_json": experiment_root / "03_packet_json" / "selected_packet_records.json",
-        "output_dir": experiment_root / "04_groups",
+        "input_json": experiment_root / "04_packet_json" / "selected_packet_records.json",
+        "output_dir": experiment_root / "05_groups",
     }
 
 

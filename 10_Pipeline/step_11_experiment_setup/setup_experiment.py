@@ -95,8 +95,8 @@ def run_setup(config_path: str | Path, check_inputs: bool) -> dict[str, Any]:
 
     config_copy = dict(config)
     config_copy.pop("_config_path", "The config path was not found in the config dictionary, which is unexpected since it should have been added by load_json_config.")
-    write_json(experiment_root / "00_config" / "resolved_config.json", config_copy)
-    write_json(experiment_root / "00_config" / "experiment_metadata.json", metadata)
+    write_json(experiment_root / "01_setup" / "resolved_config.json", config_copy)
+    write_json(experiment_root / "01_setup" / "experiment_metadata.json", metadata)
 
     return metadata
 

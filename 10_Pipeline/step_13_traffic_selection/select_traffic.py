@@ -781,9 +781,9 @@ def select_packets(
 def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
-        "flow_manifest": experiment_root / "01_labels" / "selected_flows_manifest.json",
-        "output_pcap": experiment_root / "02_selected_traffic" / "selected_malicious_traffic.pcap",
-        "output_manifest": experiment_root / "02_selected_traffic" / "selected_packet_manifest.json",
+        "flow_manifest": experiment_root / "02_labels" / "selected_flows_manifest.json",
+        "output_pcap": experiment_root / "03_selected_traffic" / "selected_malicious_traffic.pcap",
+        "output_manifest": experiment_root / "03_selected_traffic" / "selected_packet_manifest.json",
     }
 
 
@@ -897,15 +897,15 @@ def parse_cli_args() -> argparse.Namespace:
     add("--config", required=True, help="Path to the experiment JSON config.")
     add(
         "--flow-manifest",
-        help="Path to selected_flows_manifest.json. Defaults to the experiment 01_labels folder.",
+        help="Path to selected_flows_manifest.json. Defaults to the experiment 02_labels folder.",
     )
     add(
         "--output-pcap",
-        help="Path for the reduced selected PCAP. Defaults to the experiment 02_selected_traffic folder.",
+        help="Path for the reduced selected PCAP. Defaults to the experiment 03_selected_traffic folder.",
     )
     add(
         "--output-manifest",
-        help="Path for selected_packet_manifest.json. Defaults to the experiment 02_selected_traffic folder.",
+        help="Path for selected_packet_manifest.json. Defaults to the experiment 03_selected_traffic folder.",
     )
     add(
         "--mapping-policy-file",
