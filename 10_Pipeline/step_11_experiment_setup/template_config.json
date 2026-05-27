@@ -29,7 +29,11 @@
     "prompt_version": "baseline_v1",
     "temperature": 0.0,
     "top_p": 0.95,
-    "max_tokens": 3000
+    "output_token_margin_percent": 20.0,
+    "context_reserve_tokens": 128,
+    "min_n_ctx": 2048,
+    "max_n_ctx": 32768,
+    "chars_per_token_estimate": 3.0
   },
   "pipeline": {
     "target_os": "Ubuntu",
