@@ -231,6 +231,7 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
             else float(llm_config.get("chars_per_token_estimate", 3.0))
         ),
         "n_gpu_layers": args.n_gpu_layers,
+        "n_threads": args.n_threads,
     }
 
 
@@ -387,13 +388,54 @@ def extract_response_text(response: dict[str, Any]) -> str:
     raise ValueError("llama-cpp-python response did not contain message content.")
 
 
+#This function extracts generated text from one streamed llama-cpp-python chunk.
+def extract_stream_chunk_text(chunk: dict[str, Any]) -> str:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return ""
+    delta = first_choice.get("delta")
+    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+        return delta["content"]
+    if isinstance(first_choice.get("text"), str):
+        return first_choice["text"]
+    return ""
+
+
+#This function reads the packet ids expected in the output from the Step 16 traceability block.
+def expected_packet_ids_from_traceability(prompt_package: dict[str, Any]) -> list[str]:
+    traceability = prompt_package.get("input_traceability", {})
+    trace_records = traceability.get("records", [])
+    packet_ids = []
+    if not isinstance(trace_records, list):
+        return packet_ids
+
+    for trace_record in trace_records:
+        if not isinstance(trace_record, dict):
+            continue
+        identity = trace_record.get("immutable_identity", {})
+        if isinstance(identity, dict) and identity.get("packet_id") is not None:
+            packet_ids.append(str(identity["packet_id"]))
+    return packet_ids
+
+
+#This function estimates packet-level output progress by counting expected packet ids already visible in generated text.
+def count_visible_packet_ids(generated_text: str, expected_packet_ids: list[str]) -> int:
+    return sum(1 for packet_id in expected_packet_ids if packet_id in generated_text)
+
+
 #This function starts a small heartbeat thread while a blocking model generation call is running.
 #It gives terminal feedback even when one prompt takes a long time to finish.
 def start_generation_heartbeat(
     *,
     model_name: str,
     group_id: str,
+    prompt_index: int,
+    total_prompts: int,
     heartbeat_seconds: int,
+    progress_state: dict[str, Any],
 ) -> tuple[threading.Event, threading.Thread | None]:
     stop_event = threading.Event()
     if heartbeat_seconds <= 0:
@@ -401,9 +443,15 @@ def start_generation_heartbeat(
 
     def heartbeat_loop() -> None:
         while not stop_event.wait(heartbeat_seconds):
+            packet_text = ""
+            visible_packet_count = progress_state.get("visible_packet_count")
+            total_packet_count = progress_state.get("total_packet_count")
+            if isinstance(visible_packet_count, int) and isinstance(total_packet_count, int) and total_packet_count > 0:
+                packet_text = f". Observed packet IDs in streamed output: {visible_packet_count}/{total_packet_count}"
             print(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
-                f"{model_name}: still generating response for {group_id}"
+                f"{model_name}: still generating response for prompt/group {prompt_index}/{total_prompts} "
+                f"({group_id}){packet_text}"
             )
 
     thread = threading.Thread(target=heartbeat_loop, daemon=True)
@@ -530,6 +578,8 @@ def run_single_prompt(
     output_dirs: dict[str, Path],
     generation_params: dict[str, Any],
     heartbeat_seconds: int,
+    prompt_index: int,
+    total_prompts: int,
 ) -> dict[str, Any]:
     prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
     group_id = str(prompt_package.get("group_id") or prompt_path.stem.replace(".prompt", ""))
@@ -555,30 +605,50 @@ def run_single_prompt(
             prompt_package=prompt_package,
             base_generation_params=generation_params,
         )
+        expected_packet_ids = expected_packet_ids_from_traceability(prompt_package)
+        progress_state = {
+            "visible_packet_count": 0,
+            "total_packet_count": len(expected_packet_ids),
+        }
         heartbeat_stop, heartbeat_thread = start_generation_heartbeat(
             model_name=model_name,
             group_id=group_id,
+            prompt_index=prompt_index,
+            total_prompts=total_prompts,
             heartbeat_seconds=heartbeat_seconds,
+            progress_state=progress_state,
         )
         try:
-            response = llm.create_chat_completion(
+            response_chunks = llm.create_chat_completion(
                 messages=prompt_package["messages"],
                 temperature=prompt_generation_params["temperature"],
                 top_p=prompt_generation_params["top_p"],
                 max_tokens=prompt_generation_params["max_tokens"],
+                stream=True,
             )
+            raw_parts = []
+            for chunk in response_chunks:
+                chunk_text = extract_stream_chunk_text(chunk)
+                if chunk_text:
+                    raw_parts.append(chunk_text)
+                    if expected_packet_ids:
+                        raw_text_so_far = "".join(raw_parts)
+                        progress_state["visible_packet_count"] = count_visible_packet_ids(
+                            raw_text_so_far,
+                            expected_packet_ids,
+                        )
+            raw_text = "".join(raw_parts)
         finally:
             heartbeat_stop.set()
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=1)
 
-        raw_text = extract_response_text(response)
         write_text(raw_path, raw_text)
         output_paths["raw"] = str(raw_path)
         llama_response_metadata = {
-            key: value
-            for key, value in response.items()
-            if key != "choices"
+            "stream": True,
+            "stream_visible_packet_ids": progress_state["visible_packet_count"],
+            "stream_expected_packet_ids": progress_state["total_packet_count"],
         }
 
         parsed_output = parse_strict_json(raw_text)
@@ -653,12 +723,15 @@ def run_single_prompt(
 def load_llama_model(model_path: Path, generation_params: dict[str, Any]) -> Any:
     from llama_cpp import Llama
 
-    return Llama(
-        model_path=str(model_path),
-        n_ctx=generation_params["n_ctx"],
-        n_gpu_layers=generation_params["n_gpu_layers"],
-        verbose=False,
-    )
+    llama_kwargs = {
+        "model_path": str(model_path),
+        "n_ctx": generation_params["n_ctx"],
+        "n_gpu_layers": generation_params["n_gpu_layers"],
+        "verbose": False,
+    }
+    if generation_params.get("n_threads") is not None:
+        llama_kwargs["n_threads"] = generation_params["n_threads"]
+    return Llama(**llama_kwargs)
 
 
 #This function runs all selected prompts for one selected model.
@@ -691,6 +764,8 @@ def run_model_batch(
             output_dirs=output_dirs,
             generation_params=generation_params,
             heartbeat_seconds=heartbeat_seconds,
+            prompt_index=prompt_index,
+            total_prompts=total_prompts,
         )
         if metadata["status"] == "accepted":
             accepted_count += 1
@@ -857,6 +932,7 @@ def parse_cli_args() -> argparse.Namespace:
         help="Override llm.chars_per_token_estimate for dynamic n_ctx preflight before model loading.",
     )
     parser.add_argument("--n-gpu-layers", type=int, default=-1, help="llama-cpp-python GPU layer count.")
+    parser.add_argument("--n-threads", type=int, help="CPU thread count passed to llama-cpp-python.")
     return parser.parse_args()
 
 
