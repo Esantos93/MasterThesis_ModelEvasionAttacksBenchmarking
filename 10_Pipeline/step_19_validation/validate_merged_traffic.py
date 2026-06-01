@@ -1,0 +1,653 @@
+from __future__ import annotations
+
+import argparse
+import binascii
+import json
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+from common.config import load_json_config, require_keys
+from common.io_utils import write_json
+
+
+VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v1"
+VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v1"
+DEFAULT_IMMUTABLE_FIELDS = [
+    "packet_id",
+    "original_packet_number",
+    "reduced_packet_index",
+    "timestamp_epoch_pcap",
+]
+DEFAULT_REQUIRED_FIELDS = [
+    "packet_id",
+    "original_packet_number",
+    "reduced_packet_index",
+    "timestamp_epoch_pcap",
+    "eth_src",
+    "eth_dst",
+    "eth_type",
+    "src_ip",
+    "dst_ip",
+    "proto",
+    "ip_version",
+    "transport_protocol",
+    "payload_hex",
+    "payload_length_bytes",
+    "packet_length_bytes",
+]
+
+
+def read_json(path: str | Path) -> Any:
+    with Path(path).open("r", encoding="utf-8") as input_file:
+        return json.load(input_file)
+
+
+def build_experiment_root(config: dict[str, Any]) -> Path:
+    experiment = config["experiment"]
+    return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
+
+
+def default_paths(config: dict[str, Any], dataset_label: str) -> dict[str, Path]:
+    experiment_root = build_experiment_root(config)
+    return {
+        "input_json": experiment_root / "08_merged_outputs" / dataset_label / "merged_modified_traffic.json",
+        "output_dir": experiment_root / "09_validation" / dataset_label,
+    }
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    require_keys(config, ["experiment"], "config")
+    require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
+
+
+def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "severity": severity,
+        "reason": reason,
+        "message": message,
+        **extra,
+    }
+
+
+def is_int_like(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def is_number_like(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def validate_payload_hex(record: dict[str, Any]) -> list[dict[str, Any]]:
+    issues = []
+    payload_hex = record.get("payload_hex")
+    if not isinstance(payload_hex, str):
+        return [
+            issue(
+                "error",
+                "payload_hex_not_string",
+                "payload_hex must be a string.",
+                field="payload_hex",
+                actual_type=type(payload_hex).__name__,
+            )
+        ]
+    if len(payload_hex) % 2 != 0:
+        issues.append(
+            issue(
+                "error",
+                "payload_hex_odd_length",
+                "payload_hex must contain an even number of hexadecimal characters.",
+                field="payload_hex",
+                actual_length=len(payload_hex),
+            )
+        )
+    try:
+        binascii.unhexlify(payload_hex)
+    except (binascii.Error, ValueError) as error:
+        issues.append(
+            issue(
+                "error",
+                "payload_hex_invalid",
+                "payload_hex contains non-hexadecimal content.",
+                field="payload_hex",
+                failure_message=str(error),
+            )
+        )
+    expected_length = len(payload_hex) // 2
+    actual_length = record.get("payload_length_bytes")
+    if is_int_like(actual_length) and actual_length != expected_length:
+        issues.append(
+            issue(
+                "warning",
+                "payload_length_bytes_mismatch",
+                "payload_length_bytes does not match payload_hex length.",
+                field="payload_length_bytes",
+                expected_value=expected_length,
+                actual_value=actual_length,
+            )
+        )
+    return issues
+
+
+def validate_flow_context(record: dict[str, Any]) -> list[dict[str, Any]]:
+    if "flow_context" not in record:
+        return []
+    context = record["flow_context"]
+    if not isinstance(context, dict):
+        return [issue("error", "flow_context_not_object", "flow_context must be an object.")]
+
+    issues = []
+    for field in ["candidate_flow_ids", "assigned_flow_ids"]:
+        value = context.get(field)
+        if value is not None and not isinstance(value, list):
+            issues.append(
+                issue(
+                    "error",
+                    "flow_context_list_field_invalid",
+                    f"flow_context.{field} must be a list when present.",
+                    field=f"flow_context.{field}",
+                    actual_type=type(value).__name__,
+                )
+            )
+    status = context.get("packet_mapping_status")
+    if status is not None and not isinstance(status, str):
+        issues.append(
+            issue(
+                "warning",
+                "flow_context_status_not_string",
+                "flow_context.packet_mapping_status should be a string.",
+                field="flow_context.packet_mapping_status",
+                actual_type=type(status).__name__,
+            )
+        )
+    return issues
+
+
+def validate_basic_record_schema(record: Any, record_index: int, required_fields: list[str]) -> list[dict[str, Any]]:
+    if not isinstance(record, dict):
+        return [
+            issue(
+                "error",
+                "traffic_record_not_object",
+                "Every traffic entry must be a JSON object.",
+                record_index=record_index,
+                actual_type=type(record).__name__,
+            )
+        ]
+
+    issues = []
+    for field in required_fields:
+        if field not in record:
+            issues.append(
+                issue(
+                    "error",
+                    "required_field_missing",
+                    f"Required field is missing: {field}",
+                    record_index=record_index,
+                    field=field,
+                )
+            )
+
+    integer_fields = [
+        "original_packet_number",
+        "reduced_packet_index",
+        "eth_type",
+        "proto",
+        "ip_version",
+        "payload_length_bytes",
+        "packet_length_bytes",
+    ]
+    for field in integer_fields:
+        if field in record and record[field] is not None and not is_int_like(record[field]):
+            issues.append(
+                issue(
+                    "error",
+                    "integer_field_invalid",
+                    f"{field} must be an integer or null.",
+                    record_index=record_index,
+                    field=field,
+                    actual_value=record[field],
+                )
+            )
+
+    if "timestamp_epoch_pcap" in record and not is_number_like(record["timestamp_epoch_pcap"]):
+        issues.append(
+            issue(
+                "error",
+                "timestamp_invalid",
+                "timestamp_epoch_pcap must be numeric.",
+                record_index=record_index,
+                field="timestamp_epoch_pcap",
+                actual_value=record["timestamp_epoch_pcap"],
+            )
+        )
+    if "transport_protocol" in record and not isinstance(record["transport_protocol"], str):
+        issues.append(
+            issue(
+                "error",
+                "transport_protocol_invalid",
+                "transport_protocol must be a string.",
+                record_index=record_index,
+                field="transport_protocol",
+                actual_value=record["transport_protocol"],
+            )
+        )
+    if isinstance(record.get("packet_length_bytes"), int) and record["packet_length_bytes"] < 0:
+        issues.append(
+            issue(
+                "error",
+                "packet_length_negative",
+                "packet_length_bytes cannot be negative.",
+                record_index=record_index,
+                field="packet_length_bytes",
+                actual_value=record["packet_length_bytes"],
+            )
+        )
+
+    issues.extend(validate_payload_hex(record))
+    issues.extend(validate_flow_context(record))
+    for item in issues:
+        item.setdefault("record_index", record_index)
+        if isinstance(record, dict):
+            item.setdefault("packet_id", record.get("packet_id"))
+    return issues
+
+
+def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    if not reference_json_path:
+        return {}, DEFAULT_IMMUTABLE_FIELDS
+    reference_json = read_json(reference_json_path)
+    if not isinstance(reference_json, dict) or not isinstance(reference_json.get("traffic"), list):
+        raise ValueError(f"Reference JSON must contain a top-level traffic list: {reference_json_path}")
+    immutable_fields = reference_json.get("immutable_fields", DEFAULT_IMMUTABLE_FIELDS)
+    if not isinstance(immutable_fields, list):
+        immutable_fields = DEFAULT_IMMUTABLE_FIELDS
+    reference_by_packet_id = {}
+    for record in reference_json["traffic"]:
+        if isinstance(record, dict) and record.get("packet_id") is not None:
+            reference_by_packet_id[str(record["packet_id"])] = record
+    return reference_by_packet_id, [str(field) for field in immutable_fields]
+
+
+def validate_against_reference(
+    *,
+    record: dict[str, Any],
+    record_index: int,
+    reference_by_packet_id: dict[str, dict[str, Any]],
+    immutable_fields: list[str],
+) -> list[dict[str, Any]]:
+    if not reference_by_packet_id:
+        return []
+    packet_id = record.get("packet_id")
+    if packet_id is None:
+        return []
+    reference = reference_by_packet_id.get(str(packet_id))
+    if reference is None:
+        return [
+            issue(
+                "error",
+                "packet_id_not_in_reference",
+                "Merged packet_id is not present in the original reference JSON.",
+                record_index=record_index,
+                packet_id=packet_id,
+            )
+        ]
+
+    issues = []
+    for field in immutable_fields:
+        expected_value = reference.get(field)
+        actual_value = record.get(field)
+        if actual_value != expected_value:
+            issues.append(
+                issue(
+                    "error",
+                    "immutable_field_changed",
+                    "Immutable field differs from the original reference JSON.",
+                    record_index=record_index,
+                    packet_id=packet_id,
+                    field=field,
+                    expected_value=expected_value,
+                    actual_value=actual_value,
+                )
+            )
+    return issues
+
+
+def group_key_for_record(record: Any, record_index: int) -> tuple[str, str | None, str | None]:
+    if not isinstance(record, dict):
+        return (f"unassigned_record_{record_index}", None, None)
+    merge_trace = record.get("_merge_trace")
+    if isinstance(merge_trace, dict):
+        condition = merge_trace.get("condition")
+        group_id = merge_trace.get("group_id")
+        if condition is not None and group_id is not None:
+            return (f"{condition}::{group_id}", str(condition), str(group_id))
+    group_id = record.get("group_id")
+    if group_id is not None:
+        return (f"unknown_condition::{group_id}", None, str(group_id))
+    return (f"unassigned_record_{record_index}", None, None)
+
+
+def validate_merged_traffic(
+    *,
+    merged_json: dict[str, Any],
+    reference_by_packet_id: dict[str, dict[str, Any]],
+    immutable_fields: list[str],
+    required_fields: list[str],
+) -> dict[str, Any]:
+    root_issues = []
+    if not isinstance(merged_json, dict):
+        return {
+            "root_issues": [issue("error", "merged_root_not_object", "Merged JSON root must be an object.")],
+            "packet_results": [],
+            "group_results": [],
+            "accepted_packets": [],
+            "rejected_packets": [],
+            "invalid_traffic_groups": [],
+            "failed_modification_groups": [],
+            "summary": {"accepted_packet_count": 0, "rejected_packet_count": 0, "error_count": 1, "warning_count": 0},
+        }
+
+    traffic = merged_json.get("traffic")
+    if not isinstance(traffic, list):
+        return {
+            "root_issues": [issue("error", "traffic_list_missing", "Merged JSON must contain a top-level traffic list.")],
+            "packet_results": [],
+            "group_results": [],
+            "accepted_packets": [],
+            "rejected_packets": [],
+            "invalid_traffic_groups": [],
+            "failed_modification_groups": [],
+            "summary": {"accepted_packet_count": 0, "rejected_packet_count": 0, "error_count": 1, "warning_count": 0},
+        }
+
+    group_outcomes = merged_json.get("group_outcomes", {})
+    if not isinstance(group_outcomes, dict):
+        group_outcomes = {}
+    failed_modification_groups = group_outcomes.get("failed_modification_groups", [])
+    if not isinstance(failed_modification_groups, list):
+        failed_modification_groups = []
+
+    packet_id_counts = Counter(
+        str(record.get("packet_id"))
+        for record in traffic
+        if isinstance(record, dict) and record.get("packet_id") is not None
+    )
+    duplicate_packet_ids = {packet_id for packet_id, count in packet_id_counts.items() if count > 1}
+    preliminary_packets = []
+    groups: dict[str, dict[str, Any]] = {}
+    error_count = 0
+    warning_count = 0
+
+    for record_index, record in enumerate(traffic, start=1):
+        record_issues = validate_basic_record_schema(record, record_index, required_fields)
+        group_key, condition, group_id = group_key_for_record(record, record_index)
+        if group_key not in groups:
+            groups[group_key] = {
+                "group_key": group_key,
+                "condition": condition,
+                "group_id": group_id,
+                "packet_ids": [],
+                "record_indexes": [],
+                "issues": [],
+            }
+        if isinstance(record, dict):
+            packet_id = record.get("packet_id")
+            if packet_id is not None:
+                groups[group_key]["packet_ids"].append(packet_id)
+            if packet_id is not None and str(packet_id) in duplicate_packet_ids:
+                record_issues.append(
+                    issue(
+                        "error",
+                        "duplicate_packet_id",
+                        "packet_id appears more than once in merged traffic.",
+                        record_index=record_index,
+                        packet_id=packet_id,
+                    )
+                )
+            record_issues.extend(
+                validate_against_reference(
+                    record=record,
+                    record_index=record_index,
+                    reference_by_packet_id=reference_by_packet_id,
+                    immutable_fields=immutable_fields,
+                )
+            )
+
+        has_error = any(item["severity"] == "error" for item in record_issues)
+        error_count += sum(1 for item in record_issues if item["severity"] == "error")
+        warning_count += sum(1 for item in record_issues if item["severity"] == "warning")
+        groups[group_key]["record_indexes"].append(record_index)
+        groups[group_key]["issues"].extend(record_issues)
+        preliminary_packets.append(
+            {
+                "record": record,
+                "group_key": group_key,
+                "record_has_error": has_error,
+                "issues": record_issues,
+                "record_index": record_index,
+            }
+        )
+
+    group_results = []
+    invalid_group_keys = set()
+    for group in groups.values():
+        group_has_error = any(item["severity"] == "error" for item in group["issues"])
+        group_status = "Invalid Traffic" if group_has_error else "Accepted for Reconstruction"
+        if group_has_error:
+            invalid_group_keys.add(group["group_key"])
+        group_results.append(
+            {
+                "group_key": group["group_key"],
+                "condition": group["condition"],
+                "group_id": group["group_id"],
+                "status": group_status,
+                "invalid_traffic": group_has_error,
+                "packet_count": len(group["record_indexes"]),
+                "packet_ids": group["packet_ids"],
+                "record_indexes": group["record_indexes"],
+                "issues": group["issues"],
+            }
+        )
+
+    packet_results = []
+    accepted_packets = []
+    rejected_packets = []
+    for item in preliminary_packets:
+        record = item["record"]
+        group_invalid = item["group_key"] in invalid_group_keys
+        packet_result = {
+            "group_key": item["group_key"],
+            "record_index": item["record_index"],
+            "packet_id": record.get("packet_id") if isinstance(record, dict) else None,
+            "status": "rejected" if group_invalid else "accepted",
+            "evaluation_status": "Invalid Traffic" if group_invalid else "Accepted for Reconstruction",
+            "invalid_traffic": group_invalid,
+            "record_has_direct_error": item["record_has_error"],
+            "group_rejection_reason": "group_contains_validation_error" if group_invalid else None,
+            "issues": item["issues"],
+        }
+        packet_results.append(packet_result)
+        if group_invalid:
+            rejected_packets.append(packet_result)
+        elif isinstance(record, dict):
+            accepted_packets.append(record)
+
+    reference_missing_packet_ids = []
+    if reference_by_packet_id:
+        merged_packet_ids = set(packet_id_counts)
+        reference_missing_packet_ids = sorted(set(reference_by_packet_id) - merged_packet_ids)
+        if reference_missing_packet_ids:
+            root_issues.append(
+                issue(
+                    "warning",
+                    "reference_packets_missing_from_merged_output",
+                    "Some original reference packets are not present in the merged accepted LLM output.",
+                    missing_packet_count=len(reference_missing_packet_ids),
+                )
+            )
+            warning_count += 1
+
+    issue_counts_by_reason: dict[str, int] = defaultdict(int)
+    for packet_result in packet_results:
+        for item in packet_result["issues"]:
+            issue_counts_by_reason[item["reason"]] += 1
+    for item in root_issues:
+        issue_counts_by_reason[item["reason"]] += 1
+
+    return {
+        "root_issues": root_issues,
+        "packet_results": packet_results,
+        "group_results": sorted(group_results, key=lambda item: item["group_key"]),
+        "accepted_packets": accepted_packets,
+        "rejected_packets": rejected_packets,
+        "invalid_traffic_groups": sorted(
+            [group for group in group_results if group["invalid_traffic"]],
+            key=lambda item: item["group_key"],
+        ),
+        "failed_modification_groups": failed_modification_groups,
+        "duplicate_packet_ids": sorted(duplicate_packet_ids),
+        "reference_missing_packet_ids": reference_missing_packet_ids,
+        "summary": {
+            "total_packet_count": len(traffic),
+            "accepted_packet_count": len(accepted_packets),
+            "rejected_packet_count": len(rejected_packets),
+            "total_group_count": len(group_results),
+            "accepted_group_count": len(group_results) - len(invalid_group_keys),
+            "invalid_traffic_group_count": len(invalid_group_keys),
+            "failed_modification_group_count": len(failed_modification_groups),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "duplicate_packet_id_count": len(duplicate_packet_ids),
+            "reference_missing_packet_count": len(reference_missing_packet_ids),
+            "invalid_traffic_packet_count": len(rejected_packets),
+            "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
+        },
+    }
+
+
+def run_validation(
+    *,
+    config_path: str | Path,
+    input_json: str | Path | None,
+    output_dir: str | Path | None,
+    dataset_label: str,
+    reference_json: str | Path | None,
+) -> dict[str, Any]:
+    config = load_json_config(config_path)
+    validate_config(config)
+    paths = default_paths(config, dataset_label)
+    input_path = Path(input_json).expanduser() if input_json else paths["input_json"]
+    validation_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
+    report_path = validation_output_dir / "validation_report.json"
+    valid_output_path = validation_output_dir / "validated_modified_traffic.json"
+
+    merged_json = read_json(input_path)
+    reference_by_packet_id, immutable_fields = build_reference_by_packet_id(reference_json)
+    validation = validate_merged_traffic(
+        merged_json=merged_json,
+        reference_by_packet_id=reference_by_packet_id,
+        immutable_fields=immutable_fields,
+        required_fields=DEFAULT_REQUIRED_FIELDS,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    report = {
+        "metadata": {
+            "schema_version": VALIDATION_REPORT_SCHEMA_VERSION,
+            "generated_at_utc": now,
+            "experiment_id": config["experiment"]["experiment_id"],
+            "config_source": config.get("_config_path", ""),
+            "dataset_label": dataset_label,
+            "input_json": str(input_path),
+            "reference_json": str(reference_json) if reference_json else None,
+            "classification_mapping_note": {
+                "validation_errors_map_to": "Invalid Traffic",
+                "evaluation_categories": [
+                    "Succesful Evasion",
+                    "Alert Mutation",
+                    "Failed Evasion",
+                    "Invalid Traffic",
+                    "Failed Modification",
+                ],
+                "failed_modification_source": "Step 18 maps rejected Step 17 groups to Failed Modification.",
+                "invalid_traffic_source": "Step 19 maps validation errors in accepted Step 18 groups to Invalid Traffic.",
+                "validity_unit": "group",
+                "induced_alert_policy": (
+                    "No standalone Induced Alert category. New POST alerts are handled as Alert Mutation "
+                    "only when the original alert disappears; otherwise they remain Failed Evasion."
+                ),
+            },
+        },
+        "summary": validation["summary"],
+        "root_issues": validation["root_issues"],
+        "duplicate_packet_ids": validation["duplicate_packet_ids"],
+        "reference_missing_packet_ids": validation["reference_missing_packet_ids"],
+        "failed_modification_groups": validation["failed_modification_groups"],
+        "invalid_traffic_groups": validation["invalid_traffic_groups"],
+        "group_results": validation["group_results"],
+        "packet_results": validation["packet_results"],
+    }
+    valid_output = {
+        "metadata": {
+            "schema_version": VALIDATED_TRAFFIC_SCHEMA_VERSION,
+            "generated_at_utc": now,
+            "experiment_id": config["experiment"]["experiment_id"],
+            "dataset_label": dataset_label,
+            "source_merged_json": str(input_path),
+            "validation_report": str(report_path),
+            "accepted_packet_count": validation["summary"]["accepted_packet_count"],
+            "rejected_packet_count": validation["summary"]["rejected_packet_count"],
+            "accepted_group_count": validation["summary"]["accepted_group_count"],
+            "invalid_traffic_group_count": validation["summary"]["invalid_traffic_group_count"],
+            "failed_modification_group_count": validation["summary"]["failed_modification_group_count"],
+        },
+        "traffic": validation["accepted_packets"],
+    }
+    write_json(report_path, report)
+    write_json(valid_output_path, valid_output)
+    return {
+        "validation_report": str(report_path),
+        "validated_output": str(valid_output_path),
+        **validation["summary"],
+    }
+
+
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Validate Step 18 merged modified traffic before reconstruction.")
+    add = parser.add_argument
+    add("--config", required=True, help="Path to the experiment JSON config.")
+    add("--input", dest="input_json", help="Path to Step 18 merged_modified_traffic.json.")
+    add("--output-dir", help="Directory where validation outputs will be written.")
+    add("--dataset-label", default="baseline_fixed_size", help="Dataset label used for default paths.")
+    add("--reference-json", help="Optional original Step 14 selected_packet_records.json for immutable checks.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_cli_args()
+    result = run_validation(
+        config_path=args.config,
+        input_json=args.input_json,
+        output_dir=args.output_dir,
+        dataset_label=args.dataset_label,
+        reference_json=args.reference_json,
+    )
+    print(f"Accepted packets: {result['accepted_packet_count']}")
+    print(f"Rejected packets: {result['rejected_packet_count']}")
+    print(f"Accepted groups: {result['accepted_group_count']}")
+    print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
+    print(f"Failed modification groups: {result['failed_modification_group_count']}")
+    print(f"Errors: {result['error_count']}")
+    print(f"Warnings: {result['warning_count']}")
+    print(f"Validation report: {result['validation_report']}")
+    print(f"Validated output: {result['validated_output']}")
+
+
+if __name__ == "__main__":
+    main()
