@@ -502,6 +502,7 @@ def reconstruct_validated_traffic(
     }
     write_json(report_path, report)
     return {
+        "input_json": str(input_json_path),
         "output_pcap": str(output_pcap_path),
         "reconstruction_report": str(report_path),
         **report["summary"],
@@ -573,6 +574,7 @@ def main() -> None:
     print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
     print(f"Warnings: {result['warning_count']}")
     print(f"Errors: {result['error_count']}")
+    print(f"Input JSON: {result['input_json']}")
     print(f"Modified PCAP: {result['output_pcap']}")
     print(f"Reconstruction report: {result['reconstruction_report']}")
 
