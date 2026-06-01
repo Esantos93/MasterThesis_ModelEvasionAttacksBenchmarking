@@ -27,17 +27,17 @@ DEFAULT_VARIABLE_CONDITIONS = [
     "Llama_smoke_group_size25",
 ]
 
-
+#This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
-
+#This function builds the experiment root folder from the experiment output_root and experiment_id in the config.
 def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
-
+#This function returns the default Step 18 input and output folders based on the canonical experiment layout.
 def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
@@ -45,18 +45,19 @@ def default_paths(config: dict[str, Any]) -> dict[str, Path]:
         "output_dir": experiment_root / "08_merged_outputs",
     }
 
-
+#This function validates the minimum configuration keys required by Step 18.
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
 
-
+#This function sorts condition folders by their group_size number when that number is present in the name.
 def condition_sort_key(path_or_name: str | Path) -> tuple[int, str]:
     name = Path(path_or_name).name
     match = re.search(r"group_size(\d+)", name)
     return (int(match.group(1)) if match else 10**9, name)
 
-
+#This function resolves the model-specific Step 17 output folder inside one condition folder.
+#If there is only one model folder, it is selected automatically. If there are several, the user must pass --model-name.
 def resolve_model_root(condition_root: Path, requested_model_name: str | None) -> Path:
     if requested_model_name:
         model_root = condition_root / requested_model_name
@@ -72,7 +73,8 @@ def resolve_model_root(condition_root: Path, requested_model_name: str | None) -
         raise ValueError(f"Multiple model folders found in {condition_root}; pass --model-name. Found: {names}")
     return model_roots[0]
 
-
+#This function resolves the Step 17 condition folders that Step 18 should merge.
+#The baseline mode selects group_size3, while variable mode selects the artificial variable-size proxy conditions.
 def collect_condition_roots(
     *,
     input_root: Path,
@@ -102,14 +104,14 @@ def collect_condition_roots(
         raise FileNotFoundError("Missing Step 17 condition output folder(s):\n" + "\n".join(missing))
     return sorted(roots, key=condition_sort_key)
 
-
+#This function derives a group_id from a Step 17 parsed JSON filename.
 def group_id_from_parsed_path(path: Path) -> str:
     name = path.name
     if name.endswith(".parsed.json"):
         return name.removesuffix(".parsed.json")
     return path.stem
 
-
+#This function loads all Step 17 metadata files in a model output folder and indexes them by group_id.
 def load_metadata_by_group(metadata_dir: Path) -> dict[str, dict[str, Any]]:
     metadata_by_group = {}
     if not metadata_dir.exists():
@@ -122,7 +124,7 @@ def load_metadata_by_group(metadata_dir: Path) -> dict[str, dict[str, Any]]:
         metadata_by_group[group_id] = metadata
     return metadata_by_group
 
-
+#This function extracts packet_id values from a traffic list while ignoring non-object records.
 def packet_ids_for_traffic(traffic: list[Any]) -> list[str]:
     packet_ids = []
     for record in traffic:
@@ -130,7 +132,7 @@ def packet_ids_for_traffic(traffic: list[Any]) -> list[str]:
             packet_ids.append(str(record["packet_id"]))
     return packet_ids
 
-
+#This function estimates the expected packet count for a failed Step 17 group from the metadata fields that may contain it.
 def expected_packet_count_from_metadata(metadata: dict[str, Any]) -> int | None:
     validation_result = metadata.get("validation_result")
     if isinstance(validation_result, dict) and validation_result.get("expected_count") is not None:
@@ -143,7 +145,7 @@ def expected_packet_count_from_metadata(metadata: dict[str, Any]) -> int | None:
         return token_plan["expected_packet_count"]
     return None
 
-
+#This function converts a failed Step 17 metadata record into the Step 18 Failed Modification report format.
 def summarize_failed_modification(metadata: dict[str, Any], condition: str, model_name: str) -> dict[str, Any]:
     return {
         "condition": condition,
@@ -159,7 +161,8 @@ def summarize_failed_modification(metadata: dict[str, Any], condition: str, mode
         "prompt_file": metadata.get("prompt_file"),
     }
 
-
+#This function merges one Step 17 condition folder.
+#Accepted parsed groups are copied into the merged traffic, while rejected Step 17 groups are preserved as Failed Modification.
 def merge_one_condition(
     *,
     condition_root: Path,
@@ -271,7 +274,7 @@ def merge_one_condition(
         },
     }
 
-
+#This function merges all selected condition folders and writes the Step 18 merged traffic plus merge report artifacts.
 def merge_conditions(
     *,
     config: dict[str, Any],
@@ -380,7 +383,8 @@ def merge_conditions(
         "failed_modification_group_count": report["summary"]["failed_modification_group_count"],
     }
 
-
+#This function is the programmatic entry point for Step 18.
+#It loads the config, resolves default paths, selects the requested condition set, and runs the merge.
 def run_merge(
     *,
     config_path: str | Path,
@@ -414,7 +418,7 @@ def run_merge(
         skip_overlapping_packets=not allow_overlapping_packets,
     )
 
-
+#This function parses command-line arguments for Step 18.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge accepted Step 17 parsed LLM outputs.")
     add = parser.add_argument
@@ -428,7 +432,7 @@ def parse_cli_args() -> argparse.Namespace:
     add("--allow-overlapping-packets", action="store_true", help="Allow duplicate packet_id values in merged traffic.")
     return parser.parse_args()
 
-
+#This function is the command-line entry point for Step 18.
 def main() -> None:
     args = parse_cli_args()
     result = run_merge(

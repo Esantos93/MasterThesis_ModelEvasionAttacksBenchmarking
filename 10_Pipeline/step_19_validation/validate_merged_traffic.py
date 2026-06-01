@@ -43,17 +43,17 @@ DEFAULT_REQUIRED_FIELDS = [
     "packet_length_bytes",
 ]
 
-
+#This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
-
+#This function builds the experiment root folder from the experiment output_root and experiment_id in the config.
 def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
-
+#This function returns the default Step 19 input and output paths for a given dataset label.
 def default_paths(config: dict[str, Any], dataset_label: str) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
@@ -61,12 +61,12 @@ def default_paths(config: dict[str, Any], dataset_label: str) -> dict[str, Path]
         "output_dir": experiment_root / "09_validation" / dataset_label,
     }
 
-
+#This function validates the minimum configuration keys required by Step 19.
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
 
-
+#This function builds a validation issue record with a standard severity, reason, and message shape.
 def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, Any]:
     return {
         "severity": severity,
@@ -75,15 +75,16 @@ def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, A
         **extra,
     }
 
-
+#This function checks whether a value is an integer while excluding booleans, because JSON booleans are also ints in Python.
 def is_int_like(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
-
+#This function checks whether a value is numeric while excluding booleans.
 def is_number_like(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-
+#This function validates the payload_hex field and its derived payload_length_bytes value.
+#It detects non-hexadecimal content, odd-length hex strings, and length mismatches.
 def validate_payload_hex(record: dict[str, Any]) -> list[dict[str, Any]]:
     issues = []
     payload_hex = record.get("payload_hex")
@@ -134,7 +135,7 @@ def validate_payload_hex(record: dict[str, Any]) -> list[dict[str, Any]]:
         )
     return issues
 
-
+#This function validates optional flow_context fields when they are present in a packet record.
 def validate_flow_context(record: dict[str, Any]) -> list[dict[str, Any]]:
     if "flow_context" not in record:
         return []
@@ -168,7 +169,8 @@ def validate_flow_context(record: dict[str, Any]) -> list[dict[str, Any]]:
         )
     return issues
 
-
+#This function validates the basic record schema needed before reconstruction.
+#It checks required fields, expected primitive types, payload format, and optional flow context shape.
 def validate_basic_record_schema(record: Any, record_index: int, required_fields: list[str]) -> list[dict[str, Any]]:
     if not isinstance(record, dict):
         return [
@@ -258,7 +260,8 @@ def validate_basic_record_schema(record: Any, record_index: int, required_fields
             item.setdefault("packet_id", record.get("packet_id"))
     return issues
 
-
+#This function loads an optional original Step 14 reference JSON and indexes it by packet_id.
+#The reference lets Step 19 compare immutable fields against the original packet records when available.
 def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     if not reference_json_path:
         return {}, DEFAULT_IMMUTABLE_FIELDS
@@ -274,7 +277,8 @@ def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tupl
             reference_by_packet_id[str(record["packet_id"])] = record
     return reference_by_packet_id, [str(field) for field in immutable_fields]
 
-
+#This function compares one modified packet record against the original reference record for the same packet_id.
+#Any immutable-field difference is an error because it breaks PRE/POST traceability.
 def validate_against_reference(
     *,
     record: dict[str, Any],
@@ -319,6 +323,8 @@ def validate_against_reference(
     return issues
 
 
+#This function identifies the group that a packet record belongs to.
+#Step 19 validates at group level, so packet-level issues must be assigned back to their Step 18 group.
 def group_key_for_record(record: Any, record_index: int) -> tuple[str, str | None, str | None]:
     if not isinstance(record, dict):
         return (f"unassigned_record_{record_index}", None, None)
@@ -334,6 +340,8 @@ def group_key_for_record(record: Any, record_index: int) -> tuple[str, str | Non
     return (f"unassigned_record_{record_index}", None, None)
 
 
+#This function validates a full Step 18 merged traffic artifact.
+#It first validates packet records, then promotes any packet error to group-level Invalid Traffic.
 def validate_merged_traffic(
     *,
     merged_json: dict[str, Any],
@@ -532,6 +540,8 @@ def validate_merged_traffic(
     }
 
 
+#This function is the programmatic entry point for Step 19.
+#It loads merged traffic, optionally loads the original reference JSON, writes the validation report, and writes reconstructible traffic only.
 def run_validation(
     *,
     config_path: str | Path,
@@ -618,6 +628,7 @@ def run_validation(
     }
 
 
+#This function parses command-line arguments for Step 19.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate Step 18 merged modified traffic before reconstruction.")
     add = parser.add_argument
@@ -629,6 +640,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function is the command-line entry point for Step 19.
 def main() -> None:
     args = parse_cli_args()
     result = run_validation(
