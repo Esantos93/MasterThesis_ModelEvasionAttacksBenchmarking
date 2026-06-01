@@ -384,6 +384,7 @@ def write_packets(output_pcap_path: Path, packets: list[Any], scapy: dict[str, A
 
 # This function aggregates packet-level reconstruction results into group-level results.
 # It keeps the same group validity principle used in Step 19: if any packet in a group fails, the group is marked as Invalid Traffic.
+# It does not copy the full packet issue objects into the group result, because those details already live in packet_results.
 def summarize_groups(packet_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
     for result in packet_results:
@@ -398,7 +399,9 @@ def summarize_groups(packet_results: list[dict[str, Any]]) -> list[dict[str, Any
                 "record_indexes": [],
                 "reconstructed_packet_count": 0,
                 "failed_packet_count": 0,
-                "issues": [],
+                "issue_counts_by_reason": defaultdict(int),
+                "warning_count": 0,
+                "error_count": 0,
             }
         group = groups[key]
         group["record_indexes"].append(result["record_index"])
@@ -408,17 +411,24 @@ def summarize_groups(packet_results: list[dict[str, Any]]) -> list[dict[str, Any
             group["reconstructed_packet_count"] += 1
         else:
             group["failed_packet_count"] += 1
-        group["issues"].extend(result["issues"])
+        for item in result["issues"]:
+            group["issue_counts_by_reason"][item["reason"]] += 1
+            if item["severity"] == "warning":
+                group["warning_count"] += 1
+            elif item["severity"] == "error":
+                group["error_count"] += 1
 
     group_results = []
     for group in groups.values():
         failed = group["failed_packet_count"] > 0
+        issue_counts_by_reason = dict(sorted(group.pop("issue_counts_by_reason").items()))
         group_results.append(
             {
                 **group,
                 "status": "Invalid Traffic" if failed else "Reconstructed Traffic",
                 "invalid_traffic": failed,
                 "packet_count": len(group["record_indexes"]),
+                "issue_counts_by_reason": issue_counts_by_reason,
             }
         )
     return sorted(group_results, key=lambda item: item["group_key"])
