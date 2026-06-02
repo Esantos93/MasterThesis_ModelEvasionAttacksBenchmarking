@@ -31,13 +31,30 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "dataset", "snort", "llm", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["dataset"], ["pcap_path", "flow_csv_dir", "attack_labels"], "dataset")
-    require_keys(config["snort"], ["snort_binary", "config_path", "ruleset_path"], "snort")
+    require_keys(config["snort"], ["snort_binary", "config_path", "enable_builtin_rules", "enable_ruleset", "ruleset_path"], "snort")
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
     require_keys(
         config["pipeline"],
-        ["target_os", "grouping_policy", "traffic_selection_policy", "validation_policy"],
+        ["target_os", "experiment_config_label", "grouping_policy", "traffic_selection_policy", "validation_policy"],
         "pipeline",
     )
+    if not isinstance(config["snort"]["enable_builtin_rules"], bool):
+        raise ValueError("snort.enable_builtin_rules must be true or false.")
+    if not isinstance(config["snort"]["enable_ruleset"], bool):
+        raise ValueError("snort.enable_ruleset must be true or false.")
+    if config["snort"]["enable_ruleset"] and not str(config["snort"].get("ruleset_path", "")).strip():
+        raise ValueError("snort.ruleset_path must be set when snort.enable_ruleset is true.")
+    if not isinstance(config["snort"].get("rules_policy_path", ""), str):
+        raise ValueError("snort.rules_policy_path must be a string when provided.")
+    experiment_config_label = config["pipeline"]["experiment_config_label"]
+    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
+        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+    label_options = config["pipeline"].get("experiment_config_label_options")
+    if label_options is not None:
+        if not isinstance(label_options, list) or not all(isinstance(item, str) for item in label_options):
+            raise ValueError("pipeline.experiment_config_label_options must be a list of strings when provided.")
+        if experiment_config_label not in label_options:
+            raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
 
 #If the previous functions are responsible for validating keys in the configuration, 
 #this function is responsible for checking the existance of the values of those keys. 
@@ -54,9 +71,13 @@ def collect_input_checks(config: dict[str, Any]) -> list[dict[str, Any]]:
         ("dataset.pcap_path", dataset["pcap_path"]),
         ("snort.snort_binary", snort["snort_binary"]),
         ("snort.config_path", snort["config_path"]),
-        ("snort.ruleset_path", snort["ruleset_path"]),
         ("llm.model_path", llm["model_path"]),
     ]
+
+    if snort.get("enable_ruleset"):
+        paths_to_check.append(("snort.ruleset_path", snort["ruleset_path"]))
+        if str(snort.get("rules_policy_path", "")).strip():
+            paths_to_check.append(("snort.rules_policy_path", snort["rules_policy_path"]))
 
     if dataset.get("flow_csv_dir"):
         paths_to_check.append(("dataset.flow_csv_dir", dataset["flow_csv_dir"]))

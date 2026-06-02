@@ -18,7 +18,9 @@
   "snort": {
     "snort_binary": "/usr/local/bin/snort",
     "config_path": "/usr/local/etc/snort/snort.lua",
-    "ruleset_path": "/usr/local/etc/snort/rules/cisco.rules",
+    "enable_ruleset": true,
+    "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
     "plugin_path": "/usr/local/etc/snort/so_rules",
     "daq_dir": "/usr/local/lib/daq",
     "enable_builtin_rules": true
@@ -37,6 +39,11 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
+    "experiment_config_label": "baseline_fixed_size",
+    "experiment_config_label_options": [
+      "baseline_fixed_size",
+      "variable_size_proxy"
+    ],
     "grouping_policy": "fixed_packet_count",
     "group_size_packets": 3,
     "traffic_selection_policy": "conservative_v1",
