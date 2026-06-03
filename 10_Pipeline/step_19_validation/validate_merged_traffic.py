@@ -53,18 +53,28 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
-#This function returns the default Step 19 input and output paths for a given dataset label.
-def default_paths(config: dict[str, Any], dataset_label: str) -> dict[str, Path]:
+#This function returns the default Step 19 input and output paths for the active experiment configuration.
+def default_paths(config: dict[str, Any], experiment_config_label: str) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
-        "input_json": experiment_root / "08_merged_outputs" / dataset_label / "merged_modified_traffic.json",
-        "output_dir": experiment_root / "09_validation" / dataset_label,
+        "input_json": experiment_root / "08_merged_outputs" / experiment_config_label / "merged_modified_traffic.json",
+        "output_dir": experiment_root / "09_validation" / experiment_config_label,
     }
 
 #This function validates the minimum configuration keys required by Step 19.
 def validate_config(config: dict[str, Any]) -> None:
-    require_keys(config, ["experiment"], "config")
+    require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
+    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
+
+    experiment_config_label = config["pipeline"]["experiment_config_label"]
+    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
+        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+
+
+#This function returns the single experiment label configured for this run.
+def experiment_config_label_from_config(config: dict[str, Any]) -> str:
+    return config["pipeline"]["experiment_config_label"]
 
 #This function builds a validation issue record with a standard severity, reason, and message shape.
 def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -334,6 +344,9 @@ def group_key_for_record(record: Any, record_index: int) -> tuple[str, str | Non
         group_id = merge_trace.get("group_id")
         if condition is not None and group_id is not None:
             return (f"{condition}::{group_id}", str(condition), str(group_id))
+        model_name = merge_trace.get("model_name")
+        if model_name is not None and group_id is not None:
+            return (f"{model_name}::{group_id}", str(model_name), str(group_id))
     group_id = record.get("group_id")
     if group_id is not None:
         return (f"unknown_condition::{group_id}", None, str(group_id))
@@ -547,12 +560,12 @@ def run_validation(
     config_path: str | Path,
     input_json: str | Path | None,
     output_dir: str | Path | None,
-    dataset_label: str,
     reference_json: str | Path | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
-    paths = default_paths(config, dataset_label)
+    experiment_config_label = experiment_config_label_from_config(config)
+    paths = default_paths(config, experiment_config_label)
     input_path = Path(input_json).expanduser() if input_json else paths["input_json"]
     validation_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
     report_path = validation_output_dir / "validation_report.json"
@@ -573,7 +586,7 @@ def run_validation(
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
-            "dataset_label": dataset_label,
+            "experiment_config_label": experiment_config_label,
             "input_json": str(input_path),
             "reference_json": str(reference_json) if reference_json else None,
             "classification_mapping_note": {
@@ -608,7 +621,7 @@ def run_validation(
             "schema_version": VALIDATED_TRAFFIC_SCHEMA_VERSION,
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
-            "dataset_label": dataset_label,
+            "experiment_config_label": experiment_config_label,
             "source_merged_json": str(input_path),
             "validation_report": str(report_path),
             "accepted_packet_count": validation["summary"]["accepted_packet_count"],
@@ -635,7 +648,6 @@ def parse_cli_args() -> argparse.Namespace:
     add("--config", required=True, help="Path to the experiment JSON config.")
     add("--input", dest="input_json", help="Path to Step 18 merged_modified_traffic.json.")
     add("--output-dir", help="Directory where validation outputs will be written.")
-    add("--dataset-label", default="baseline_fixed_size", help="Dataset label used for default paths.")
     add("--reference-json", help="Optional original Step 14 selected_packet_records.json for immutable checks.")
     return parser.parse_args()
 
@@ -647,7 +659,6 @@ def main() -> None:
         config_path=args.config,
         input_json=args.input_json,
         output_dir=args.output_dir,
-        dataset_label=args.dataset_label,
         reference_json=args.reference_json,
     )
     print(f"Accepted packets: {result['accepted_packet_count']}")

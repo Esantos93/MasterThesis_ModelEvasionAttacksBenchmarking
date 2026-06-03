@@ -41,8 +41,7 @@
     "target_os": "Ubuntu",
     "experiment_config_label": "baseline_fixed_size",
     "experiment_config_label_options": [
-      "baseline_fixed_size",
-      "variable_size_proxy"
+      "baseline_fixed_size"
     ],
     "grouping_policy": "fixed_packet_count",
     "group_size_packets": 3,

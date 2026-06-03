@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,14 +17,6 @@ from common.io_utils import write_json
 
 MERGED_SCHEMA_VERSION = "merged_llm_outputs_v1"
 REPORT_SCHEMA_VERSION = "llm_output_merge_report_v1"
-DEFAULT_BASELINE_CONDITION = "Llama_smoke_group_size3"
-DEFAULT_VARIABLE_CONDITIONS = [
-    "Llama_smoke_group_size5",
-    "Llama_smoke_group_size10",
-    "Llama_smoke_group_size15",
-    "Llama_smoke_group_size20",
-    "Llama_smoke_group_size25",
-]
 
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
@@ -47,62 +38,42 @@ def default_paths(config: dict[str, Any]) -> dict[str, Path]:
 
 #This function validates the minimum configuration keys required by Step 18.
 def validate_config(config: dict[str, Any]) -> None:
-    require_keys(config, ["experiment"], "config")
+    require_keys(config, ["experiment", "pipeline", "llm"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
+    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
+    require_keys(config["llm"], ["model_name"], "llm")
 
-#This function sorts condition folders by their group_size number when that number is present in the name.
-def condition_sort_key(path_or_name: str | Path) -> tuple[int, str]:
-    name = Path(path_or_name).name
-    match = re.search(r"group_size(\d+)", name)
-    return (int(match.group(1)) if match else 10**9, name)
+    experiment_config_label = config["pipeline"]["experiment_config_label"]
+    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
+        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
 
-#This function resolves the model-specific Step 17 output folder inside one condition folder.
-#If there is only one model folder, it is selected automatically. If there are several, the user must pass --model-name.
-def resolve_model_root(condition_root: Path, requested_model_name: str | None) -> Path:
-    if requested_model_name:
-        model_root = condition_root / requested_model_name
-        if not model_root.exists():
-            raise FileNotFoundError(f"Requested model output folder does not exist: {model_root}")
-        return model_root
+    model_name = config["llm"]["model_name"]
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError("llm.model_name must be a non-empty string.")
 
-    model_roots = [path for path in condition_root.iterdir() if path.is_dir()]
-    if not model_roots:
-        raise FileNotFoundError(f"No model output folders found in condition root: {condition_root}")
-    if len(model_roots) > 1:
-        names = ", ".join(path.name for path in model_roots)
-        raise ValueError(f"Multiple model folders found in {condition_root}; pass --model-name. Found: {names}")
-    return model_roots[0]
 
-#This function resolves the Step 17 condition folders that Step 18 should merge.
-#The baseline mode selects group_size3, while variable mode selects the artificial variable-size proxy conditions.
-def collect_condition_roots(
+#This function returns the single experiment label configured for this run.
+#Downstream artifacts use this label so one config file produces one experiment branch.
+def experiment_config_label_from_config(config: dict[str, Any]) -> str:
+    return config["pipeline"]["experiment_config_label"]
+
+
+#This function returns the Step 17 model output folder name configured for this experiment.
+def model_name_from_config(config: dict[str, Any]) -> str:
+    return config["llm"]["model_name"]
+
+
+#This function resolves the Step 17 model output folder that Step 18 should merge.
+#The expected default layout is 07_llm_outputs/<llm.model_name>/.
+def resolve_model_root(
     *,
     input_root: Path,
-    mode: str,
-    conditions: list[str] | None,
-) -> list[Path]:
-    if conditions:
-        selected_names = conditions
-    elif mode == "baseline":
-        selected_names = [DEFAULT_BASELINE_CONDITION]
-    elif mode == "variable":
-        selected_names = DEFAULT_VARIABLE_CONDITIONS
-    else:
-        selected_names = [DEFAULT_BASELINE_CONDITION, *DEFAULT_VARIABLE_CONDITIONS]
-
-    roots = []
-    missing = []
-    for name in selected_names:
-        condition_path = Path(name).expanduser()
-        if not condition_path.is_absolute():
-            condition_path = input_root / condition_path
-        if condition_path.exists():
-            roots.append(condition_path)
-        else:
-            missing.append(str(condition_path))
-    if missing:
-        raise FileNotFoundError("Missing Step 17 condition output folder(s):\n" + "\n".join(missing))
-    return sorted(roots, key=condition_sort_key)
+    model_name: str,
+) -> Path:
+    model_root = input_root / model_name
+    if not model_root.exists():
+        raise FileNotFoundError(f"Step 17 model output folder does not exist: {model_root}")
+    return model_root
 
 #This function derives a group_id from a Step 17 parsed JSON filename.
 def group_id_from_parsed_path(path: Path) -> str:
@@ -146,9 +117,8 @@ def expected_packet_count_from_metadata(metadata: dict[str, Any]) -> int | None:
     return None
 
 #This function converts a failed Step 17 metadata record into the Step 18 Failed Modification report format.
-def summarize_failed_modification(metadata: dict[str, Any], condition: str, model_name: str) -> dict[str, Any]:
+def summarize_failed_modification(metadata: dict[str, Any], model_name: str) -> dict[str, Any]:
     return {
-        "condition": condition,
         "model_name": model_name,
         "group_id": metadata.get("group_id"),
         "status": metadata.get("status"),
@@ -161,16 +131,14 @@ def summarize_failed_modification(metadata: dict[str, Any], condition: str, mode
         "prompt_file": metadata.get("prompt_file"),
     }
 
-#This function merges one Step 17 condition folder.
+#This function merges one Step 17 model output folder.
 #Accepted parsed groups are copied into the merged traffic, while rejected Step 17 groups are preserved as Failed Modification.
-def merge_one_condition(
+def merge_model_output(
     *,
-    condition_root: Path,
-    model_name: str | None,
+    model_root: Path,
     selected_packet_ids: set[str],
     skip_overlapping_packets: bool,
 ) -> dict[str, Any]:
-    model_root = resolve_model_root(condition_root, model_name)
     parsed_dir = model_root / "parsed"
     metadata_dir = model_root / "metadata"
     failures_dir = model_root / "failures"
@@ -190,7 +158,6 @@ def merge_one_condition(
         if not isinstance(parsed_output, dict) or not isinstance(parsed_output.get("traffic"), list):
             skipped_groups.append(
                 {
-                    "condition": condition_root.name,
                     "group_id": group_id,
                     "status": "skipped",
                     "evaluation_status": "Skipped Technical Overlap",
@@ -206,7 +173,6 @@ def merge_one_condition(
         if overlap and skip_overlapping_packets:
             skipped_groups.append(
                 {
-                    "condition": condition_root.name,
                     "group_id": group_id,
                     "status": "skipped",
                     "evaluation_status": "Skipped Technical Overlap",
@@ -221,7 +187,6 @@ def merge_one_condition(
             if isinstance(record, dict):
                 record_copy = dict(record)
                 record_copy["_merge_trace"] = {
-                    "condition": condition_root.name,
                     "model_name": model_root.name,
                     "group_id": group_id,
                     "parsed_file": str(parsed_path),
@@ -230,7 +195,6 @@ def merge_one_condition(
         selected_packet_ids.update(packet_ids)
         accepted_groups.append(
             {
-                "condition": condition_root.name,
                 "group_id": group_id,
                 "status": "accepted",
                 "evaluation_status": "Pending Step 19 Validation",
@@ -242,18 +206,17 @@ def merge_one_condition(
         )
 
     failed_modification_groups = [
-        summarize_failed_modification(metadata, condition_root.name, model_root.name)
+        summarize_failed_modification(metadata, model_root.name)
         for metadata in metadata_by_group.values()
         if metadata.get("status") != "accepted"
     ]
     metadata_accepted_without_parsed = [
-        summarize_failed_modification(metadata, condition_root.name, model_root.name)
+        summarize_failed_modification(metadata, model_root.name)
         for group_id, metadata in metadata_by_group.items()
         if metadata.get("status") == "accepted" and group_id not in parsed_group_ids
     ]
 
     return {
-        "condition": condition_root.name,
         "model_name": model_root.name,
         "model_root": str(model_root),
         "parsed_dir": str(parsed_dir),
@@ -274,50 +237,41 @@ def merge_one_condition(
         },
     }
 
-#This function merges all selected condition folders and writes the Step 18 merged traffic plus merge report artifacts.
-def merge_conditions(
+#This function merges the configured Step 17 model output folder and writes the Step 18 merged traffic plus merge report artifacts.
+def merge_model_outputs(
     *,
     config: dict[str, Any],
-    condition_roots: list[Path],
+    model_root: Path,
     output_dir: Path,
-    dataset_label: str,
-    model_name: str | None,
+    experiment_config_label: str,
     skip_overlapping_packets: bool,
 ) -> dict[str, Any]:
     selected_packet_ids: set[str] = set()
-    condition_reports = []
-    traffic = []
-    for condition_root in condition_roots:
-        condition_report = merge_one_condition(
-            condition_root=condition_root,
-            model_name=model_name,
-            selected_packet_ids=selected_packet_ids,
-            skip_overlapping_packets=skip_overlapping_packets,
-        )
-        traffic.extend(condition_report.pop("traffic"))
-        condition_reports.append(condition_report)
+    model_report = merge_model_output(
+        model_root=model_root,
+        selected_packet_ids=selected_packet_ids,
+        skip_overlapping_packets=skip_overlapping_packets,
+    )
+    traffic = model_report.pop("traffic")
 
     accepted_groups = [
         group
-        for condition_report in condition_reports
-        for group in condition_report["accepted_groups"]
+        for group in model_report["accepted_groups"]
     ]
     failed_modification_groups = [
         group
-        for condition_report in condition_reports
-        for group in condition_report["failed_modification_groups"]
+        for group in model_report["failed_modification_groups"]
     ]
     skipped_groups = [
         group
-        for condition_report in condition_reports
-        for group in condition_report["skipped_groups"]
+        for group in model_report["skipped_groups"]
     ]
     duplicate_packet_ids = sorted(
         packet_id
         for packet_id in set(packet_ids_for_traffic(traffic))
         if packet_ids_for_traffic(traffic).count(packet_id) > 1
     )
-    output_root = output_dir / dataset_label
+    output_root = output_dir / experiment_config_label
     merged_path = output_root / "merged_modified_traffic.json"
     report_path = output_root / "merge_report.json"
     now = datetime.now(timezone.utc).isoformat()
@@ -328,8 +282,9 @@ def merge_conditions(
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
-            "dataset_label": dataset_label,
-            "condition_names": [path.name for path in condition_roots],
+            "experiment_config_label": experiment_config_label,
+            "model_name": model_root.name,
+            "model_output_root": str(model_root),
             "merge_policy": {
                 "consume_only_step17_parsed_outputs": True,
                 "preserve_failures_in_report": True,
@@ -353,11 +308,13 @@ def merge_conditions(
             "schema_version": REPORT_SCHEMA_VERSION,
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
-            "dataset_label": dataset_label,
+            "experiment_config_label": experiment_config_label,
             "merged_output": str(merged_path),
+            "model_name": model_root.name,
+            "model_output_root": str(model_root),
         },
         "summary": {
-            "condition_count": len(condition_roots),
+            "model_output_count": 1,
             "accepted_group_count": len(accepted_groups),
             "skipped_group_count": len(skipped_groups),
             "failed_modification_group_count": len(failed_modification_groups),
@@ -370,7 +327,7 @@ def merge_conditions(
             "failed_modification_groups": failed_modification_groups,
             "skipped_groups": skipped_groups,
         },
-        "conditions": condition_reports,
+        "model_output": model_report,
     }
     write_json(merged_path, merged)
     write_json(report_path, report)
@@ -384,16 +341,12 @@ def merge_conditions(
     }
 
 #This function is the programmatic entry point for Step 18.
-#It loads the config, resolves default paths, selects the requested condition set, and runs the merge.
+#It loads the config, resolves default paths, selects the configured model output folder, and runs the merge.
 def run_merge(
     *,
     config_path: str | Path,
     input_root: str | Path | None,
     output_dir: str | Path | None,
-    mode: str,
-    conditions: list[str] | None,
-    dataset_label: str | None,
-    model_name: str | None,
     allow_overlapping_packets: bool,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
@@ -401,20 +354,15 @@ def run_merge(
     paths = default_paths(config)
     step17_root = Path(input_root).expanduser() if input_root else paths["input_root"]
     merge_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
-    condition_roots = collect_condition_roots(input_root=step17_root, mode=mode, conditions=conditions)
+    experiment_config_label = experiment_config_label_from_config(config)
+    model_name = model_name_from_config(config)
+    model_root = resolve_model_root(input_root=step17_root, model_name=model_name)
 
-    effective_label = dataset_label
-    if not effective_label:
-        effective_label = "baseline_fixed_size" if mode == "baseline" else "variable_size_proxy"
-        if mode == "all":
-            effective_label = "all_conditions"
-
-    return merge_conditions(
+    return merge_model_outputs(
         config=config,
-        condition_roots=condition_roots,
+        model_root=model_root,
         output_dir=merge_output_dir,
-        dataset_label=effective_label,
-        model_name=model_name,
+        experiment_config_label=experiment_config_label,
         skip_overlapping_packets=not allow_overlapping_packets,
     )
 
@@ -423,12 +371,8 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge accepted Step 17 parsed LLM outputs.")
     add = parser.add_argument
     add("--config", required=True, help="Path to the experiment JSON config.")
-    add("--input-root", help="Directory containing Step 17 condition output folders. Defaults to experiment/07_llm_outputs.")
+    add("--input-root", help="Directory containing Step 17 model output folders. Defaults to experiment/07_llm_outputs.")
     add("--output-dir", help="Directory where Step 18 merged outputs will be written. Defaults to experiment/08_merged_outputs.")
-    add("--mode", choices=["baseline", "variable", "all"], default="baseline", help="Default condition set to merge.")
-    add("--condition", action="append", dest="conditions", help="Condition folder name or absolute path. Can be repeated.")
-    add("--dataset-label", help="Output subfolder label under Step 18 output dir.")
-    add("--model-name", help="Model output folder name when a condition contains multiple models.")
     add("--allow-overlapping-packets", action="store_true", help="Allow duplicate packet_id values in merged traffic.")
     return parser.parse_args()
 
@@ -439,10 +383,6 @@ def main() -> None:
         config_path=args.config,
         input_root=args.input_root,
         output_dir=args.output_dir,
-        mode=args.mode,
-        conditions=args.conditions,
-        dataset_label=args.dataset_label,
-        model_name=args.model_name,
         allow_overlapping_packets=args.allow_overlapping_packets,
     )
     print(f"Merged traffic records: {result['traffic_record_count']}")

@@ -34,22 +34,32 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
 
-# This function returns the default Step 20 input and output paths for a dataset label.
+# This function returns the default Step 20 input and output paths for the active experiment configuration.
 # If experiment_root_override is provided, it is used instead of the experiment root stored in the config.
 # This is useful when the VM artifacts are under a different folder than the one currently written in the config file.
-def default_paths(config: dict[str, Any], dataset_label: str, experiment_root_override: str | Path | None = None) -> dict[str, Path]:
+def default_paths(config: dict[str, Any], experiment_config_label: str, experiment_root_override: str | Path | None = None) -> dict[str, Path]:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     return {
-        "input_json": experiment_root / "09_validation" / dataset_label / "validated_modified_traffic.json",
-        "output_dir": experiment_root / "10_reconstructed_pcap" / dataset_label,
+        "input_json": experiment_root / "09_validation" / experiment_config_label / "validated_modified_traffic.json",
+        "output_dir": experiment_root / "10_reconstructed_pcap" / experiment_config_label,
     }
 
 
 # This function validates the minimum config keys needed by Step 20.
-# Step 20 only needs the experiment identity and output root because the packet content comes from the Step 19 JSON artifact.
+# Step 20 needs the experiment identity, output root, and pipeline.experiment_config_label because each config maps to one POST branch.
 def validate_config(config: dict[str, Any]) -> None:
-    require_keys(config, ["experiment"], "config")
+    require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
+    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
+
+    experiment_config_label = config["pipeline"]["experiment_config_label"]
+    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
+        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+
+
+# This function returns the single pipeline.experiment_config_label configured for this run.
+def experiment_config_label_from_config(config: dict[str, Any]) -> str:
+    return config["pipeline"]["experiment_config_label"]
 
 
 # This function imports Scapy only when PCAP reconstruction actually runs.
@@ -442,7 +452,7 @@ def reconstruct_validated_traffic(
     input_json_path: Path,
     output_pcap_path: Path,
     report_path: Path,
-    dataset_label: str,
+    experiment_config_label: str,
 ) -> dict[str, Any]:
     if not input_json_path.exists():
         raise FileNotFoundError(f"Step 19 validated traffic JSON does not exist: {input_json_path}")
@@ -480,7 +490,7 @@ def reconstruct_validated_traffic(
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
-            "dataset_label": dataset_label,
+            "experiment_config_label": experiment_config_label,
             "input_json": str(input_json_path),
             "source_validation_schema_version": metadata.get("schema_version", DEFAULT_INPUT_SCHEMA_VERSION),
             "output_pcap": str(output_pcap_path),
@@ -520,19 +530,19 @@ def reconstruct_validated_traffic(
 
 
 # This function is the public Python entry point for Step 20.
-# It loads the config, resolves the default or overridden paths, and delegates the actual reconstruction work.
+# It loads the config, resolves the active experiment_config_label paths, and delegates the actual reconstruction work.
 def run_reconstruction(
     *,
     config_path: str | Path,
     input_json: str | Path | None,
     output_dir: str | Path | None,
     output_pcap: str | Path | None,
-    dataset_label: str,
     experiment_root: str | Path | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
-    paths = default_paths(config, dataset_label, experiment_root)
+    experiment_config_label = experiment_config_label_from_config(config)
+    paths = default_paths(config, experiment_config_label, experiment_root)
     input_json_path = Path(input_json).expanduser() if input_json else paths["input_json"]
     reconstruction_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
     output_pcap_path = Path(output_pcap).expanduser() if output_pcap else reconstruction_output_dir / "modified_traffic.pcap"
@@ -542,7 +552,7 @@ def run_reconstruction(
         input_json_path=input_json_path,
         output_pcap_path=output_pcap_path,
         report_path=report_path,
-        dataset_label=dataset_label,
+        experiment_config_label=experiment_config_label,
     )
 
 
@@ -555,7 +565,6 @@ def parse_cli_args() -> argparse.Namespace:
     add("--input", dest="input_json", help="Path to Step 19 validated_modified_traffic.json.")
     add("--output-dir", help="Directory where Step 20 outputs will be written.")
     add("--output-pcap", help="Optional explicit path for modified_traffic.pcap.")
-    add("--dataset-label", default="baseline_fixed_size", help="Dataset label used for default paths.")
     add(
         "--experiment-root",
         help=(
@@ -574,7 +583,6 @@ def main() -> None:
         input_json=args.input_json,
         output_dir=args.output_dir,
         output_pcap=args.output_pcap,
-        dataset_label=args.dataset_label,
         experiment_root=args.experiment_root,
     )
     print(f"Input packets: {result['input_packet_count']}")

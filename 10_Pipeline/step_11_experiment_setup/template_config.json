@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_thursday_example_001",
-    "description": "First narrow CICIDS2017 Thursday baseline modification benchmark.",
+    "experiment_id": "exp_cicids2017_thursday_example...",
+    "description": "...",
     "output_root": "/opt/tfm_benchmark/experiments"
   },
   "dataset": {
@@ -41,8 +41,7 @@
     "target_os": "Ubuntu",
     "experiment_config_label": "baseline_fixed_size",
     "experiment_config_label_options": [
-      "baseline_fixed_size",
-      "variable_size_proxy"
+      "baseline_fixed_size"
     ],
     "grouping_policy": "fixed_packet_count",
     "group_size_packets": 3,

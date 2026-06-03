@@ -71,11 +71,11 @@ def experiment_config_label_from_config(config: dict[str, Any]) -> str:
 
 
 # This function returns the default input PCAP for either PRE or POST traffic.
-# PRE traffic comes from Step 13 selected malicious traffic, while POST traffic comes from Step 20 reconstructed PCAP output.
+# PRE traffic is common to every experiment configuration, while POST traffic is resolved through experiment_config_label.
 def default_input_pcap(
     config: dict[str, Any],
     traffic_version: str,
-    experiment_config_label: str,
+    experiment_config_label: str | None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
@@ -85,11 +85,11 @@ def default_input_pcap(
 
 
 # This function returns the default Step 21 output directory for a Snort run.
-# PRE artifacts are stored in a single pre directory, while POST artifacts are separated by experiment_config_label.
+# PRE artifacts are stored in a single common directory, while POST artifacts are separated by experiment_config_label.
 def default_output_dir(
     config: dict[str, Any],
     traffic_version: str,
-    experiment_config_label: str,
+    experiment_config_label: str | None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
@@ -348,6 +348,7 @@ def run_one_snort_execution(
         "experiment_id": config["experiment"]["experiment_id"],
         "config_source": config.get("_config_path", ""),
         "traffic_version": traffic_version,
+        "traffic_scope": "pre_common" if traffic_version == "pre" else "post_experiment_config",
         "experiment_config_label": experiment_config_label,
         "input_pcap": str(input_pcap_path),
         "output_dir": str(output_dir),
@@ -397,21 +398,22 @@ def run_snort(
     runs: list[dict[str, Any]] = []
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
     for selected_version in selected_versions:
+        run_experiment_config_label = None if selected_version == "pre" else experiment_config_label
         resolved_input = (
             Path(input_pcap).expanduser()
             if input_pcap and len(selected_versions) == 1
-            else default_input_pcap(config, selected_version, experiment_config_label, experiment_root)
+            else default_input_pcap(config, selected_version, run_experiment_config_label, experiment_root)
         )
         resolved_output_dir = (
             Path(output_dir).expanduser()
             if output_dir and len(selected_versions) == 1
-            else default_output_dir(config, selected_version, experiment_config_label, experiment_root)
+            else default_output_dir(config, selected_version, run_experiment_config_label, experiment_root)
         )
         runs.append(
             run_one_snort_execution(
                 config=config,
                 traffic_version=selected_version,
-                experiment_config_label=experiment_config_label,
+                experiment_config_label=run_experiment_config_label,
                 input_pcap_path=resolved_input,
                 output_dir=resolved_output_dir,
                 dry_run=dry_run,
@@ -456,7 +458,7 @@ def main() -> None:
         dry_run=args.dry_run,
     )
     for run in runs:
-        label = run["experiment_config_label"] or "pre"
+        label = run["experiment_config_label"] or run["traffic_scope"]
         print(f"{run['traffic_version']} {label}: exit_code={run['exit_code']} output_dir={run['output_dir']}")
 
 
