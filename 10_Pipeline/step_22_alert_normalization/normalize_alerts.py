@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+# This allows the script to import shared helpers from common/ when it is executed directly.
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+from common.config import load_json_config, require_keys
+from common.io_utils import write_json
+
+
+NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v1"
+
+
+# This function reads a JSON file and returns the parsed Python value.
+def read_json(path: str | Path) -> Any:
+    with Path(path).open("r", encoding="utf-8") as input_file:
+        return json.load(input_file)
+
+
+# This function returns the current UTC timestamp in ISO 8601 format for processing metadata.
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# This function builds the experiment root directory from the experiment output_root and experiment_id fields.
+def build_experiment_root(config: dict[str, Any]) -> Path:
+    experiment = config["experiment"]
+    return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
+
+
+# This function validates the minimum config shape required by Step 22.
+def validate_config(config: dict[str, Any]) -> None:
+    require_keys(config, ["experiment", "pipeline"], "config")
+    require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
+    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
+    experiment_config_label = config["pipeline"]["experiment_config_label"]
+    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
+        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+
+
+# This function returns the experiment configuration label fixed in the Step 11 config.
+def experiment_config_label_from_config(config: dict[str, Any]) -> str:
+    return config["pipeline"]["experiment_config_label"]
+
+
+# This function resolves the default Step 21 input directory for PRE or POST alert artifacts.
+def default_snort_input_dir(
+    config: dict[str, Any],
+    traffic_version: str,
+    experiment_config_label: str,
+    experiment_root_override: str | Path | None = None,
+) -> Path:
+    experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
+    if traffic_version == "pre":
+        return experiment_root / "11_snort_raw" / "pre"
+    return experiment_root / "11_snort_raw" / "post" / experiment_config_label
+
+
+# This function resolves the default Step 22 output directory for PRE or POST normalized alerts.
+def default_normalized_output_dir(
+    config: dict[str, Any],
+    traffic_version: str,
+    experiment_config_label: str,
+    experiment_root_override: str | Path | None = None,
+) -> Path:
+    experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
+    if traffic_version == "pre":
+        return experiment_root / "12_alerts_processed" / "pre"
+    return experiment_root / "12_alerts_processed" / "post" / experiment_config_label
+
+
+# This function finds the converted Step 21 alert JSON file in a Snort raw output directory.
+# execution_metadata.json is preferred because it records the exact converted file chosen by Step 21.
+def resolve_converted_alert_json(input_dir: Path, execution_metadata: dict[str, Any]) -> Path:
+    artifact_path = execution_metadata.get("artifacts", {}).get("converted_alert_json")
+    if isinstance(artifact_path, str) and artifact_path.strip():
+        candidate = Path(artifact_path)
+        if candidate.exists():
+            return candidate
+        local_candidate = input_dir / candidate.name
+        if local_candidate.exists():
+            return local_candidate
+
+    matches = sorted(input_dir.glob("alerts__*.json"))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise FileNotFoundError(f"No converted Step 21 alerts__*.json file found in: {input_dir}")
+    raise ValueError(f"Multiple converted alert JSON files found in {input_dir}; pass --input-alert-json explicitly.")
+
+
+# This function normalizes a value that should be an integer while keeping None for missing fields.
+def optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+# This function creates the stable Snort signature key used by Step 23 comparison.
+def signature_key(gid: int | None, sid: int | None, rev: int | None) -> str:
+    gid_part = str(gid) if gid is not None else "unknown"
+    sid_part = str(sid) if sid is not None else "unknown"
+    rev_part = str(rev) if rev is not None else "unknown"
+    return f"{gid_part}:{sid_part}:{rev_part}"
+
+
+# This function normalizes one Snort alert_json record while preserving the full raw object for provenance.
+def normalize_one_alert(
+    raw_alert: dict[str, Any],
+    alert_index: int,
+    traffic_version: str,
+    experiment_config_label: str,
+) -> dict[str, Any]:
+    gid = optional_int(raw_alert.get("gid"))
+    sid = optional_int(raw_alert.get("sid"))
+    rev = optional_int(raw_alert.get("rev"))
+    key = signature_key(gid, sid, rev)
+    return {
+        "normalized_alert_id": f"{traffic_version}-{alert_index:06d}",
+        "alert_index": alert_index,
+        "traffic_version": traffic_version,
+        "experiment_config_label": experiment_config_label,
+        "gid": gid,
+        "sid": sid,
+        "rev": rev,
+        "signature_key": key,
+        "msg": raw_alert.get("msg"),
+        "class": raw_alert.get("class"),
+        "action": raw_alert.get("action"),
+        "proto": raw_alert.get("proto"),
+        "src_addr": raw_alert.get("src_addr"),
+        "src_port": optional_int(raw_alert.get("src_port")),
+        "dst_addr": raw_alert.get("dst_addr"),
+        "dst_port": optional_int(raw_alert.get("dst_port")),
+        "pkt_num": optional_int(raw_alert.get("pkt_num")),
+        "timestamp": raw_alert.get("timestamp"),
+        "pkt_len": optional_int(raw_alert.get("pkt_len")),
+        "raw_alert": raw_alert,
+    }
+
+
+# This function aggregates normalized alerts by signature for inspection and later comparison.
+def summarize_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
+    signature_counts = Counter(alert["signature_key"] for alert in alerts)
+    action_counts = Counter(str(alert.get("action")) for alert in alerts)
+    proto_counts = Counter(str(alert.get("proto")) for alert in alerts)
+    signatures = []
+    for key, count in sorted(signature_counts.items()):
+        first = next(alert for alert in alerts if alert["signature_key"] == key)
+        signatures.append(
+            {
+                "signature_key": key,
+                "count": count,
+                "gid": first["gid"],
+                "sid": first["sid"],
+                "rev": first["rev"],
+                "msg": first.get("msg"),
+                "class": first.get("class"),
+            }
+        )
+    return {
+        "alert_count": len(alerts),
+        "unique_signature_count": len(signature_counts),
+        "signature_counts": dict(sorted(signature_counts.items())),
+        "action_counts": dict(sorted(action_counts.items())),
+        "proto_counts": dict(sorted(proto_counts.items())),
+        "signatures": signatures,
+    }
+
+
+# This function runs Step 22 for one traffic version.
+def normalize_one_traffic_version(
+    *,
+    config: dict[str, Any],
+    traffic_version: str,
+    experiment_config_label: str,
+    input_dir: Path,
+    output_dir: Path,
+    input_alert_json: Path | None,
+) -> dict[str, Any]:
+    metadata_path = input_dir / "execution_metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Step 21 execution metadata does not exist: {metadata_path}")
+    execution_metadata = read_json(metadata_path)
+    alert_json_path = input_alert_json if input_alert_json else resolve_converted_alert_json(input_dir, execution_metadata)
+    raw_alerts = read_json(alert_json_path)
+    if not isinstance(raw_alerts, list):
+        raise ValueError(f"Converted Step 21 alert JSON must contain a JSON array: {alert_json_path}")
+
+    normalized_alerts = []
+    for alert_index, raw_alert in enumerate(raw_alerts, start=1):
+        if not isinstance(raw_alert, dict):
+            raise ValueError(f"Alert record {alert_index} is not a JSON object in: {alert_json_path}")
+        normalized_alerts.append(normalize_one_alert(raw_alert, alert_index, traffic_version, experiment_config_label))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    normalized_path = output_dir / f"normalized_alerts__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
+    metadata_output_path = output_dir / f"normalization_metadata__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
+    summary = summarize_alerts(normalized_alerts)
+    normalized_artifact = {
+        "metadata": {
+            "schema_version": NORMALIZED_SCHEMA_VERSION,
+            "generated_at_utc": utc_now(),
+            "experiment_id": config["experiment"]["experiment_id"],
+            "config_source": config.get("_config_path", ""),
+            "traffic_version": traffic_version,
+            "experiment_config_label": experiment_config_label,
+            "source_snort_raw_dir": str(input_dir),
+            "source_execution_metadata": str(metadata_path),
+            "source_alert_json": str(alert_json_path),
+            "normalization_policy": {
+                "detection_evidence": "Any Snort alert_json record counts as detection evidence, regardless of action value.",
+                "signature_key": "gid:sid:rev",
+                "raw_alert_preservation": "Each normalized alert stores the original Snort alert object in raw_alert.",
+            },
+        },
+        "summary": summary,
+        "alerts": normalized_alerts,
+    }
+    processing_metadata = {
+        "schema_version": "snort_alert_normalization_metadata_v1",
+        "generated_at_utc": utc_now(),
+        "traffic_version": traffic_version,
+        "experiment_config_label": experiment_config_label,
+        "source_alert_json": str(alert_json_path),
+        "source_execution_metadata": str(metadata_path),
+        "source_step_21_metadata": execution_metadata,
+        "output_normalized_alerts": str(normalized_path),
+        "summary": summary,
+    }
+    write_json(normalized_path, normalized_artifact)
+    write_json(metadata_output_path, processing_metadata)
+    return {
+        "traffic_version": traffic_version,
+        "alert_count": summary["alert_count"],
+        "unique_signature_count": summary["unique_signature_count"],
+        "normalized_alerts": str(normalized_path),
+        "normalization_metadata": str(metadata_output_path),
+    }
+
+
+# This function is the public Python entry point for Step 22.
+def normalize_alerts(
+    *,
+    config_path: str | Path,
+    traffic_version: str,
+    experiment_root: str | Path | None,
+    input_dir: str | Path | None,
+    output_dir: str | Path | None,
+    input_alert_json: str | Path | None,
+) -> list[dict[str, Any]]:
+    config = load_json_config(config_path)
+    validate_config(config)
+    experiment_config_label = experiment_config_label_from_config(config)
+    selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
+    if (input_dir or output_dir or input_alert_json) and len(selected_versions) != 1:
+        raise ValueError("--input-dir, --output-dir, and --input-alert-json overrides are only valid for one traffic version.")
+
+    results = []
+    for selected_version in selected_versions:
+        resolved_input_dir = (
+            Path(input_dir).expanduser()
+            if input_dir
+            else default_snort_input_dir(config, selected_version, experiment_config_label, experiment_root)
+        )
+        resolved_output_dir = (
+            Path(output_dir).expanduser()
+            if output_dir
+            else default_normalized_output_dir(config, selected_version, experiment_config_label, experiment_root)
+        )
+        resolved_input_alert_json = Path(input_alert_json).expanduser() if input_alert_json else None
+        results.append(
+            normalize_one_traffic_version(
+                config=config,
+                traffic_version=selected_version,
+                experiment_config_label=experiment_config_label,
+                input_dir=resolved_input_dir,
+                output_dir=resolved_output_dir,
+                input_alert_json=resolved_input_alert_json,
+            )
+        )
+    return results
+
+
+# This function parses Step 22 command-line arguments.
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Normalize Step 21 Snort alert JSON artifacts for comparison.")
+    add = parser.add_argument
+    add("--config", required=True, help="Path to the experiment JSON config.")
+    add("--traffic-version", choices=["pre", "post", "both"], default="both", help="Traffic side to normalize.")
+    add("--experiment-root", help="Optional experiment root override.")
+    add("--input-dir", help="Explicit Step 21 input directory. Only valid for one traffic version.")
+    add("--input-alert-json", help="Explicit converted Step 21 alerts__*.json path. Only valid for one traffic version.")
+    add("--output-dir", help="Explicit Step 22 output directory. Only valid for one traffic version.")
+    return parser.parse_args()
+
+
+# This function is the command-line entry point.
+def main() -> None:
+    args = parse_cli_args()
+    results = normalize_alerts(
+        config_path=args.config,
+        traffic_version=args.traffic_version,
+        experiment_root=args.experiment_root,
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        input_alert_json=args.input_alert_json,
+    )
+    for result in results:
+        print(
+            f"{result['traffic_version']}: alerts={result['alert_count']} "
+            f"unique_signatures={result['unique_signature_count']} output={result['normalized_alerts']}"
+        )
+
+
+if __name__ == "__main__":
+    main()
