@@ -117,6 +117,18 @@ def signature_key(gid: int | None, sid: int | None, rev: int | None) -> str:
     return f"{gid_part}:{sid_part}:{rev_part}"
 
 
+# This function infers the broad detector source from Snort's generator ID.
+# Snort alert_json does not include an explicit source field, so Step 22 records this practical and traceable classification.
+def detector_source_from_gid(gid: int | None) -> str:
+    if gid == 1:
+        return "ruleset_text"
+    if gid == 3:
+        return "ruleset_so"
+    if gid in {116, 119}:
+        return "builtin_decoder_or_inspector"
+    return "unknown"
+
+
 # This function normalizes one Snort alert_json record while preserving the full raw object for provenance.
 def normalize_one_alert(
     raw_alert: dict[str, Any],
@@ -128,6 +140,7 @@ def normalize_one_alert(
     sid = optional_int(raw_alert.get("sid"))
     rev = optional_int(raw_alert.get("rev"))
     key = signature_key(gid, sid, rev)
+    detector_source = detector_source_from_gid(gid)
     return {
         "normalized_alert_id": f"{traffic_version}-{alert_index:06d}",
         "alert_index": alert_index,
@@ -137,6 +150,7 @@ def normalize_one_alert(
         "sid": sid,
         "rev": rev,
         "signature_key": key,
+        "detector_source": detector_source,
         "msg": raw_alert.get("msg"),
         "class": raw_alert.get("class"),
         "action": raw_alert.get("action"),
@@ -155,6 +169,8 @@ def normalize_one_alert(
 # This function aggregates normalized alerts by signature for inspection and later comparison.
 def summarize_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
     signature_counts = Counter(alert["signature_key"] for alert in alerts)
+    gid_counts = Counter(str(alert.get("gid")) for alert in alerts)
+    detector_source_counts = Counter(str(alert.get("detector_source")) for alert in alerts)
     action_counts = Counter(str(alert.get("action")) for alert in alerts)
     proto_counts = Counter(str(alert.get("proto")) for alert in alerts)
     signatures = []
@@ -167,6 +183,7 @@ def summarize_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
                 "gid": first["gid"],
                 "sid": first["sid"],
                 "rev": first["rev"],
+                "detector_source": first["detector_source"],
                 "msg": first.get("msg"),
                 "class": first.get("class"),
             }
@@ -175,6 +192,8 @@ def summarize_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
         "alert_count": len(alerts),
         "unique_signature_count": len(signature_counts),
         "signature_counts": dict(sorted(signature_counts.items())),
+        "gid_counts": dict(sorted(gid_counts.items())),
+        "detector_source_counts": dict(sorted(detector_source_counts.items())),
         "action_counts": dict(sorted(action_counts.items())),
         "proto_counts": dict(sorted(proto_counts.items())),
         "signatures": signatures,
@@ -224,6 +243,14 @@ def normalize_one_traffic_version(
             "normalization_policy": {
                 "detection_evidence": "Any Snort alert_json record counts as detection evidence, regardless of action value.",
                 "signature_key": "gid:sid:rev",
+                "detector_source": {
+                    "basis": "Inferred from Snort gid because alert_json has no explicit source field.",
+                    "gid_1": "ruleset_text",
+                    "gid_3": "ruleset_so",
+                    "gid_116": "builtin_decoder_or_inspector",
+                    "gid_119": "builtin_decoder_or_inspector",
+                    "fallback": "unknown",
+                },
                 "raw_alert_preservation": "Each normalized alert stores the original Snort alert object in raw_alert.",
             },
         },
