@@ -63,8 +63,8 @@ def default_paths(
     post_dir = experiment_root / "12_alerts_processed" / "post" / experiment_config_label
     comparison_dir = experiment_root / "13_comparison" / experiment_config_label
     return {
-        "pre_normalized": pre_dir / f"normalized_alerts__traffic-pre__experiment-config-{experiment_config_label}.json",
-        "post_normalized": post_dir / f"normalized_alerts__traffic-post__experiment-config-{experiment_config_label}.json",
+        "pre_normalized": pre_dir / "normalized-alerts__traffic-pre.json",
+        "post_normalized": post_dir / f"normalized-alerts__traffic-post__experiment-config-{experiment_config_label}.json",
         "comparison_dir": comparison_dir,
     }
 
@@ -259,9 +259,9 @@ def compare_normalized_alerts(
     per_signature_summary = summarize_by_signature(pre_alerts, post_alerts)
     comparison_dir.mkdir(parents=True, exist_ok=True)
 
-    comparison_path = comparison_dir / f"alert_comparison__experiment-config-{experiment_config_label}.json"
-    signature_summary_path = comparison_dir / f"signature_comparison_summary__experiment-config-{experiment_config_label}.json"
-    metadata_path = comparison_dir / f"comparison_metadata__experiment-config-{experiment_config_label}.json"
+    comparison_path = comparison_dir / f"alert-comparison__experiment-config-{experiment_config_label}.json"
+    signature_summary_path = comparison_dir / f"signature-comparison-summary__experiment-config-{experiment_config_label}.json"
+    metadata_path = comparison_dir / f"comparison-metadata__experiment-config-{experiment_config_label}.json"
     metadata = {
         "schema_version": COMPARISON_SCHEMA_VERSION,
         "generated_at_utc": utc_now(),

@@ -226,8 +226,12 @@ def normalize_one_traffic_version(
         normalized_alerts.append(normalize_one_alert(raw_alert, alert_index, traffic_version, experiment_config_label))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    normalized_path = output_dir / f"normalized_alerts__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
-    metadata_output_path = output_dir / f"normalization_metadata__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
+    if traffic_version == "pre":
+        normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}.json"
+        metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}.json"
+    else:
+        normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
+        metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
     summary = summarize_alerts(normalized_alerts)
     normalized_artifact = {
         "metadata": {

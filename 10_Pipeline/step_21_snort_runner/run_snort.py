@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.naming import sanitize_name_component
 
 
 # This schema version identifies the raw Snort execution metadata written by Step 21.
@@ -158,22 +158,13 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-# This function normalises one filename component.
-# It uses dashes inside a component and leaves double underscores available as the separator between complete filename fields.
-def safe_filename_part(value: str) -> str:
-    cleaned = value.strip().replace("_", "-")
-    cleaned = re.sub(r"[^A-Za-z0-9.-]+", "-", cleaned)
-    cleaned = cleaned.strip("-_.")
-    return cleaned or "unknown"
-
-
 # This function returns the ruleset value used in the converted alert JSON filename.
 # If the ruleset is disabled, the filename records that explicitly; otherwise it records the configured ruleset file stem.
 def ruleset_label(snort_config: dict[str, Any]) -> str:
     if not snort_config["enable_ruleset"]:
         return "off"
     ruleset_path = expand_config_path(snort_config["ruleset_path"])
-    return safe_filename_part(Path(ruleset_path).stem)
+    return sanitize_name_component(Path(ruleset_path).stem)
 
 
 # This function returns the policy value used in the converted alert JSON filename.
@@ -184,7 +175,7 @@ def rules_policy_label(snort_config: dict[str, Any]) -> str:
         return "none"
     policy_stem = Path(expand_config_path(rules_policy_path)).stem
     policy_stem = policy_stem.removeprefix("rulestates-")
-    return safe_filename_part(policy_stem)
+    return sanitize_name_component(policy_stem)
 
 
 # This function returns whether Snort built-in inspector rules were enabled for the run.
@@ -195,7 +186,7 @@ def builtin_label(snort_config: dict[str, Any]) -> str:
 # This function formats one filename field as name-value.
 # Complete fields are later separated with double underscores to avoid ambiguity when values contain dashes.
 def filename_field(name: str, value: str) -> str:
-    return f"{safe_filename_part(name)}-{safe_filename_part(value)}"
+    return f"{sanitize_name_component(name)}-{sanitize_name_component(value)}"
 
 
 # This function builds the human-readable converted alert JSON filename.

@@ -56,6 +56,7 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         if experiment_config_label not in label_options:
             raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
 
+
 #If the previous functions are responsible for validating keys in the configuration, 
 #this function is responsible for checking the existance of the values of those keys. 
 #It iterates through specific paths defined in the configuration (such as dataset paths, Snort binary and config paths, and LLM model path) 
