@@ -367,7 +367,7 @@ def build_docker_image(args: argparse.Namespace) -> None:
         return
     command = (
         f"cd {shlex.quote(args.remote_root + '/04_Steps/Step16')} && "
-        f"docker build -f Dockerfile.step16-17-googleCloud -t {shlex.quote(args.docker_image)} ."
+        f"sudo docker build -f Dockerfile.step16-17-googleCloud -t {shlex.quote(args.docker_image)} ."
     )
     run_remote(args, command)
 
@@ -378,6 +378,7 @@ def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str
     if not args.use_docker:
         return f"cd {shlex.quote(workdir)} && {quote_args(command)}"
     docker_command = [
+        "sudo",
         "docker",
         "run",
         "--rm",
