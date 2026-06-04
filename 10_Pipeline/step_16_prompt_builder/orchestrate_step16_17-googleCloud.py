@@ -8,41 +8,44 @@ import time
 from pathlib import Path
 
 
-#This script orchestrates a temporary Google Compute Engine GPU VM for Steps 16 and 17.
-#It does not change the original Step 16 or Step 17 scripts; it copies them to the VM and runs them there.
+# This script orchestrates a temporary Google Compute Engine GPU VM for Steps 16 and 17.
+# It does not change the original Step 16 or Step 17 scripts; it copies them to the VM and runs them there.
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_INSTANCE_NAME = "llm-runner-step16-17"
-DEFAULT_ZONE = "europe-west4-b"
-DEFAULT_MACHINE_TYPE = "a2-highgpu-1g"
-DEFAULT_GPU_TYPE = "nvidia-tesla-a100"
+DEFAULT_ZONE = "europe-west4-c"
+DEFAULT_MACHINE_TYPE = "g2-standard-8"
+DEFAULT_GPU_TYPE = "nvidia-l4"
 DEFAULT_GPU_COUNT = 1
 DEFAULT_BOOT_DISK_TYPE = "pd-balanced"
 DEFAULT_BOOT_DISK_SIZE_GB = 200
-DEFAULT_IMAGE_FAMILY = "pytorch-latest-gpu"
+DEFAULT_IMAGE_FAMILY = "common-cu129-ubuntu-2204-nvidia-580"
 DEFAULT_IMAGE_PROJECT = "deeplearning-platform-release"
-DEFAULT_REMOTE_ROOT = "/home/ubuntu/thesis_Santos"
+DEFAULT_REMOTE_ROOT = "thesis_Santos"
 DEFAULT_CONFIG = PIPELINE_ROOT / "step_11_experiment_setup" / "config_LLM_baseline.json"
 DEFAULT_GCS_MODEL_ROOT = "gs://thesis-santos-llm-artifacts/models"
 
-#This catalog maps short model names used by the orchestrator to their Cloud Storage directories.
-#Add new entries here when more Hugging Face models are staged in the project bucket.
+# This catalog maps short model names used by the orchestrator to their Cloud Storage directories.
+# Add new entries here when more Hugging Face models are staged in the project bucket.
 GCS_MODEL_CATALOG = {
     "llama-3.1-8b-instruct": "meta-llama/Llama-3.1-8B-Instruct",
 }
 
 
+# This function formats command lists as shell-like strings for readable logs before execution.
 def quote_args(args: list[str]) -> str:
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
+# This function prints and runs a local command. The dry-run flag keeps orchestration testable without touching Google Cloud.
 def run_command(command: list[str], dry_run: bool) -> None:
     print(quote_args(command))
     if not dry_run:
         subprocess.run(command, check=True)
 
 
+# This function runs a command inside the Google Compute VM over gcloud SSH.
 def run_remote(args: argparse.Namespace, remote_command: str) -> None:
     command = [
         "gcloud",
@@ -61,6 +64,45 @@ def run_remote(args: argparse.Namespace, remote_command: str) -> None:
     run_command(command, args.dry_run)
 
 
+# This function runs a remote command and returns stdout. It is used when the local script needs information from the VM, such as the remote home directory.
+def capture_remote(args: argparse.Namespace, remote_command: str) -> str:
+    command = [
+        "gcloud",
+        "compute",
+        "ssh",
+        args.instance_name,
+        "--project",
+        args.project,
+        "--zone",
+        args.zone,
+        "--command",
+        remote_command,
+    ]
+    if args.tunnel_through_iap:
+        command.append("--tunnel-through-iap")
+    print(quote_args(command))
+    if args.dry_run:
+        return ""
+    result = subprocess.run(command, check=True, text=True, capture_output=True)
+    if result.stderr:
+        print(result.stderr, end="")
+    if result.stdout:
+        print(result.stdout, end="")
+    return result.stdout.strip()
+
+
+# This function turns a relative remote root into an absolute path under the SSH user's home directory.
+# This avoids assuming that Google images always use /home/ubuntu.
+def resolve_remote_root(args: argparse.Namespace) -> None:
+    if args.remote_root.startswith("/"):
+        return
+    remote_home = capture_remote(args, "printf '%s' \"$HOME\"")
+    if not remote_home:
+        return
+    args.remote_root = f"{remote_home.rstrip('/')}/{args.remote_root.strip('/')}"
+
+
+# This function copies local files or folders to the VM using gcloud scp.
 def scp_to_remote(args: argparse.Namespace, local_path: Path, remote_path: str) -> None:
     command = [
         "gcloud",
@@ -79,6 +121,7 @@ def scp_to_remote(args: argparse.Namespace, local_path: Path, remote_path: str) 
     run_command(command, args.dry_run)
 
 
+# This function copies experiment outputs from the VM back to the local machine.
 def scp_from_remote(args: argparse.Namespace, remote_path: str, local_path: Path) -> None:
     local_path.mkdir(parents=True, exist_ok=True)
     command = [
@@ -98,6 +141,8 @@ def scp_from_remote(args: argparse.Namespace, remote_path: str, local_path: Path
     run_command(command, args.dry_run)
 
 
+# This function builds the startup script used when creating a new VM.
+# The image already provides the NVIDIA driver; this script installs the basic tooling needed by the pipeline.
 def build_startup_script() -> str:
     return "\n".join(
         [
@@ -112,6 +157,7 @@ def build_startup_script() -> str:
     ) + "\n"
 
 
+# This function creates the Google Compute Engine VM with the requested machine type, GPU, boot disk and image.
 def create_instance(args: argparse.Namespace) -> None:
     with tempfile.NamedTemporaryFile("w", suffix="-startup-googleCloud.sh", delete=False, encoding="utf-8") as startup_file:
         startup_file.write(build_startup_script())
@@ -153,6 +199,7 @@ def create_instance(args: argparse.Namespace) -> None:
     run_command(command, args.dry_run)
 
 
+# This function deletes the VM and all attached disks when the user explicitly asks for cleanup.
 def delete_instance(args: argparse.Namespace) -> None:
     command = [
         "gcloud",
@@ -171,6 +218,8 @@ def delete_instance(args: argparse.Namespace) -> None:
     run_command(command, args.dry_run)
 
 
+# This function waits until gcloud SSH can connect to the VM.
+# It is needed because instance creation can finish before SSH and startup scripts are ready.
 def wait_for_ssh(args: argparse.Namespace) -> None:
     if args.dry_run:
         print("# dry-run: skipping SSH readiness wait")
@@ -185,6 +234,7 @@ def wait_for_ssh(args: argparse.Namespace) -> None:
     raise TimeoutError(f"VM did not become reachable over SSH within {args.ssh_timeout_seconds} seconds.")
 
 
+# This function creates the same high-level folder layout used in the RISE cloud environment.
 def create_remote_layout(args: argparse.Namespace) -> None:
     remote_root = shlex.quote(args.remote_root)
     experiment_id = shlex.quote(args.experiment_id)
@@ -203,6 +253,7 @@ def create_remote_layout(args: argparse.Namespace) -> None:
     run_remote(args, command)
 
 
+# This function transfers the Step 16, Step 17, shared code, config, and Dockerfile to the VM.
 def transfer_pipeline_files(args: argparse.Namespace) -> None:
     remote_steps = f"{args.remote_root}/04_Steps"
     scp_to_remote(args, PIPELINE_ROOT / "common", f"{remote_steps}/")
@@ -214,6 +265,7 @@ def transfer_pipeline_files(args: argparse.Namespace) -> None:
     scp_to_remote(args, Path(args.config), f"{remote_steps}/setups/config_LLM_baseline.json")
 
 
+# This function optionally transfers local Step 15 group files into the VM input folder.
 def transfer_group_inputs(args: argparse.Namespace) -> None:
     if not args.local_groups_dir:
         return
@@ -221,6 +273,7 @@ def transfer_group_inputs(args: argparse.Namespace) -> None:
     scp_to_remote(args, Path(args.local_groups_dir), remote_input)
 
 
+# This function downloads model files from direct URLs when the user chooses URL-based model staging.
 def download_models(args: argparse.Namespace) -> None:
     if not args.model_url:
         return
@@ -232,6 +285,8 @@ def download_models(args: argparse.Namespace) -> None:
     run_remote(args, "\n".join(commands))
 
 
+# This function resolves the model selection requested with --sync-model.
+# It accepts catalog names, relative paths under the GCS model root, full gs:// paths, or all.
 def resolve_selected_gcs_model_dirs(args: argparse.Namespace) -> list[str]:
     selected_dirs = list(args.gcs_model_dir or [])
     requested_models = args.sync_model or ["all"]
@@ -267,6 +322,8 @@ def resolve_selected_gcs_model_dirs(args: argparse.Namespace) -> list[str]:
     return unique_dirs
 
 
+# This function synchronises selected models from Google Cloud Storage to the VM local model directory.
+# For the vLLM backend, the synced local model paths are passed into Step 17 automatically.
 def sync_models_from_gcs(args: argparse.Namespace) -> None:
     selected_model_dirs = resolve_selected_gcs_model_dirs(args)
     if not selected_model_dirs:
@@ -285,6 +342,7 @@ def sync_models_from_gcs(args: argparse.Namespace) -> None:
         args.model_path = local_model_paths
 
 
+# This function installs and smoke-tests llama-cpp-python only when the legacy llama-cpp backend is selected.
 def install_llama_cpp(args: argparse.Namespace) -> None:
     if args.step17_backend != "llama-cpp" or args.skip_llama_cpp_install:
         return
@@ -303,6 +361,7 @@ def install_llama_cpp(args: argparse.Namespace) -> None:
     run_remote(args, command)
 
 
+# This function builds the Docker image used by the Google Cloud vLLM execution path.
 def build_docker_image(args: argparse.Namespace) -> None:
     if not args.use_docker or args.skip_docker_build:
         return
@@ -313,6 +372,8 @@ def build_docker_image(args: argparse.Namespace) -> None:
     run_remote(args, command)
 
 
+# This function wraps a pipeline command in docker run when --use-docker is enabled.
+# The thesis folder is mounted at the same path inside the container so config paths remain stable.
 def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str]) -> str:
     if not args.use_docker:
         return f"cd {shlex.quote(workdir)} && {quote_args(command)}"
@@ -336,6 +397,7 @@ def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str
     return quote_args(docker_command)
 
 
+# This function runs Step 16 on the VM to build prompt packages from the configured group inputs.
 def run_step16(args: argparse.Namespace) -> None:
     command = [
         "python3",
@@ -355,6 +417,8 @@ def run_step16(args: argparse.Namespace) -> None:
     run_remote(args, remote_command)
 
 
+# This function runs Step 17 on the VM.
+# The default Google Cloud path uses vLLM, while the legacy llama-cpp runner can still be selected explicitly.
 def run_step17(args: argparse.Namespace) -> None:
     step17_script = "run_llm_batch-googleCloud.py" if args.step17_backend == "vllm" else "run_llm_batch.py"
     command = [
@@ -398,6 +462,7 @@ def run_step17(args: argparse.Namespace) -> None:
     run_remote(args, remote_command)
 
 
+# This function fetches the experiment output folder from the VM after Step 16/17 execution.
 def fetch_outputs(args: argparse.Namespace) -> None:
     if not args.local_output_dir:
         return
@@ -406,6 +471,7 @@ def fetch_outputs(args: argparse.Namespace) -> None:
     scp_from_remote(args, remote_experiment_output, local_output_dir)
 
 
+# This function defines all command-line options used by the orchestrator.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create a Google GPU VM, run Step 16 and Step 17 there, and copy outputs back."
@@ -424,7 +490,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tunnel-through-iap", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-create-instance", action="store_true")
-    parser.add_argument("--test-setup-only", action="store_true", help="Create the VM, create the remote layout, transfer scripts, build Docker, and stop before model sync and Step 16/17 execution.")
+    parser.add_argument("--test-setup-only", action="store_true", help="Create/reuse the VM, create the remote layout, transfer scripts, build Docker, sync requested models, and stop before Step 16/17 execution.")
     parser.add_argument("--delete-instance-after-run", action="store_true")
     parser.add_argument("--ssh-timeout-seconds", type=int, default=900)
 
@@ -471,12 +537,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# This is the main orchestration sequence.
+# In test setup mode it stops after VM setup, file transfer, Docker build, group transfer, and model sync.
 def main() -> None:
     args = parse_args()
     try:
         if not args.skip_create_instance:
             create_instance(args)
         wait_for_ssh(args)
+        resolve_remote_root(args)
         create_remote_layout(args)
         transfer_pipeline_files(args)
         build_docker_image(args)
