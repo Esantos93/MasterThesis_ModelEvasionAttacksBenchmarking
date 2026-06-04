@@ -1,0 +1,14 @@
+FROM vllm/vllm-openai:latest
+
+ENV PYTHONUNBUFFERED=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir \
+        diskcache \
+        hf_transfer \
+        jinja2 \
+        numpy \
+        typing-extensions
+
+WORKDIR /home/ubuntu/thesis_Santos/04_Steps
