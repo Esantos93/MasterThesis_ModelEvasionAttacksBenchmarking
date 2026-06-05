@@ -41,6 +41,11 @@ class VllmChatCompletionAdapter:
         self.model_id = model_id
         self.llm = LLM(**kwargs)
 
+    def tokenize(self, text: bytes | str, add_bos: bool = False) -> list[int]:
+        tokenizer = self.llm.get_tokenizer()
+        decoded_text = text.decode("utf-8") if isinstance(text, bytes) else text
+        return tokenizer.encode(decoded_text, add_special_tokens=add_bos)
+
     def create_chat_completion(
         self,
         *,
