@@ -480,6 +480,12 @@ def run_step17(args: argparse.Namespace) -> None:
         command.extend(["--n-threads", str(args.n_threads)])
     if args.limit_prompts is not None:
         command.extend(["--limit-prompts", str(args.limit_prompts)])
+    if args.step17_prompt_manifest:
+        command.extend(["--prompt-manifest", args.step17_prompt_manifest])
+    if args.step17_prompt_dir:
+        command.extend(["--prompt-dir", args.step17_prompt_dir])
+    if args.step17_output_root:
+        command.extend(["--output-root", args.step17_output_root])
     if args.model_filter:
         command.extend(["--model-filter", args.model_filter])
     if args.hf_model_id:
@@ -567,6 +573,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--limit-prompts", type=int)
     parser.add_argument("--skip-step17", action="store_true")
+    parser.add_argument("--step17-prompt-manifest")
+    parser.add_argument("--step17-prompt-dir")
+    parser.add_argument("--step17-output-root")
     parser.add_argument("--step17-backend", choices=["vllm", "llama-cpp"], default="vllm")
     parser.add_argument("--hf-model-id", action="append")
     parser.add_argument("--model-filter")
