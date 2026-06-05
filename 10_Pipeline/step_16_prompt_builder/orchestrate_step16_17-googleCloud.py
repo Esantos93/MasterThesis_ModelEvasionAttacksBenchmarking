@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import tempfile
@@ -27,6 +28,7 @@ DEFAULT_SSH_USER = "dornas93"
 DEFAULT_CONFIG = PIPELINE_ROOT / "step_11_experiment_setup" / "config_LLM_baseline.json"
 DEFAULT_GCS_MODEL_ROOT = "gs://thesis-santos-llm-artifacts/models"
 DEFAULT_GCS_GROUP_ROOT = "gs://thesis-santos-llm-artifacts"
+GCLOUD_COMMAND = "gcloud.cmd" if os.name == "nt" else "gcloud"
 
 # This catalog maps short model names used by the orchestrator to their Cloud Storage directories.
 # Add new entries here when more Hugging Face models are staged in the project bucket.
@@ -57,7 +59,7 @@ def remote_target(args: argparse.Namespace) -> str:
 # This function runs a command inside the Google Compute VM over gcloud SSH.
 def run_remote(args: argparse.Namespace, remote_command: str) -> None:
     command = [
-        "gcloud",
+        GCLOUD_COMMAND,
         "compute",
         "ssh",
         remote_target(args),
@@ -76,7 +78,7 @@ def run_remote(args: argparse.Namespace, remote_command: str) -> None:
 # This function runs a remote command and returns stdout. It is used when the local script needs information from the VM, such as the remote home directory.
 def capture_remote(args: argparse.Namespace, remote_command: str) -> str:
     command = [
-        "gcloud",
+        GCLOUD_COMMAND,
         "compute",
         "ssh",
         remote_target(args),
@@ -114,7 +116,7 @@ def resolve_remote_root(args: argparse.Namespace) -> None:
 # This function copies local files or folders to the VM using gcloud scp.
 def scp_to_remote(args: argparse.Namespace, local_path: Path, remote_path: str) -> None:
     command = [
-        "gcloud",
+        GCLOUD_COMMAND,
         "compute",
         "scp",
         "--recurse",
@@ -134,7 +136,7 @@ def scp_to_remote(args: argparse.Namespace, local_path: Path, remote_path: str) 
 def scp_from_remote(args: argparse.Namespace, remote_path: str, local_path: Path) -> None:
     local_path.mkdir(parents=True, exist_ok=True)
     command = [
-        "gcloud",
+        GCLOUD_COMMAND,
         "compute",
         "scp",
         "--recurse",
@@ -173,7 +175,7 @@ def create_instance(args: argparse.Namespace) -> None:
         startup_path = Path(startup_file.name)
 
     command = [
-        "gcloud",
+        GCLOUD_COMMAND,
         "compute",
         "instances",
         "create",
@@ -211,7 +213,7 @@ def create_instance(args: argparse.Namespace) -> None:
 # This function deletes the VM and all attached disks when the user explicitly asks for cleanup.
 def delete_instance(args: argparse.Namespace) -> None:
     command = [
-        "gcloud",
+        GCLOUD_COMMAND,
         "compute",
         "instances",
         "delete",
