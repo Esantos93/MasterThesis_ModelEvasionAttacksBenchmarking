@@ -23,6 +23,7 @@ DEFAULT_BOOT_DISK_SIZE_GB = 200
 DEFAULT_IMAGE_FAMILY = "common-cu129-ubuntu-2204-nvidia-580"
 DEFAULT_IMAGE_PROJECT = "deeplearning-platform-release"
 DEFAULT_REMOTE_ROOT = "thesis_Santos"
+DEFAULT_SSH_USER = "dornas93"
 DEFAULT_CONFIG = PIPELINE_ROOT / "step_11_experiment_setup" / "config_LLM_baseline.json"
 DEFAULT_GCS_MODEL_ROOT = "gs://thesis-santos-llm-artifacts/models"
 
@@ -487,7 +488,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project", required=True)
     parser.add_argument("--zone", default=DEFAULT_ZONE)
     parser.add_argument("--instance-name", default=DEFAULT_INSTANCE_NAME)
-    parser.add_argument("--ssh-user", help="Linux user to use for gcloud compute ssh/scp. If omitted, gcloud chooses the default user.")
+    parser.add_argument("--ssh-user", default=DEFAULT_SSH_USER, help="Linux user to use for gcloud compute ssh/scp.")
     parser.add_argument("--machine-type", default=DEFAULT_MACHINE_TYPE)
     parser.add_argument("--gpu-type", default=DEFAULT_GPU_TYPE)
     parser.add_argument("--gpu-count", type=int, default=DEFAULT_GPU_COUNT)
