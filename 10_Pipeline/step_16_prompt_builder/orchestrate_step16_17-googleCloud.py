@@ -265,7 +265,8 @@ def create_remote_layout(args: argparse.Namespace) -> None:
 # This function transfers the Step 16, Step 17, shared code, config, and Dockerfile to the VM.
 def transfer_pipeline_files(args: argparse.Namespace) -> None:
     remote_steps = f"{args.remote_root}/04_Steps"
-    scp_to_remote(args, PIPELINE_ROOT / "common", f"{remote_steps}/")
+    for common_file in sorted((PIPELINE_ROOT / "common").glob("*.py")):
+        scp_to_remote(args, common_file, f"{remote_steps}/common/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "build_prompts.py", f"{remote_steps}/Step16/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "build_prompts-googleCloud.py", f"{remote_steps}/Step16/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "Dockerfile.step16-17-googleCloud", f"{remote_steps}/Step16/")
