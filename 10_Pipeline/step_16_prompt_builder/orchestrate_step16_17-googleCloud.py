@@ -333,6 +333,8 @@ def resolve_selected_gcs_model_dirs(args: argparse.Namespace) -> list[str]:
 # This function synchronises selected models from Google Cloud Storage to the VM local model directory.
 # For the vLLM backend, the synced local model paths are passed into Step 17 automatically.
 def sync_models_from_gcs(args: argparse.Namespace) -> None:
+    if args.skip_model_sync:
+        return
     selected_model_dirs = resolve_selected_gcs_model_dirs(args)
     if not selected_model_dirs:
         return
@@ -408,6 +410,8 @@ def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str
 
 # This function runs Step 16 on the VM to build prompt packages from the configured group inputs.
 def run_step16(args: argparse.Namespace) -> None:
+    if args.skip_step16:
+        return
     command = [
         "python3",
         "build_prompts-googleCloud.py",
@@ -429,6 +433,8 @@ def run_step16(args: argparse.Namespace) -> None:
 # This function runs Step 17 on the VM.
 # The default Google Cloud path uses vLLM, while the legacy llama-cpp runner can still be selected explicitly.
 def run_step17(args: argparse.Namespace) -> None:
+    if args.skip_step17:
+        return
     step17_script = "run_llm_batch-googleCloud.py" if args.step17_backend == "vllm" else "run_llm_batch.py"
     command = [
         "python3",
@@ -513,6 +519,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-url", action="append", help="Direct downloadable model URL. Can be repeated.")
     parser.add_argument("--gcs-model-dir", action="append", help="Cloud Storage model directory to sync to the VM. Can be repeated.")
     parser.add_argument("--gcs-model-root", default=DEFAULT_GCS_MODEL_ROOT, help="Cloud Storage root used for catalog/relative model names.")
+    parser.add_argument("--skip-model-sync", action="store_true", help="Skip syncing models from Cloud Storage.")
     parser.add_argument(
         "--sync-model",
         action="append",
@@ -528,8 +535,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step16-input-dir")
     parser.add_argument("--step16-output-dir")
     parser.add_argument("--limit-groups", type=int)
+    parser.add_argument("--skip-step16", action="store_true")
 
     parser.add_argument("--limit-prompts", type=int)
+    parser.add_argument("--skip-step17", action="store_true")
     parser.add_argument("--step17-backend", choices=["vllm", "llama-cpp"], default="vllm")
     parser.add_argument("--hf-model-id", action="append")
     parser.add_argument("--model-filter")
@@ -549,6 +558,7 @@ def parse_args() -> argparse.Namespace:
 
 # This is the main orchestration sequence.
 # In test setup mode it stops after VM setup, file transfer, Docker build, group transfer, and model sync.
+# The skip flags allow testing individual stages, for example Step 16 without immediately running Step 17.
 def main() -> None:
     args = parse_args()
     try:
