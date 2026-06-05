@@ -26,6 +26,7 @@ DEFAULT_REMOTE_ROOT = "thesis_Santos"
 DEFAULT_SSH_USER = "dornas93"
 DEFAULT_CONFIG = PIPELINE_ROOT / "step_11_experiment_setup" / "config_LLM_baseline.json"
 DEFAULT_GCS_MODEL_ROOT = "gs://thesis-santos-llm-artifacts/models"
+DEFAULT_GCS_GROUP_ROOT = "gs://thesis-santos-llm-artifacts"
 
 # This catalog maps short model names used by the orchestrator to their Cloud Storage directories.
 # Add new entries here when more Hugging Face models are staged in the project bucket.
@@ -281,6 +282,31 @@ def transfer_group_inputs(args: argparse.Namespace) -> None:
     scp_to_remote(args, Path(args.local_groups_dir), remote_input)
 
 
+# This function returns the Step 16 input directory, using an explicit override when provided.
+def step16_input_dir(args: argparse.Namespace) -> str:
+    if args.step16_input_dir:
+        return args.step16_input_dir
+    return f"{args.remote_root}/01_InputFiles/{args.experiment_id}/05_groups"
+
+
+# This function synchronises Step 15 group files from Cloud Storage into the VM input directory used by Step 16.
+def sync_groups_from_gcs(args: argparse.Namespace) -> None:
+    if not args.gcs_groups_dir:
+        return
+    source_dir = args.gcs_groups_dir.rstrip("/")
+    if not source_dir.startswith("gs://"):
+        source_dir = f"{args.gcs_group_root.rstrip('/')}/{source_dir.strip('/')}"
+    destination_dir = step16_input_dir(args)
+    command = "\n".join(
+        [
+            "set -euo pipefail",
+            f"mkdir -p {shlex.quote(destination_dir)}",
+            f"gcloud storage rsync -r {shlex.quote(source_dir)} {shlex.quote(destination_dir)}",
+        ]
+    )
+    run_remote(args, command)
+
+
 # This function downloads model files from direct URLs when the user chooses URL-based model staging.
 def download_models(args: argparse.Namespace) -> None:
     if not args.model_url:
@@ -514,6 +540,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--local-groups-dir")
+    parser.add_argument("--gcs-groups-dir", help="Cloud Storage directory containing group_*.json and group_manifest.json for Step 16.")
+    parser.add_argument("--gcs-group-root", default=DEFAULT_GCS_GROUP_ROOT, help="Cloud Storage root used when --gcs-groups-dir is a relative path.")
     parser.add_argument("--local-output-dir")
 
     parser.add_argument("--model-url", action="append", help="Direct downloadable model URL. Can be repeated.")
@@ -570,6 +598,7 @@ def main() -> None:
         transfer_pipeline_files(args)
         build_docker_image(args)
         transfer_group_inputs(args)
+        sync_groups_from_gcs(args)
         sync_models_from_gcs(args)
         download_models(args)
         if args.test_setup_only:
