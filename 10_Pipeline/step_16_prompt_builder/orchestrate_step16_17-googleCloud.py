@@ -45,13 +45,20 @@ def run_command(command: list[str], dry_run: bool) -> None:
         subprocess.run(command, check=True)
 
 
+# This function builds the gcloud SSH/SCP target. When --ssh-user is set, gcloud connects as that Linux user.
+def remote_target(args: argparse.Namespace) -> str:
+    if args.ssh_user:
+        return f"{args.ssh_user}@{args.instance_name}"
+    return args.instance_name
+
+
 # This function runs a command inside the Google Compute VM over gcloud SSH.
 def run_remote(args: argparse.Namespace, remote_command: str) -> None:
     command = [
         "gcloud",
         "compute",
         "ssh",
-        args.instance_name,
+        remote_target(args),
         "--project",
         args.project,
         "--zone",
@@ -70,7 +77,7 @@ def capture_remote(args: argparse.Namespace, remote_command: str) -> str:
         "gcloud",
         "compute",
         "ssh",
-        args.instance_name,
+        remote_target(args),
         "--project",
         args.project,
         "--zone",
@@ -110,7 +117,7 @@ def scp_to_remote(args: argparse.Namespace, local_path: Path, remote_path: str) 
         "scp",
         "--recurse",
         str(local_path),
-        f"{args.instance_name}:{remote_path}",
+        f"{remote_target(args)}:{remote_path}",
         "--project",
         args.project,
         "--zone",
@@ -129,7 +136,7 @@ def scp_from_remote(args: argparse.Namespace, remote_path: str, local_path: Path
         "compute",
         "scp",
         "--recurse",
-        f"{args.instance_name}:{remote_path}",
+        f"{remote_target(args)}:{remote_path}",
         str(local_path),
         "--project",
         args.project,
@@ -480,6 +487,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project", required=True)
     parser.add_argument("--zone", default=DEFAULT_ZONE)
     parser.add_argument("--instance-name", default=DEFAULT_INSTANCE_NAME)
+    parser.add_argument("--ssh-user", help="Linux user to use for gcloud compute ssh/scp. If omitted, gcloud chooses the default user.")
     parser.add_argument("--machine-type", default=DEFAULT_MACHINE_TYPE)
     parser.add_argument("--gpu-type", default=DEFAULT_GPU_TYPE)
     parser.add_argument("--gpu-count", type=int, default=DEFAULT_GPU_COUNT)
