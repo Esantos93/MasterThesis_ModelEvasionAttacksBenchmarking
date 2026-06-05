@@ -289,6 +289,11 @@ def step16_input_dir(args: argparse.Namespace) -> str:
     return f"{args.remote_root}/01_InputFiles/{args.experiment_id}/05_groups"
 
 
+# This function extracts a folder label from a Cloud Storage path, for example size_003.
+def gcs_path_leaf(gcs_path: str) -> str:
+    return gcs_path.rstrip("/").split("/")[-1]
+
+
 # This function synchronises Step 15 group files from Cloud Storage into the VM input directory used by Step 16.
 def sync_groups_from_gcs(args: argparse.Namespace) -> None:
     if not args.gcs_groups_dir:
@@ -296,7 +301,11 @@ def sync_groups_from_gcs(args: argparse.Namespace) -> None:
     source_dir = args.gcs_groups_dir.rstrip("/")
     if not source_dir.startswith("gs://"):
         source_dir = f"{args.gcs_group_root.rstrip('/')}/{source_dir.strip('/')}"
-    destination_dir = step16_input_dir(args)
+    if args.step16_input_dir:
+        destination_dir = args.step16_input_dir
+    else:
+        destination_dir = f"{args.remote_root}/01_InputFiles/{args.experiment_id}/05_groups/{gcs_path_leaf(source_dir)}"
+        args.step16_input_dir = destination_dir
     command = "\n".join(
         [
             "set -euo pipefail",
@@ -413,6 +422,11 @@ def build_docker_image(args: argparse.Namespace) -> None:
 def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str]) -> str:
     if not args.use_docker:
         return f"cd {shlex.quote(workdir)} && {quote_args(command)}"
+    docker_entrypoint: list[str] = []
+    docker_payload = command
+    if command and command[0] == "python3":
+        docker_entrypoint = ["--entrypoint", "python3"]
+        docker_payload = command[1:]
     docker_command = [
         "sudo",
         "docker",
@@ -428,9 +442,10 @@ def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str
         f"{args.remote_root}:{args.remote_root}",
         "-w",
         workdir,
+        *docker_entrypoint,
         args.docker_image,
     ]
-    docker_command.extend(command)
+    docker_command.extend(docker_payload)
     return quote_args(docker_command)
 
 
