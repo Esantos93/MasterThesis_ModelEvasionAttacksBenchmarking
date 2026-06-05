@@ -25,7 +25,7 @@ VLLM_TRUST_REMOTE_CODE: bool = False
 
 
 class VllmChatCompletionAdapter:
-    def __init__(self, model_id: str) -> None:
+    def __init__(self, model_id: str, max_model_len: int | None) -> None:
         from vllm import LLM
 
         kwargs: dict[str, Any] = {
@@ -36,8 +36,8 @@ class VllmChatCompletionAdapter:
         }
         if VLLM_QUANTIZATION:
             kwargs["quantization"] = VLLM_QUANTIZATION
-        if VLLM_MAX_MODEL_LEN:
-            kwargs["max_model_len"] = VLLM_MAX_MODEL_LEN
+        if max_model_len:
+            kwargs["max_model_len"] = max_model_len
         self.model_id = model_id
         self.llm = LLM(**kwargs)
 
@@ -92,7 +92,8 @@ def collect_vllm_model_paths(
 
 
 def load_vllm_model(model_path: Path, generation_params: dict[str, Any]) -> VllmChatCompletionAdapter:
-    return VllmChatCompletionAdapter(str(model_path))
+    max_model_len = VLLM_MAX_MODEL_LEN or int(generation_params["n_ctx"])
+    return VllmChatCompletionAdapter(str(model_path), max_model_len=max_model_len)
 
 
 def parse_google_cloud_args() -> argparse.Namespace:
