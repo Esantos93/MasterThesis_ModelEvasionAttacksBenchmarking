@@ -554,6 +554,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tunnel-through-iap", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-create-instance", action="store_true")
+    parser.add_argument("--skip-remote-layout", action="store_true", help="Skip creating the remote thesis folder layout.")
+    parser.add_argument("--skip-file-transfer", action="store_true", help="Skip copying Step 16/17 scripts and shared files to the VM.")
     parser.add_argument("--test-setup-only", action="store_true", help="Create/reuse the VM, create the remote layout, transfer scripts, build Docker, sync requested models, and stop before Step 16/17 execution.")
     parser.add_argument("--delete-instance-after-run", action="store_true")
     parser.add_argument("--ssh-timeout-seconds", type=int, default=900)
@@ -619,8 +621,10 @@ def main() -> None:
             create_instance(args)
         wait_for_ssh(args)
         resolve_remote_root(args)
-        create_remote_layout(args)
-        transfer_pipeline_files(args)
+        if not args.skip_remote_layout:
+            create_remote_layout(args)
+        if not args.skip_file_transfer:
+            transfer_pipeline_files(args)
         build_docker_image(args)
         transfer_group_inputs(args)
         sync_groups_from_gcs(args)
