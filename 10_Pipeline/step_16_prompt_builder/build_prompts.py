@@ -16,18 +16,24 @@ from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 
 
-#This is the schema version used by the prompt package files created by this step.
-PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v1"
+#These are the schema names produced by the compact patch-based Step 16 contract.
+PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
+PROMPT_MANIFEST_SCHEMA_VERSION = "prompt_manifest_v2"
+SOURCE_PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v1"
+PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 
-#This is the schema version used by the prompt manifest created by this step.
-PROMPT_MANIFEST_SCHEMA_VERSION = "prompt_manifest_v1"
+#This is the historical full-JSON prompt policy name and the new compact patch policy name.
+FULL_PROMPT_VERSION = "full_prompting_v1"
+COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v1"
+
+#This alias keeps old configs readable during the migration, but new configs should use full_prompting_v1 explicitly.
+LEGACY_PROMPT_VERSION_ALIASES = {"baseline_v1": FULL_PROMPT_VERSION}
 
 #This is the fixed RISE cloud root agreed for the LLM-side pipeline steps.
 DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 
 #This list records the prompt versions that the current Step 16 implementation knows how to build.
-#Future prompt versions should be added here and in build_messages_by_prompt_version().
-SUPPORTED_PROMPT_VERSIONS = ["baseline_v1"]
+SUPPORTED_PROMPT_VERSIONS = [FULL_PROMPT_VERSION, COMPACT_PATCH_PROMPT_VERSION]
 
 
 #This function reads a JSON file and returns the parsed Python object.
@@ -37,7 +43,7 @@ def read_json(path: str | Path) -> Any:
 
 
 #This function builds the default cloud-side input and output paths for Step 16.
-#The VM sends groups to 01_InputFiles, and Step 16 writes prompts to 02_OutputFiles.
+#The VM sends compact prompt units to 01_InputFiles, and Step 16 writes prompts to 02_OutputFiles.
 def default_cloud_paths(config: dict[str, Any], cloud_root: str | Path) -> dict[str, Path]:
     experiment_id = config["experiment"]["experiment_id"]
     root = Path(cloud_root).expanduser()
@@ -54,172 +60,268 @@ def validate_config(config: dict[str, Any]) -> None:
     require_keys(config["llm"], ["prompt_version"], "llm")
 
 
-#This function validates the basic shape of the Step 15 group manifest.
+#This function normalises the configured prompt version during the baseline_v1 -> full_prompting_v1 migration.
+def normalize_prompt_version(prompt_version: str) -> str:
+    normalized = prompt_version.strip()
+    return LEGACY_PROMPT_VERSION_ALIASES.get(normalized, normalized)
+
+
+#This function validates the basic shape of the Step 15 compact group manifest.
 def validate_group_manifest(group_manifest: Any, manifest_path: Path) -> dict[str, Any]:
     if not isinstance(group_manifest, dict):
         raise ValueError(f"Group manifest root must be an object: {manifest_path}")
     metadata = group_manifest.get("metadata")
     if not isinstance(metadata, dict):
         raise ValueError(f"Group manifest must contain a metadata object: {manifest_path}")
-    groups = group_manifest.get("groups")
-    if not isinstance(groups, list):
-        raise ValueError(f"Group manifest must contain a groups list: {manifest_path}")
-    immutable_fields = metadata.get("immutable_fields")
-    if not isinstance(immutable_fields, list):
-        raise ValueError(f"Group manifest metadata must contain immutable_fields list: {manifest_path}")
+    schema_version = metadata.get("schema_version")
+    if schema_version != "group_manifest_v2":
+        raise ValueError(
+            "Step 16 compact patch prompting requires group_manifest_v2 from Step 15. "
+            f"Found schema_version={schema_version!r} in {manifest_path}"
+        )
+    prompt_units = group_manifest.get("prompt_units")
+    if not isinstance(prompt_units, list):
+        raise ValueError(f"Group manifest must contain a prompt_units list: {manifest_path}")
     return group_manifest
 
 
-#This function validates the basic shape of one Step 15 group file.
+#This function validates the basic shape of one Step 15 compact prompt unit.
 #It intentionally only checks the fields Step 16 needs for prompt construction.
-def validate_group_file(group_json: Any, group_path: Path) -> dict[str, Any]:
-    if not isinstance(group_json, dict):
-        raise ValueError(f"Group file root must be an object: {group_path}")
-    traffic = group_json.get("traffic")
-    if not isinstance(traffic, list):
-        raise ValueError(f"Group file must contain a top-level traffic list: {group_path}")
-    metadata = group_json.get("metadata", {})
-    if metadata is not None and not isinstance(metadata, dict):
-        raise ValueError(f"Group file metadata must be an object when present: {group_path}")
-    return group_json
+def validate_prompt_unit(prompt_unit: Any, prompt_unit_path: Path) -> dict[str, Any]:
+    if not isinstance(prompt_unit, dict):
+        raise ValueError(f"Prompt unit root must be an object: {prompt_unit_path}")
+    if prompt_unit.get("schema_version") != SOURCE_PROMPT_UNIT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Prompt unit must use schema_version={SOURCE_PROMPT_UNIT_SCHEMA_VERSION}: {prompt_unit_path}"
+        )
+    packets = prompt_unit.get("packets")
+    if not isinstance(packets, list):
+        raise ValueError(f"Prompt unit must contain a packets list: {prompt_unit_path}")
+    if not isinstance(prompt_unit.get("parent_group_id"), str):
+        raise ValueError(f"Prompt unit must contain parent_group_id: {prompt_unit_path}")
+    if not isinstance(prompt_unit.get("prompt_unit_id"), str):
+        raise ValueError(f"Prompt unit must contain prompt_unit_id: {prompt_unit_path}")
+    return prompt_unit
 
 
-#This function resolves a group file path from a manifest entry.
-#Manifest paths may point to the VM experiment folder, so the transferred cloud input directory is used as a filename fallback.
-def resolve_group_file_path(group_entry: dict[str, Any], input_dir: Path) -> Path:
-    group_file = group_entry.get("group_file")
-    if isinstance(group_file, str) and group_file:
-        manifest_path = Path(group_file).expanduser()
+#This function resolves a compact prompt unit file path from a Step 15 manifest entry.
+#Manifest paths may point to another machine, so the current input directory is used as a filename fallback.
+def resolve_prompt_unit_file_path(prompt_unit_entry: dict[str, Any], input_dir: Path) -> Path:
+    prompt_unit_file = prompt_unit_entry.get("prompt_unit_file")
+    if isinstance(prompt_unit_file, str) and prompt_unit_file:
+        manifest_path = Path(prompt_unit_file).expanduser()
         if manifest_path.exists():
             return manifest_path
         fallback_path = input_dir / manifest_path.name
         if fallback_path.exists():
             return fallback_path
 
-    group_id = group_entry.get("group_id")
-    if isinstance(group_id, str) and group_id:
-        fallback_path = input_dir / f"{group_id}.json"
+    prompt_unit_id = prompt_unit_entry.get("prompt_unit_id")
+    if isinstance(prompt_unit_id, str) and prompt_unit_id:
+        fallback_path = input_dir / f"{prompt_unit_id}.json"
         if fallback_path.exists():
             return fallback_path
 
-    raise FileNotFoundError(f"Could not resolve group file for manifest entry: {group_entry}")
+    raise FileNotFoundError(f"Could not resolve prompt unit file for manifest entry: {prompt_unit_entry}")
 
 
-#This function extracts the immutable identity values that Step 17 will later validate.
-def build_input_traceability(records: list[Any], immutable_fields: list[str]) -> dict[str, Any]:
-    trace_records = []
-    for record_index, record in enumerate(records, start=1):
-        if not isinstance(record, dict):
-            raise ValueError(f"Traffic record at index {record_index} is not an object.")
-        identity_values = {
-            field: record.get(field)
-            for field in immutable_fields
-        }
-        missing_fields = [field for field, value in identity_values.items() if value is None]
-        if missing_fields:
-            joined = ", ".join(missing_fields)
-            raise ValueError(f"Traffic record at index {record_index} is missing immutable field(s): {joined}")
-        trace_records.append(
-            {
-                "record_index": record_index,
-                "immutable_identity": identity_values,
-            }
-        )
+#This function builds the index of regions that the LLM is allowed to patch.
+def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
+    packets_by_id: dict[str, dict[str, Any]] = {}
+    regions: list[dict[str, Any]] = []
+    region_keys: set[tuple[str, str]] = set()
+
+    for packet in prompt_unit.get("packets", []):
+        if not isinstance(packet, dict):
+            raise ValueError("Every compact packet must be an object.")
+        packet_id = packet.get("packet_id")
+        if packet_id is None:
+            raise ValueError("Every compact packet must contain packet_id.")
+        packet_id_text = str(packet_id)
+        packets_by_id[packet_id_text] = packet
+
+        if not packet.get("editable"):
+            continue
+
+        editable_regions = packet.get("editable_regions", [])
+        if not isinstance(editable_regions, list):
+            raise ValueError(f"editable_regions must be a list for packet_id={packet_id_text}")
+        for region in editable_regions:
+            if not isinstance(region, dict):
+                raise ValueError(f"Editable region must be an object for packet_id={packet_id_text}")
+            region_id = region.get("region_id")
+            region_type = region.get("type")
+            if not isinstance(region_id, str) or not region_id:
+                raise ValueError(f"Editable region is missing region_id for packet_id={packet_id_text}")
+            if not isinstance(region_type, str) or not region_type:
+                raise ValueError(f"Editable region is missing type for packet_id={packet_id_text}, region_id={region_id}")
+            key = (packet_id_text, region_id)
+            if key in region_keys:
+                raise ValueError(f"Duplicate editable region {key!r} in prompt unit {prompt_unit['prompt_unit_id']}")
+            region_keys.add(key)
+            regions.append(
+                {
+                    "packet_id": packet_id_text,
+                    "region_id": region_id,
+                    "region_type": region_type,
+                    "format": region.get("format"),
+                    "byte_start": region.get("byte_start", region.get("offset")),
+                    "byte_length": region.get("byte_length", region.get("length")),
+                }
+            )
 
     return {
-        "traffic_record_count": len(records),
-        "immutable_fields": immutable_fields,
-        "records": trace_records,
+        "packet_ids": sorted(packets_by_id),
+        "editable_packet_ids": [str(packet_id) for packet_id in prompt_unit.get("editable_packet_ids", [])],
+        "context_packet_ids": [str(packet_id) for packet_id in prompt_unit.get("context_packet_ids", [])],
+        "regions": regions,
     }
 
 
-#This function builds the compact traffic object that is embedded in the baseline prompt.
-#Metadata and manifest-level fields stay outside the model input to keep the baseline prompt focused.
-def build_prompt_input_json(group_json: dict[str, Any]) -> dict[str, Any]:
+#This function builds the compact object embedded in the new patch-based prompt.
+def build_compact_prompt_input(prompt_unit: dict[str, Any]) -> dict[str, Any]:
     return {
-        "traffic": group_json["traffic"],
+        "schema_version": prompt_unit["schema_version"],
+        "experiment_id": prompt_unit.get("experiment_id"),
+        "parent_group_id": prompt_unit["parent_group_id"],
+        "prompt_unit_id": prompt_unit["prompt_unit_id"],
+        "unit_type": prompt_unit.get("unit_type"),
+        "group_metadata": prompt_unit.get("group_metadata", {}),
+        "token_budget": prompt_unit.get("token_budget", {}),
+        "packet_ids": prompt_unit.get("packet_ids", []),
+        "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
+        "context_packet_ids": prompt_unit.get("context_packet_ids", []),
+        "packets": prompt_unit.get("packets", []),
+        "context_truncation": prompt_unit.get("context_truncation"),
     }
 
 
-#This function builds the minimal baseline prompt text for prompt_version baseline_v1.
-#It avoids flow context, protocol guidance, attack-preservation guidance, and mutable-field guidance by design.
-def build_baseline_v1_messages(prompt_input_json: dict[str, Any], immutable_fields: list[str]) -> list[dict[str, str]]:
-    immutable_field_text = ", ".join(immutable_fields)
-    input_json_text = json.dumps(prompt_input_json, indent=2, sort_keys=True)
+#This function builds the compact patch prompt text.
+def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, str]]:
+    prompt_input = build_compact_prompt_input(prompt_unit)
+    prompt_input_text = json.dumps(prompt_input, indent=2, sort_keys=True)
+    parent_group_id = prompt_unit["parent_group_id"]
+    prompt_unit_id = prompt_unit["prompt_unit_id"]
     content = (
-        "Modify the network traffic JSON to reduce Snort 3 detection.\n"
+        "You modify compact network traffic prompt units to reduce Snort 3 detection.\n"
+        "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
+        "Do not return full packets. Return only patches/deltas.\n"
+        "Only modify editable_regions listed inside packets where editable is true.\n"
+        "Do not modify context packets or any field outside an editable region.\n"
+        "If no useful safe change is needed, return patches as an empty list.\n"
+        "Use this exact output schema:\n"
+        "{\n"
+        f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",\n'
+        f'  "parent_group_id": "{parent_group_id}",\n'
+        f'  "prompt_unit_id": "{prompt_unit_id}",\n'
+        '  "patches": [\n'
+        "    {\n"
+        '      "packet_id": "<packet_id from editable_packet_ids>",\n'
+        '      "region_id": "<editable region_id>",\n'
+        '      "region_type": "<editable region type>",\n'
+        '      "operation": "replace_region",\n'
+        '      "replacement_format": "text or hex",\n'
+        '      "replacement": "<replacement value>"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "Rules:\n"
+        "- operation must be replace_region.\n"
+        "- packet_id must reference an editable packet in this prompt unit.\n"
+        "- region_id and region_type must match one editable region in that packet.\n"
+        "- replacement_format must be text or hex and should match the editable region format.\n"
+        "- replacement must be a string.\n"
+        "- patches may be an empty list.\n"
+        "Compact prompt unit:\n"
+        f"{prompt_input_text}"
+    )
+    return [{"role": "user", "content": content}]
+
+
+#This function builds the old full-JSON prompt text under its explicit historical name.
+def build_full_prompting_messages(prompt_unit: dict[str, Any]) -> list[dict[str, str]]:
+    prompt_input = {"traffic": prompt_unit.get("packets", [])}
+    input_json_text = json.dumps(prompt_input, indent=2, sort_keys=True)
+    content = (
+        "Modify the compact traffic JSON to reduce Snort 3 detection.\n"
         "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
         "Return the same top-level JSON structure as the input object.\n"
-        "Keep the same number of records in the traffic list.\n"
-        #f"Preserve these immutable identity fields in every traffic record: {immutable_field_text}.\n"
         "Input JSON:\n"
         f"{input_json_text}"
     )
-    return [
-        {
-            "role": "user",
-            "content": content,
-        }
-    ]
+    return [{"role": "user", "content": content}]
 
 
 #This function dispatches prompt construction based on llm.prompt_version.
-#Future prompt versions should be added as separate branches instead of changing the baseline prompt.
 def build_messages_by_prompt_version(
     *,
     prompt_version: str,
-    prompt_input_json: dict[str, Any],
-    immutable_fields: list[str],
+    prompt_unit: dict[str, Any],
 ) -> list[dict[str, str]]:
-    if prompt_version == "baseline_v1":
-        return build_baseline_v1_messages(prompt_input_json, immutable_fields)
+    if prompt_version == COMPACT_PATCH_PROMPT_VERSION:
+        return build_compact_patch_messages(prompt_unit)
+    if prompt_version == FULL_PROMPT_VERSION:
+        return build_full_prompting_messages(prompt_unit)
     raise ValueError(
         f"The selected prompt version ({prompt_version!r}) is not supported.\n"
         f"The supported prompt versions are: {SUPPORTED_PROMPT_VERSIONS!r}."
     )
 
 
-#This function builds one prompt package file from one Step 15 group file.
+#This function builds one prompt package file from one Step 15 compact prompt unit.
 def build_prompt_package(
     *,
     config: dict[str, Any],
     prompt_version: str,
-    group_entry: dict[str, Any],
-    group_path: Path,
-    group_json: dict[str, Any],
-    immutable_fields: list[str],
+    prompt_unit_entry: dict[str, Any],
+    prompt_unit_path: Path,
+    prompt_unit: dict[str, Any],
 ) -> dict[str, Any]:
-    traffic = group_json["traffic"]
-    group_id = str(group_entry.get("group_id") or group_json.get("metadata", {}).get("group_id") or group_path.stem)
-    prompt_input_json = build_prompt_input_json(group_json)
-    input_traceability = build_input_traceability(traffic, immutable_fields)
+    editable_region_index = build_editable_region_index(prompt_unit)
     messages = build_messages_by_prompt_version(
         prompt_version=prompt_version,
-        prompt_input_json=prompt_input_json,
-        immutable_fields=immutable_fields,
+        prompt_unit=prompt_unit,
     )
+    prompt_contract = "patch_output" if prompt_version == COMPACT_PATCH_PROMPT_VERSION else "full_json_legacy"
 
     return {
         "schema_version": PROMPT_PACKAGE_SCHEMA_VERSION,
         "experiment_id": config["experiment"]["experiment_id"],
-        "group_id": group_id,
+        "parent_group_id": prompt_unit["parent_group_id"],
+        "prompt_unit_id": prompt_unit["prompt_unit_id"],
+        "group_id": prompt_unit["prompt_unit_id"],
         "prompt_version": prompt_version,
-        "input_group_file": str(group_path),
-        "immutable_fields": immutable_fields,
+        "prompt_contract": prompt_contract,
+        "source_prompt_unit_file": str(prompt_unit_path),
+        "source_prompt_unit_schema_version": prompt_unit.get("schema_version"),
+        "source_packet_json": prompt_unit.get("source_packet_json"),
+        "source_packet_json_schema_version": prompt_unit.get("source_packet_json_schema_version"),
+        "payload_strategy_version": prompt_unit.get("payload_strategy_version"),
         "expected_output_format": {
+            "schema_version": PATCH_OUTPUT_SCHEMA_VERSION if prompt_contract == "patch_output" else None,
             "root_type": "object",
-            "required_top_level_keys": ["traffic"],
-            "traffic_type": "list",
-            "traffic_record_count": len(traffic),
-            "preserve_immutable_fields": immutable_fields,
+            "required_top_level_keys": ["schema_version", "parent_group_id", "prompt_unit_id", "patches"],
+            "patches_type": "list",
+            "supported_operations": ["replace_region"],
+            "replacement_formats": ["text", "hex"],
             "format_rule": "Return valid JSON only, with no Markdown and no explanations.",
         },
-        "input_traceability": input_traceability,
+        "input_traceability": {
+            "parent_group_id": prompt_unit["parent_group_id"],
+            "prompt_unit_id": prompt_unit["prompt_unit_id"],
+            "packet_ids": editable_region_index["packet_ids"],
+            "editable_packet_ids": editable_region_index["editable_packet_ids"],
+            "context_packet_ids": editable_region_index["context_packet_ids"],
+            "editable_regions": editable_region_index["regions"],
+        },
+        "token_budget": prompt_unit.get("token_budget", {}),
+        "estimated_input_tokens": prompt_unit.get("estimated_input_tokens"),
         "instructions": {
-            "objective": "Modify the traffic to reduce Snort 3 detection.",
-            "prompt_policy": "baseline_minimal_no_flow_context",
-            "preserve_record_count": True,
-            "preserve_immutable_identity_fields": True,
+            "objective": "Modify compact editable regions to reduce Snort 3 detection.",
+            "prompt_policy": prompt_version,
+            "output_contract": prompt_contract,
+            "return_full_packets": False,
+            "allow_empty_patches": True,
         },
         "messages": messages,
     }
@@ -245,10 +347,11 @@ def build_prompt_manifest(
     source_manifest_path: Path,
     input_dir: Path,
     output_dir: Path,
-    immutable_fields: list[str],
+    source_manifest: dict[str, Any],
     prompt_summaries: list[dict[str, Any]],
-    total_source_groups: int,
+    total_source_prompt_units: int,
 ) -> dict[str, Any]:
+    source_metadata = source_manifest.get("metadata", {})
     return {
         "metadata": {
             "schema_version": PROMPT_MANIFEST_SCHEMA_VERSION,
@@ -257,18 +360,19 @@ def build_prompt_manifest(
             "config_source": config.get("_config_path", ""),
             "prompt_version": prompt_version,
             "source_group_manifest": str(source_manifest_path),
+            "source_group_manifest_schema_version": source_metadata.get("schema_version"),
+            "source_compact_view_schema_version": source_metadata.get("compact_view_schema_version"),
             "input_dir": str(input_dir),
             "output_dir": str(output_dir),
-            "total_source_groups": total_source_groups,
+            "total_source_prompt_units": total_source_prompt_units,
             "total_prompt_count": len(prompt_summaries),
-            "immutable_fields": immutable_fields,
         },
         "prompts": prompt_summaries,
     }
 
 
 #This function orchestrates Step 16.
-#It reads the Step 15 group package, builds one prompt package per group, and writes a prompt manifest for Step 17.
+#It reads Step 15 compact prompt units, builds one prompt package per unit, and writes a prompt manifest for Step 17.
 def run_prompt_builder(
     *,
     config_path: str | Path,
@@ -283,11 +387,12 @@ def run_prompt_builder(
     if limit_groups is not None and limit_groups <= 0:
         raise ValueError("--limit-groups must be a positive integer when provided.")
 
-    prompt_version = str(config["llm"]["prompt_version"]).strip()
+    configured_prompt_version = str(config["llm"]["prompt_version"])
+    prompt_version = normalize_prompt_version(configured_prompt_version)
     if prompt_version not in SUPPORTED_PROMPT_VERSIONS:
         raise ValueError(
-            f"The selected prompt version ({prompt_version!r}) is not supported.\n"
-            f"The supported prompt versions are: {SUPPORTED_PROMPT_VERSIONS!r}."
+            f"The selected prompt version ({configured_prompt_version!r}) resolves to {prompt_version!r}, "
+            f"which is not supported.\nThe supported prompt versions are: {SUPPORTED_PROMPT_VERSIONS!r}."
         )
 
     paths = default_cloud_paths(config, cloud_root)
@@ -296,34 +401,36 @@ def run_prompt_builder(
     manifest_path = input_group_dir / "group_manifest.json"
 
     group_manifest = validate_group_manifest(read_json(manifest_path), manifest_path)
-    immutable_fields = [str(field) for field in group_manifest["metadata"]["immutable_fields"]]
-    group_entries = group_manifest["groups"]
-    selected_entries = group_entries[:limit_groups] if limit_groups is not None else group_entries
+    prompt_unit_entries = group_manifest["prompt_units"]
+    selected_entries = prompt_unit_entries[:limit_groups] if limit_groups is not None else prompt_unit_entries
 
     clear_previous_output_files(output_prompt_dir)
     prompt_summaries = []
-    for group_entry in selected_entries:
-        if not isinstance(group_entry, dict):
-            raise ValueError("Every group manifest entry must be an object.")
-        group_path = resolve_group_file_path(group_entry, input_group_dir)
-        group_json = validate_group_file(read_json(group_path), group_path)
+    for prompt_unit_entry in selected_entries:
+        if not isinstance(prompt_unit_entry, dict):
+            raise ValueError("Every prompt unit manifest entry must be an object.")
+        prompt_unit_path = resolve_prompt_unit_file_path(prompt_unit_entry, input_group_dir)
+        prompt_unit = validate_prompt_unit(read_json(prompt_unit_path), prompt_unit_path)
         prompt_package = build_prompt_package(
             config=config,
             prompt_version=prompt_version,
-            group_entry=group_entry,
-            group_path=group_path,
-            group_json=group_json,
-            immutable_fields=immutable_fields,
+            prompt_unit_entry=prompt_unit_entry,
+            prompt_unit_path=prompt_unit_path,
+            prompt_unit=prompt_unit,
         )
-        prompt_path = output_prompt_dir / f"{prompt_package['group_id']}.prompt.json"
+        prompt_path = output_prompt_dir / f"{prompt_package['prompt_unit_id']}.prompt.json"
         write_json(prompt_path, prompt_package)
         prompt_summaries.append(
             {
+                "parent_group_id": prompt_package["parent_group_id"],
+                "prompt_unit_id": prompt_package["prompt_unit_id"],
                 "group_id": prompt_package["group_id"],
                 "prompt_file": str(prompt_path),
-                "input_group_file": str(group_path),
+                "source_prompt_unit_file": str(prompt_unit_path),
                 "prompt_version": prompt_version,
-                "traffic_record_count": prompt_package["input_traceability"]["traffic_record_count"],
+                "prompt_contract": prompt_package["prompt_contract"],
+                "editable_region_count": len(prompt_package["input_traceability"]["editable_regions"]),
+                "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
             }
         )
 
@@ -333,9 +440,9 @@ def run_prompt_builder(
         source_manifest_path=manifest_path,
         input_dir=input_group_dir,
         output_dir=output_prompt_dir,
-        immutable_fields=immutable_fields,
+        source_manifest=group_manifest,
         prompt_summaries=prompt_summaries,
-        total_source_groups=len(group_entries),
+        total_source_prompt_units=len(prompt_unit_entries),
     )
     prompt_manifest_path = output_prompt_dir / "prompt_manifest.json"
     write_json(prompt_manifest_path, prompt_manifest)
@@ -343,8 +450,9 @@ def run_prompt_builder(
     return {
         "prompt_manifest_path": str(prompt_manifest_path),
         "prompt_count": len(prompt_summaries),
-        "source_group_count": len(group_entries),
+        "source_group_count": len(prompt_unit_entries),
         "prompt_version": prompt_version,
+        "configured_prompt_version": configured_prompt_version,
         "input_dir": str(input_group_dir),
         "output_dir": str(output_prompt_dir),
     }
@@ -352,16 +460,16 @@ def run_prompt_builder(
 
 #This function defines the command-line arguments accepted by Step 16.
 def parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build LLM prompt packages from Step 15 group files.")
+    parser = argparse.ArgumentParser(description="Build LLM prompt packages from Step 15 compact prompt units.")
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
-    parser.add_argument("--input-dir", help="Directory containing Step 15 group files and group_manifest.json.")
+    parser.add_argument("--input-dir", help="Directory containing Step 15 compact prompt units and group_manifest.json.")
     parser.add_argument("--output-dir", help="Directory where Step 16 prompt files will be written.")
     parser.add_argument(
         "--cloud-root",
         default=str(DEFAULT_CLOUD_ROOT),
         help="RISE cloud root used for default input and output paths.",
     )
-    parser.add_argument("--limit-groups", type=int, help="Build prompts only for the first N groups.")
+    parser.add_argument("--limit-groups", type=int, help="Build prompts only for the first N prompt units.")
     return parser.parse_args()
 
 
@@ -376,7 +484,7 @@ def main() -> None:
         limit_groups=args.limit_groups,
     )
     print(f"Prompt packages written: {result['prompt_count']}")
-    print(f"Source groups available: {result['source_group_count']}")
+    print(f"Source prompt units available: {result['source_group_count']}")
     print(f"Prompt version: {result['prompt_version']}")
     print(f"Prompt manifest written to: {result['prompt_manifest_path']}")
 

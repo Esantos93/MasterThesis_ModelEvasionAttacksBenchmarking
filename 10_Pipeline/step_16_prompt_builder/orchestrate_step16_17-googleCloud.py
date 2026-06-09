@@ -504,6 +504,10 @@ def run_step17(args: argparse.Namespace) -> None:
         command.extend(["--prompt-dir", args.step17_prompt_dir])
     if args.step17_output_root:
         command.extend(["--output-root", args.step17_output_root])
+    if args.step17_run_id:
+        command.extend(["--run-id", args.step17_run_id])
+    if args.step17_run_label:
+        command.extend(["--run-label", args.step17_run_label])
     if args.model_filter:
         command.extend(["--model-filter", args.model_filter])
     if args.hf_model_id:
@@ -521,6 +525,10 @@ def run_step17(args: argparse.Namespace) -> None:
             command.extend(["--vllm-max-model-len", str(args.vllm_max_model_len)])
         if args.trust_remote_code:
             command.append("--trust-remote-code")
+    if args.runtime_max_model_len is not None:
+        command.extend(["--runtime-max-model-len", str(args.runtime_max_model_len)])
+    if args.expected_output_patch_tokens is not None:
+        command.extend(["--expected-output-patch-tokens", str(args.expected_output_patch_tokens)])
     if args.output_token_margin_percent is not None:
         command.extend(["--output-token-margin-percent", str(args.output_token_margin_percent)])
     remote_command = dockerized_command(args, args.remote_root + "/04_Steps/Step17", command)
@@ -596,6 +604,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step17-prompt-manifest")
     parser.add_argument("--step17-prompt-dir")
     parser.add_argument("--step17-output-root")
+    parser.add_argument("--step17-run-id")
+    parser.add_argument("--step17-run-label")
     parser.add_argument("--step17-backend", choices=["vllm", "llama-cpp"], default="vllm")
     parser.add_argument("--hf-model-id", action="append")
     parser.add_argument("--model-filter")
@@ -609,6 +619,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-threads", type=int)
     parser.add_argument("--progress-every", type=int, default=1)
     parser.add_argument("--heartbeat-seconds", type=int, default=30)
+    parser.add_argument("--runtime-max-model-len", type=int)
+    parser.add_argument("--expected-output-patch-tokens", type=int)
     parser.add_argument("--output-token-margin-percent", type=float)
     return parser.parse_args()
 
