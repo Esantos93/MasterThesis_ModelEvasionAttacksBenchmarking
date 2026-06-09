@@ -26,6 +26,11 @@ DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 #These are the output folders written for each model.
 MODEL_OUTPUT_SUBDIRS = ["raw", "parsed", "metadata", "failures"]
 
+#These are the Step 16/17 schema names for the compact patch-based contract.
+PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
+PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
+PATCH_PROMPT_CONTRACT = "patch_output"
+
 
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
@@ -77,12 +82,22 @@ def validate_prompt_manifest(prompt_manifest: Any, manifest_path: Path) -> dict[
 def validate_prompt_package(prompt_package: Any, prompt_path: Path) -> dict[str, Any]:
     if not isinstance(prompt_package, dict):
         raise ValueError(f"Prompt package root must be an object: {prompt_path}")
+    if prompt_package.get("schema_version") != PROMPT_PACKAGE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Prompt package must use schema_version={PROMPT_PACKAGE_SCHEMA_VERSION}: {prompt_path}"
+        )
+    if prompt_package.get("prompt_contract") != PATCH_PROMPT_CONTRACT:
+        raise ValueError(
+            f"Step 17 currently expects prompt_contract={PATCH_PROMPT_CONTRACT}: {prompt_path}"
+        )
     messages = prompt_package.get("messages")
     if not isinstance(messages, list) or not messages:
         raise ValueError(f"Prompt package must contain a non-empty messages list: {prompt_path}")
     traceability = prompt_package.get("input_traceability")
     if not isinstance(traceability, dict):
         raise ValueError(f"Prompt package must contain input_traceability object: {prompt_path}")
+    if not isinstance(traceability.get("editable_regions"), list):
+        raise ValueError(f"Prompt package input_traceability must contain editable_regions list: {prompt_path}")
     return prompt_package
 
 
@@ -98,9 +113,9 @@ def resolve_prompt_file_path(prompt_entry: dict[str, Any], prompt_dir: Path) -> 
         if fallback_path.exists():
             return fallback_path
 
-    group_id = prompt_entry.get("group_id")
-    if isinstance(group_id, str) and group_id:
-        fallback_path = prompt_dir / f"{group_id}.prompt.json"
+    prompt_id = prompt_entry.get("prompt_unit_id") or prompt_entry.get("group_id")
+    if isinstance(prompt_id, str) and prompt_id:
+        fallback_path = prompt_dir / f"{prompt_id}.prompt.json"
         if fallback_path.exists():
             return fallback_path
 
@@ -156,6 +171,16 @@ def safe_model_name(model_path: Path) -> str:
     return name.strip("_") or "model"
 
 
+#This function builds a stable run id when the caller does not provide one.
+def build_default_run_id(run_label: str | None) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if run_label:
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_label).strip("_")
+        if safe_label:
+            return f"run_{timestamp}_{safe_label}"
+    return f"run_{timestamp}"
+
+
 #This function discovers GGUF models in the configured model directory.
 def discover_model_paths(model_dir: Path) -> list[Path]:
     if not model_dir.exists():
@@ -196,9 +221,9 @@ def collect_model_paths(
     return model_paths
 
 
-#This function creates the output folders for a model.
-def prepare_model_output_dirs(output_root: Path, model_name: str) -> dict[str, Path]:
-    model_root = output_root / model_name
+#This function creates the output folders for a model and run.
+def prepare_model_output_dirs(output_root: Path, model_name: str, run_id: str) -> dict[str, Path]:
+    model_root = output_root / model_name / run_id
     paths = {subdir: model_root / subdir for subdir in MODEL_OUTPUT_SUBDIRS}
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -208,6 +233,11 @@ def prepare_model_output_dirs(output_root: Path, model_name: str) -> dict[str, P
 #This function returns the generation parameters used by llama-cpp-python.
 def build_generation_params(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     llm_config = config.get("llm", {})
+    runtime_max_model_len = (
+        args.runtime_max_model_len
+        if args.runtime_max_model_len is not None
+        else int(llm_config.get("runtime_max_model_len", llm_config.get("max_n_ctx", 32768)))
+    )
     return {
         "temperature": args.temperature if args.temperature is not None else float(llm_config.get("temperature", 0.0)),
         "top_p": args.top_p if args.top_p is not None else float(llm_config.get("top_p", 0.95)),
@@ -219,10 +249,17 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
         "context_reserve_tokens": (
             args.context_reserve_tokens
             if args.context_reserve_tokens is not None
-            else int(llm_config.get("context_reserve_tokens", 128))
+            else int(llm_config.get("context_reserve_tokens", 256))
         ),
-        "n_ctx": args.n_ctx,
-        "n_ctx_mode": "fixed_cli" if args.n_ctx is not None else "dynamic_prompt_preflight",
+        "prompt_target_context": int(llm_config.get("prompt_target_context", 4096)),
+        "runtime_max_model_len": runtime_max_model_len,
+        "expected_output_patch_tokens": (
+            args.expected_output_patch_tokens
+            if args.expected_output_patch_tokens is not None
+            else int(llm_config.get("expected_output_patch_tokens", 768))
+        ),
+        "n_ctx": args.n_ctx if args.n_ctx is not None else runtime_max_model_len,
+        "n_ctx_mode": "fixed_cli" if args.n_ctx is not None else "runtime_max_model_len",
         "min_n_ctx": args.min_n_ctx if args.min_n_ctx is not None else int(llm_config.get("min_n_ctx", 2048)),
         "max_n_ctx": args.max_n_ctx if args.max_n_ctx is not None else int(llm_config.get("max_n_ctx", 32768)),
         "chars_per_token_estimate": (
@@ -266,7 +303,7 @@ def next_power_of_two(value: int) -> int:
 def estimate_dynamic_n_ctx(prompt_paths: list[Path], generation_params: dict[str, Any]) -> dict[str, Any]:
     if generation_params["n_ctx"] is not None:
         return {
-            "mode": "fixed_cli",
+            "mode": generation_params.get("n_ctx_mode", "fixed_cli"),
             "n_ctx": generation_params["n_ctx"],
             "largest_required_context_tokens": None,
             "largest_prompt_file": None,
@@ -285,13 +322,7 @@ def estimate_dynamic_n_ctx(prompt_paths: list[Path], generation_params: dict[str
             message_text,
             generation_params["chars_per_token_estimate"],
         )
-        output_tokens_estimate = max(
-            1,
-            math.ceil(
-                input_tokens_estimate
-                * (1.0 + float(generation_params["output_token_margin_percent"]) / 100.0)
-            ),
-        )
+        output_tokens_estimate = int(generation_params["expected_output_patch_tokens"])
         required_context_tokens = (
             input_tokens_estimate
             + output_tokens_estimate
@@ -322,8 +353,8 @@ def estimate_dynamic_n_ctx(prompt_paths: list[Path], generation_params: dict[str
     }
 
 
-#This function estimates how many tokens the current prompt messages occupy for the loaded model.
-def estimate_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
+#This function measures how many tokens the current prompt messages occupy for the loaded model.
+def measure_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
     estimation_text = messages_to_estimation_text(messages)
     try:
         tokens = llm.tokenize(estimation_text.encode("utf-8"), add_bos=True)
@@ -332,7 +363,7 @@ def estimate_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
     return len(tokens)
 
 
-#This function calculates max_tokens for one prompt from estimated input tokens and a configurable margin.
+#This function calculates max_tokens for one compact patch prompt.
 def build_prompt_generation_params(
     *,
     llm: Any,
@@ -340,19 +371,23 @@ def build_prompt_generation_params(
     base_generation_params: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     prompt_generation_params = dict(base_generation_params)
-    input_tokens_estimate = estimate_input_tokens(llm, prompt_package["messages"])
+    real_input_tokens = measure_input_tokens(llm, prompt_package["messages"])
+    estimated_input_tokens = prompt_package.get("estimated_input_tokens")
+    if isinstance(estimated_input_tokens, (int, float)) and estimated_input_tokens > 0:
+        estimation_error_ratio = real_input_tokens / float(estimated_input_tokens)
+    else:
+        estimation_error_ratio = None
 
-    margin_percent = float(base_generation_params["output_token_margin_percent"])
-    desired_max_tokens = max(1, math.ceil(input_tokens_estimate * (1.0 + margin_percent / 100.0)))
+    desired_max_tokens = int(base_generation_params["expected_output_patch_tokens"])
     available_context_tokens = (
         int(base_generation_params["n_ctx"])
-        - input_tokens_estimate
+        - real_input_tokens
         - int(base_generation_params["context_reserve_tokens"])
     )
     if available_context_tokens <= 0:
         raise ValueError(
             "Prompt does not fit in the configured context window after reserve tokens. "
-            f"input_tokens_estimate={input_tokens_estimate}, "
+            f"real_input_tokens={real_input_tokens}, "
             f"n_ctx={base_generation_params['n_ctx']}, "
             f"context_reserve_tokens={base_generation_params['context_reserve_tokens']}"
         )
@@ -360,11 +395,15 @@ def build_prompt_generation_params(
     max_tokens = min(desired_max_tokens, available_context_tokens)
     prompt_generation_params["max_tokens"] = max_tokens
     token_plan = {
-        "mode": "dynamic_input_tokens_plus_margin",
-        "input_tokens_estimate": input_tokens_estimate,
+        "mode": "compact_patch_fixed_output_budget",
+        "estimated_input_tokens": estimated_input_tokens,
+        "real_input_tokens": real_input_tokens,
+        "estimation_error_ratio": estimation_error_ratio,
+        "prompt_target_context": base_generation_params["prompt_target_context"],
+        "runtime_max_model_len": base_generation_params["runtime_max_model_len"],
         "desired_max_tokens": desired_max_tokens,
         "max_tokens": max_tokens,
-        "output_token_margin_percent": margin_percent,
+        "expected_output_patch_tokens": base_generation_params["expected_output_patch_tokens"],
         "context_reserve_tokens": base_generation_params["context_reserve_tokens"],
         "available_context_tokens": available_context_tokens,
         "was_capped_by_context": max_tokens < desired_max_tokens,
@@ -465,49 +504,142 @@ def parse_strict_json(raw_text: str) -> Any:
     return json.loads(raw_text)
 
 
-#This function validates basic traceability using the Step 16 input_traceability block.
-def validate_traceability(parsed_output: Any, prompt_package: dict[str, Any]) -> dict[str, Any]:
+#This function builds a lookup for editable regions declared by Step 16.
+def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    traceability = prompt_package.get("input_traceability", {})
+    for region in traceability.get("editable_regions", []):
+        if not isinstance(region, dict):
+            continue
+        packet_id = region.get("packet_id")
+        region_id = region.get("region_id")
+        if packet_id is None or not isinstance(region_id, str):
+            continue
+        lookup[(str(packet_id), region_id)] = region
+    return lookup
+
+
+#This function validates the patch_output_v1 contract using the Step 16 editable-region index.
+def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed_output, dict):
         return {"accepted": False, "reason": "parsed_output_root_not_object"}
 
-    traffic = parsed_output.get("traffic")
-    if not isinstance(traffic, list):
-        return {"accepted": False, "reason": "missing_or_invalid_traffic_list"}
-
-    traceability = prompt_package["input_traceability"]
-    expected_count = traceability.get("traffic_record_count")
-    if len(traffic) != expected_count:
+    if parsed_output.get("schema_version") != PATCH_OUTPUT_SCHEMA_VERSION:
         return {
             "accepted": False,
-            "reason": "traffic_record_count_changed",
-            "expected_count": expected_count,
-            "actual_count": len(traffic),
+            "reason": "invalid_patch_schema_version",
+            "expected_schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
+            "actual_schema_version": parsed_output.get("schema_version"),
         }
 
-    immutable_fields = traceability.get("immutable_fields", [])
-    trace_records = traceability.get("records", [])
-    if not isinstance(immutable_fields, list) or not isinstance(trace_records, list):
-        return {"accepted": False, "reason": "invalid_input_traceability_shape"}
+    if parsed_output.get("parent_group_id") != prompt_package.get("parent_group_id"):
+        return {
+            "accepted": False,
+            "reason": "parent_group_id_changed",
+            "expected_parent_group_id": prompt_package.get("parent_group_id"),
+            "actual_parent_group_id": parsed_output.get("parent_group_id"),
+        }
 
-    for record_index, expected_record in enumerate(trace_records):
-        if record_index >= len(traffic) or not isinstance(traffic[record_index], dict):
-            return {"accepted": False, "reason": "traffic_record_not_object", "record_index": record_index + 1}
-        expected_identity = expected_record.get("immutable_identity", {})
-        actual_record = traffic[record_index]
-        for field in immutable_fields:
-            expected_value = expected_identity.get(field)
-            actual_value = actual_record.get(field)
-            if actual_value != expected_value:
+    if parsed_output.get("prompt_unit_id") != prompt_package.get("prompt_unit_id"):
+        return {
+            "accepted": False,
+            "reason": "prompt_unit_id_changed",
+            "expected_prompt_unit_id": prompt_package.get("prompt_unit_id"),
+            "actual_prompt_unit_id": parsed_output.get("prompt_unit_id"),
+        }
+
+    patches = parsed_output.get("patches")
+    if not isinstance(patches, list):
+        return {"accepted": False, "reason": "patches_not_list"}
+
+    editable_lookup = build_editable_region_lookup(prompt_package)
+    editable_packet_ids = set(str(packet_id) for packet_id in prompt_package["input_traceability"].get("editable_packet_ids", []))
+    for patch_index, patch in enumerate(patches, start=1):
+        if not isinstance(patch, dict):
+            return {"accepted": False, "reason": "patch_not_object", "patch_index": patch_index}
+
+        packet_id = patch.get("packet_id")
+        region_id = patch.get("region_id")
+        if packet_id is None or not isinstance(region_id, str):
+            return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
+        packet_id_text = str(packet_id)
+
+        if packet_id_text not in editable_packet_ids:
+            return {
+                "accepted": False,
+                "reason": "patch_references_non_editable_packet",
+                "patch_index": patch_index,
+                "packet_id": packet_id_text,
+            }
+
+        region = editable_lookup.get((packet_id_text, region_id))
+        if region is None:
+            return {
+                "accepted": False,
+                "reason": "patch_references_unknown_or_non_editable_region",
+                "patch_index": patch_index,
+                "packet_id": packet_id_text,
+                "region_id": region_id,
+            }
+
+        if patch.get("operation") != "replace_region":
+            return {
+                "accepted": False,
+                "reason": "unsupported_patch_operation",
+                "patch_index": patch_index,
+                "operation": patch.get("operation"),
+            }
+
+        expected_region_type = region.get("region_type")
+        if patch.get("region_type") != expected_region_type:
+            return {
+                "accepted": False,
+                "reason": "region_type_mismatch",
+                "patch_index": patch_index,
+                "expected_region_type": expected_region_type,
+                "actual_region_type": patch.get("region_type"),
+            }
+
+        replacement_format = patch.get("replacement_format")
+        if replacement_format not in {"text", "hex"}:
+            return {
+                "accepted": False,
+                "reason": "invalid_replacement_format",
+                "patch_index": patch_index,
+                "replacement_format": replacement_format,
+            }
+
+        expected_format = region.get("format")
+        if expected_format in {"text", "hex"} and replacement_format != expected_format:
+            return {
+                "accepted": False,
+                "reason": "replacement_format_mismatch",
+                "patch_index": patch_index,
+                "expected_format": expected_format,
+                "actual_format": replacement_format,
+            }
+
+        replacement = patch.get("replacement")
+        if not isinstance(replacement, str):
+            return {
+                "accepted": False,
+                "reason": "replacement_not_string",
+                "patch_index": patch_index,
+            }
+        if replacement_format == "hex":
+            cleaned = replacement.strip()
+            if len(cleaned) % 2 != 0 or not re.fullmatch(r"[0-9A-Fa-f]*", cleaned):
                 return {
                     "accepted": False,
-                    "reason": "immutable_field_changed",
-                    "record_index": record_index + 1,
-                    "field": field,
-                    "expected_value": expected_value,
-                    "actual_value": actual_value,
+                    "reason": "replacement_hex_invalid",
+                    "patch_index": patch_index,
                 }
 
-    return {"accepted": True, "reason": "accepted"}
+    return {
+        "accepted": True,
+        "reason": "accepted",
+        "patch_count": len(patches),
+    }
 
 
 #This function builds the metadata object written for every attempted model/prompt run.
@@ -533,9 +665,12 @@ def build_run_metadata(
         "failure_reason": failure_reason,
         "experiment_id": prompt_package.get("experiment_id"),
         "group_id": prompt_package.get("group_id"),
+        "parent_group_id": prompt_package.get("parent_group_id"),
+        "prompt_unit_id": prompt_package.get("prompt_unit_id"),
         "prompt_version": prompt_package.get("prompt_version"),
+        "prompt_contract": prompt_package.get("prompt_contract"),
         "prompt_file": str(prompt_path),
-        "input_group_file": prompt_package.get("input_group_file"),
+        "source_prompt_unit_file": prompt_package.get("source_prompt_unit_file"),
         "model_name": model_name,
         "model_path": str(model_path),
         "generation_params": generation_params,
@@ -582,8 +717,9 @@ def run_single_prompt(
     total_prompts: int,
 ) -> dict[str, Any]:
     prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
-    group_id = str(prompt_package.get("group_id") or prompt_path.stem.replace(".prompt", ""))
-    output_stem = group_id
+    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_package.get("group_id") or prompt_path.stem.replace(".prompt", ""))
+    parent_group_id = str(prompt_package.get("parent_group_id") or "")
+    output_stem = prompt_unit_id
     raw_path = output_dirs["raw"] / f"{output_stem}.raw.txt"
     parsed_path = output_dirs["parsed"] / f"{output_stem}.parsed.json"
     metadata_path = output_dirs["metadata"] / f"{output_stem}.metadata.json"
@@ -612,7 +748,7 @@ def run_single_prompt(
         }
         heartbeat_stop, heartbeat_thread = start_generation_heartbeat(
             model_name=model_name,
-            group_id=group_id,
+            group_id=prompt_unit_id,
             prompt_index=prompt_index,
             total_prompts=total_prompts,
             heartbeat_seconds=heartbeat_seconds,
@@ -652,7 +788,7 @@ def run_single_prompt(
         }
 
         parsed_output = parse_strict_json(raw_text)
-        validation_result = validate_traceability(parsed_output, prompt_package)
+        validation_result = validate_patch_output(parsed_output, prompt_package)
         if validation_result["accepted"]:
             write_json(parsed_path, parsed_output)
             output_paths["parsed"] = str(parsed_path)
@@ -661,7 +797,8 @@ def run_single_prompt(
             failure_reason = validation_result["reason"]
             failure_report = {
                 "failure_reason": failure_reason,
-                "group_id": group_id,
+                "parent_group_id": parent_group_id,
+                "prompt_unit_id": prompt_unit_id,
                 "prompt_file": str(prompt_path),
                 "model_name": model_name,
                 "validation_result": validation_result,
@@ -680,7 +817,8 @@ def run_single_prompt(
         failure_report = {
             "failure_reason": failure_reason,
             "failure_message": str(error),
-            "group_id": group_id,
+            "parent_group_id": parent_group_id,
+            "prompt_unit_id": prompt_unit_id,
             "prompt_file": str(prompt_path),
             "model_name": model_name,
         }
@@ -740,12 +878,13 @@ def run_model_batch(
     model_path: Path,
     prompt_paths: list[Path],
     output_root: Path,
+    run_id: str,
     generation_params: dict[str, Any],
     progress_every: int,
     heartbeat_seconds: int,
 ) -> dict[str, Any]:
     model_name = safe_model_name(model_path)
-    output_dirs = prepare_model_output_dirs(output_root, model_name)
+    output_dirs = prepare_model_output_dirs(output_root, model_name, run_id)
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Loading model: {model_name}")
     llm = load_llama_model(model_path, generation_params)
 
@@ -790,6 +929,7 @@ def run_model_batch(
     return {
         "model_name": model_name,
         "model_path": str(model_path),
+        "run_id": run_id,
         "prompt_count": total_prompts,
         "accepted_count": accepted_count,
         "failed_count": failed_count,
@@ -809,6 +949,9 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--progress-every must be zero or a positive integer.")
     if args.heartbeat_seconds < 0:
         raise ValueError("--heartbeat-seconds must be zero or a positive integer.")
+    if args.expected_output_patch_tokens is not None and args.expected_output_patch_tokens <= 0:
+        raise ValueError("--expected-output-patch-tokens must be a positive integer.")
+    run_id = args.run_id or build_default_run_id(args.run_label)
     paths = default_cloud_paths(config, args.cloud_root)
     output_root = Path(args.output_root).expanduser() if args.output_root else paths["output_root"]
     model_dir = Path(args.model_dir).expanduser() if args.model_dir else paths["model_dir"]
@@ -824,6 +967,12 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("llm.output_token_margin_percent or --output-token-margin-percent must be zero or positive.")
     if generation_params["context_reserve_tokens"] < 0:
         raise ValueError("llm.context_reserve_tokens or --context-reserve-tokens must be zero or positive.")
+    if generation_params["prompt_target_context"] <= 0:
+        raise ValueError("llm.prompt_target_context must be a positive integer.")
+    if generation_params["runtime_max_model_len"] <= 0:
+        raise ValueError("llm.runtime_max_model_len or --runtime-max-model-len must be a positive integer.")
+    if generation_params["expected_output_patch_tokens"] <= 0:
+        raise ValueError("llm.expected_output_patch_tokens or --expected-output-patch-tokens must be positive.")
     if generation_params["min_n_ctx"] <= 0:
         raise ValueError("llm.min_n_ctx or --min-n-ctx must be a positive integer.")
     if generation_params["max_n_ctx"] <= 0:
@@ -842,6 +991,7 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
     for model_path in model_paths:
         print(f"  - {model_path}")
     print(f"Output root: {output_root}")
+    print(f"Run id: {run_id}")
     print(f"n_ctx plan: {n_ctx_plan}")
     print(f"Generation params: {generation_params}")
 
@@ -853,6 +1003,7 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
                 model_path=model_path,
                 prompt_paths=prompt_paths,
                 output_root=output_root,
+                run_id=run_id,
                 generation_params=generation_params,
                 progress_every=args.progress_every,
                 heartbeat_seconds=args.heartbeat_seconds,
@@ -864,6 +1015,7 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         "prompt_count": len(prompt_paths),
         "model_count": len(model_paths),
         "model_summaries": summaries,
+        "run_id": run_id,
         "n_ctx_plan": n_ctx_plan,
         "runtime_seconds": time.perf_counter() - batch_start,
         "output_root": str(output_root),
@@ -872,11 +1024,11 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
 
 #This function defines the command-line arguments accepted by Step 17.
 def parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run GGUF LLM models over Step 16 prompt packages.")
+    parser = argparse.ArgumentParser(description="Run LLM models over Step 16 compact patch prompt packages.")
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
-    parser.add_argument("--prompt-file", help="Path to one Step 16 group_XXXXXX.prompt.json file.")
+    parser.add_argument("--prompt-file", help="Path to one Step 16 prompt_unit.prompt.json file.")
     parser.add_argument("--prompt-manifest", help="Path to Step 16 prompt_manifest.json.")
-    parser.add_argument("--prompt-dir", help="Directory containing Step 16 group_XXXXXX.prompt.json files.")
+    parser.add_argument("--prompt-dir", help="Directory containing Step 16 prompt_unit.prompt.json files.")
     parser.add_argument("--output-root", help="Directory where Step 17 model outputs will be written.")
     parser.add_argument("--cloud-root", default=str(DEFAULT_CLOUD_ROOT), help="RISE cloud root for default paths.")
     parser.add_argument("--model-dir", help="Directory containing GGUF model files.")
@@ -899,12 +1051,14 @@ def parse_cli_args() -> argparse.Namespace:
         default=60,
         help="Print a heartbeat every N seconds during each blocking model generation. Use 0 to disable.",
     )
+    parser.add_argument("--run-id", help="Explicit run id under 07_llm_outputs/<model>/<run_id>.")
+    parser.add_argument("--run-label", help="Optional label appended to an automatically generated run id.")
     parser.add_argument("--temperature", type=float, help="Override llm.temperature from config.")
     parser.add_argument("--top-p", type=float, help="Override llm.top_p from config.")
     parser.add_argument(
         "--output-token-margin-percent",
         type=float,
-        help="Override llm.output_token_margin_percent for dynamic max_tokens.",
+        help="Legacy override kept for old metadata; compact patch prompts use expected_output_patch_tokens.",
     )
     parser.add_argument(
         "--context-reserve-tokens",
@@ -914,7 +1068,17 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-ctx",
         type=int,
-        help="Fixed llama-cpp-python context window size. If omitted, Step 17 estimates n_ctx from selected prompts.",
+        help="Fixed backend context window size. Overrides runtime_max_model_len.",
+    )
+    parser.add_argument(
+        "--runtime-max-model-len",
+        type=int,
+        help="Hard backend context cap used by llama.cpp n_ctx or vLLM max_model_len.",
+    )
+    parser.add_argument(
+        "--expected-output-patch-tokens",
+        type=int,
+        help="Expected maximum patch-output token budget for compact patch prompting.",
     )
     parser.add_argument(
         "--min-n-ctx",
