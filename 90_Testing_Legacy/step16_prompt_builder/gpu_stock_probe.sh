@@ -241,6 +241,8 @@ try_gpu_vm() {
   local machine_type
   local gpu_count
   local name
+  local output
+  local status
 
   spec="$(normalise_spec "$raw_spec")"
   machine_type="${spec%%:*}"
@@ -279,11 +281,23 @@ echo probe-ready"
   CURRENT_INSTANCE_NAME="$name"
   CURRENT_INSTANCE_ZONE="$zone"
 
-  if "${command[@]}"; then
+  output="$("${command[@]}" 2>&1)"
+  status=$?
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output"
+  fi
+
+  if [[ "$status" -eq 0 ]]; then
     echo "AVAILABLE: ${machine_type}:${gpu_count} in ${zone}"
     AVAILABLE_ROWS+=("${machine_type}:${gpu_count}:${zone}")
     cleanup_current_instance
     return 0
+  fi
+
+  if [[ "$output" == *Quota*exceeded* || "$output" == *quota*exceeded* ]]; then
+    echo "BLOCKED: quota exceeded while trying ${machine_type}:${gpu_count} in ${zone}. Stop probing and free GPU quota or request a quota increase." >&2
+    cleanup_current_instance
+    return 2
   fi
 
   echo "NOT AVAILABLE: ${machine_type}:${gpu_count} in ${zone}"
@@ -304,7 +318,12 @@ probe_specs() {
 
   for raw_spec in "$@"; do
     for zone in "${TEST_ZONES[@]}"; do
-      if try_gpu_vm "$raw_spec" "$zone"; then
+      try_gpu_vm "$raw_spec" "$zone"
+      local try_status=$?
+      if [[ "$try_status" -eq 2 ]]; then
+        return 2
+      fi
+      if [[ "$try_status" -eq 0 ]]; then
         phase_found=1
         if [[ "$STOP_AFTER_FIRST" -eq 1 ]]; then
           return 0
@@ -364,10 +383,19 @@ main() {
   echo "Boot disk: ${BOOT_DISK_TYPE}, ${BOOT_DISK_SIZE_GB}GB"
   echo "Zones to test: ${#TEST_ZONES[@]}"
 
-  if ! probe_specs "Preferred orchestrator shape" "$PRIMARY_MACHINE_SPEC"; then
+  probe_specs "Preferred orchestrator shape" "$PRIMARY_MACHINE_SPEC"
+  local primary_status=$?
+  if [[ "$primary_status" -eq 2 ]]; then
+    exit 2
+  fi
+  if [[ "$primary_status" -ne 0 ]]; then
     # Only broaden the machine shape after every preferred-zone attempt has failed.
     # shellcheck disable=SC2086
-    probe_specs "Fallback machine shapes" $FALLBACK_MACHINE_SPECS || true
+    probe_specs "Fallback machine shapes" $FALLBACK_MACHINE_SPECS
+    local fallback_status=$?
+    if [[ "$fallback_status" -eq 2 ]]; then
+      exit 2
+    fi
   fi
 
   print_summary

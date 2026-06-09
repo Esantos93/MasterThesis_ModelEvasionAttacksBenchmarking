@@ -151,6 +151,10 @@ class AvailableConfig:
     zone: str
 
 
+class QuotaExceededError(RuntimeError):
+    pass
+
+
 def gcloud_command() -> str:
     configured = os.environ.get("GCLOUD")
     if configured:
@@ -178,12 +182,22 @@ def run_capture(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
-def run_stream(command: list[str], dry_run: bool) -> int:
+def run_stream(command: list[str], dry_run: bool) -> subprocess.CompletedProcess[str]:
     print("+ " + command_to_text(command))
     if dry_run:
         print("DRY RUN: command not executed.")
-        return 1
-    return subprocess.run(command, check=False).returncode
+        return subprocess.CompletedProcess(command, 1, "", "")
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
+def is_quota_error(output: str) -> bool:
+    lowered = output.lower()
+    return "quota" in lowered and "exceeded" in lowered
 
 
 def zone_region(zone: str) -> str:
@@ -295,12 +309,18 @@ def try_gpu_vm(args: argparse.Namespace, gcloud: str, spec: MachineSpec, zone: s
 
     command = build_create_command(args, gcloud, spec, zone, name)
     try:
-        returncode = run_stream(command, args.dry_run)
+        result = run_stream(command, args.dry_run)
         if args.dry_run:
             return None
-        if returncode == 0:
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode == 0:
             print(f"AVAILABLE: {spec.machine_type}:{spec.gpu_count} in {zone}")
             return AvailableConfig(spec.machine_type, spec.gpu_count, zone)
+        if is_quota_error(combined_output):
+            raise QuotaExceededError(
+                f"Quota exceeded while trying {spec.machine_type}:{spec.gpu_count} in {zone}. "
+                "Stop probing and free GPU quota or request a quota increase."
+            )
         print(f"NOT AVAILABLE: {spec.machine_type}:{spec.gpu_count} in {zone}")
         return None
     finally:
@@ -397,11 +417,15 @@ def main() -> int:
     print(f"Boot disk: {args.boot_disk_type}, {args.boot_disk_size_gb}GB")
     print(f"Zones to test: {len(zones)}")
 
-    available = probe_specs("Preferred orchestrator shape", args, gcloud, primary_specs, zones)
-    if not available:
-        available.extend(probe_specs("Fallback machine shapes", args, gcloud, fallback_specs, zones))
-
-    return print_summary(args, available)
+    try:
+        available = probe_specs("Preferred orchestrator shape", args, gcloud, primary_specs, zones)
+        if not available:
+            available.extend(probe_specs("Fallback machine shapes", args, gcloud, fallback_specs, zones))
+        return print_summary(args, available)
+    except QuotaExceededError as exc:
+        print()
+        print(f"BLOCKED: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
