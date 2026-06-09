@@ -24,18 +24,24 @@ CURRENT_INSTANCE_NAME=""
 CURRENT_INSTANCE_ZONE=""
 declare -a AVAILABLE_ROWS=()
 
+EUROPE_REGION_ORDER=(
+  europe-west1 europe-west2 europe-west3 europe-west4 europe-west6
+  europe-west8 europe-west9 europe-west10 europe-west12
+  europe-southwest1 europe-central2 europe-north1
+)
+
 DEFAULT_ZONES=(
-  asia-east1-a asia-east1-b asia-east1-c
-  asia-northeast1-a asia-northeast1-b asia-northeast1-c
-  asia-south1-a asia-south1-b asia-south1-c
-  asia-southeast1-a asia-southeast1-b asia-southeast1-c
-  australia-southeast1-a australia-southeast1-b australia-southeast1-c
   europe-north1-a europe-north1-b europe-north1-c
   europe-west1-b europe-west1-c europe-west1-d
   europe-west2-a europe-west2-b europe-west2-c
   europe-west3-a europe-west3-b europe-west3-c
   europe-west4-a europe-west4-b europe-west4-c
   europe-west6-a europe-west6-b europe-west6-c
+  asia-east1-a asia-east1-b asia-east1-c
+  asia-northeast1-a asia-northeast1-b asia-northeast1-c
+  asia-south1-a asia-south1-b asia-south1-c
+  asia-southeast1-a asia-southeast1-b asia-southeast1-c
+  australia-southeast1-a australia-southeast1-b australia-southeast1-c
   northamerica-northeast1-a northamerica-northeast1-b northamerica-northeast1-c
   southamerica-east1-a southamerica-east1-b southamerica-east1-c
   us-central1-a us-central1-b us-central1-c us-central1-f
@@ -79,6 +85,38 @@ print_command() {
   printf '+'
   printf ' %q' "$@"
   printf '\n'
+}
+
+order_zones() {
+  local zones=("$@")
+  local zone
+  local region
+  local preferred_region
+  declare -A emitted=()
+
+  for preferred_region in "${EUROPE_REGION_ORDER[@]}"; do
+    for zone in "${zones[@]}"; do
+      region="${zone%-*}"
+      if [[ "$region" == "$preferred_region" && -z "${emitted[$zone]+x}" ]]; then
+        printf '%s\n' "$zone"
+        emitted["$zone"]=1
+      fi
+    done
+  done
+
+  for zone in "${zones[@]}"; do
+    if [[ "$zone" == europe-* && -z "${emitted[$zone]+x}" ]]; then
+      printf '%s\n' "$zone"
+      emitted["$zone"]=1
+    fi
+  done
+
+  for zone in "${zones[@]}"; do
+    if [[ "$zone" != europe-* && -z "${emitted[$zone]+x}" ]]; then
+      printf '%s\n' "$zone"
+      emitted["$zone"]=1
+    fi
+  done
 }
 
 cleanup_current_instance() {
@@ -147,24 +185,30 @@ parse_args() {
 }
 
 discover_l4_zones() {
+  local discovered
+  local discovered_zones
+  local requested_zones
+
   if [[ -n "$ZONES" ]]; then
-    printf '%s\n' $ZONES
+    # shellcheck disable=SC2206
+    requested_zones=($ZONES)
+    order_zones "${requested_zones[@]}"
     return 0
   fi
 
-  local discovered
   discovered="$("$GCLOUD" compute accelerator-types list \
     --project "$PROJECT" \
     --filter "name=${GPU_TYPE}" \
     --format "value(zone.basename())" 2>/dev/null)" || discovered=""
 
   if [[ -n "$discovered" ]]; then
-    printf '%s\n' "$discovered" | sort -u
+    mapfile -t discovered_zones < <(printf '%s\n' "$discovered" | sort -u)
+    order_zones "${discovered_zones[@]}"
     return 0
   fi
 
   echo "Warning: could not discover ${GPU_TYPE} zones; using built-in fallback zone list." >&2
-  printf '%s\n' "${DEFAULT_ZONES[@]}"
+  order_zones "${DEFAULT_ZONES[@]}"
 }
 
 normalise_spec() {

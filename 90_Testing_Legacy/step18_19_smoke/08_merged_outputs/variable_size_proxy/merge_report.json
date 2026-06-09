@@ -1,0 +1,1158 @@
+{
+  "conditions": [
+    {
+      "accepted_groups": [
+        {
+          "condition": "Llama_smoke_group_size5",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000001",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000001.metadata.json",
+          "packet_count": 5,
+          "packet_ids": [
+            "packet_000001",
+            "packet_000002",
+            "packet_000003",
+            "packet_000004",
+            "packet_000005"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000001.parsed.json",
+          "status": "accepted"
+        },
+        {
+          "condition": "Llama_smoke_group_size5",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000002",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000002.metadata.json",
+          "packet_count": 5,
+          "packet_ids": [
+            "packet_000006",
+            "packet_000007",
+            "packet_000008",
+            "packet_000009",
+            "packet_000010"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+          "status": "accepted"
+        },
+        {
+          "condition": "Llama_smoke_group_size5",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000003",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000003.metadata.json",
+          "packet_count": 5,
+          "packet_ids": [
+            "packet_000011",
+            "packet_000012",
+            "packet_000013",
+            "packet_000014",
+            "packet_000015"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+          "status": "accepted"
+        },
+        {
+          "condition": "Llama_smoke_group_size5",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000004",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000004.metadata.json",
+          "packet_count": 5,
+          "packet_ids": [
+            "packet_000016",
+            "packet_000017",
+            "packet_000018",
+            "packet_000019",
+            "packet_000020"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000004.parsed.json",
+          "status": "accepted"
+        },
+        {
+          "condition": "Llama_smoke_group_size5",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000005",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000005.metadata.json",
+          "packet_count": 5,
+          "packet_ids": [
+            "packet_000021",
+            "packet_000022",
+            "packet_000023",
+            "packet_000024",
+            "packet_000025"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000005.parsed.json",
+          "status": "accepted"
+        }
+      ],
+      "condition": "Llama_smoke_group_size5",
+      "failed_modification_groups": [],
+      "failures_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\failures",
+      "metadata_accepted_without_parsed": [],
+      "metadata_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata",
+      "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "model_root": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "parsed_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed",
+      "skipped_groups": [],
+      "summary": {
+        "accepted_group_count": 5,
+        "failed_modification_group_count": 0,
+        "metadata_count": 5,
+        "parsed_file_count": 5,
+        "skipped_group_count": 0,
+        "traffic_record_count": 25
+      }
+    },
+    {
+      "accepted_groups": [
+        {
+          "condition": "Llama_smoke_group_size10",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000004",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000004.metadata.json",
+          "packet_count": 10,
+          "packet_ids": [
+            "packet_000031",
+            "packet_000032",
+            "packet_000033",
+            "packet_000034",
+            "packet_000035",
+            "packet_000036",
+            "packet_000037",
+            "packet_000038",
+            "packet_000039",
+            "packet_000040"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000004.parsed.json",
+          "status": "accepted"
+        },
+        {
+          "condition": "Llama_smoke_group_size10",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000005",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000005.metadata.json",
+          "packet_count": 10,
+          "packet_ids": [
+            "packet_000041",
+            "packet_000042",
+            "packet_000043",
+            "packet_000044",
+            "packet_000045",
+            "packet_000046",
+            "packet_000047",
+            "packet_000048",
+            "packet_000049",
+            "packet_000050"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000005.parsed.json",
+          "status": "accepted"
+        }
+      ],
+      "condition": "Llama_smoke_group_size10",
+      "failed_modification_groups": [],
+      "failures_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\failures",
+      "metadata_accepted_without_parsed": [],
+      "metadata_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata",
+      "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "model_root": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "parsed_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed",
+      "skipped_groups": [
+        {
+          "condition": "Llama_smoke_group_size10",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000001",
+          "overlapping_packet_ids": [
+            "packet_000001",
+            "packet_000002",
+            "packet_000003",
+            "packet_000004",
+            "packet_000005",
+            "packet_000006",
+            "packet_000007",
+            "packet_000008",
+            "packet_000009",
+            "packet_000010"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000001.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        },
+        {
+          "condition": "Llama_smoke_group_size10",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000002",
+          "overlapping_packet_ids": [
+            "packet_000011",
+            "packet_000012",
+            "packet_000013",
+            "packet_000014",
+            "packet_000015",
+            "packet_000016",
+            "packet_000017",
+            "packet_000018",
+            "packet_000019",
+            "packet_000020"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        },
+        {
+          "condition": "Llama_smoke_group_size10",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000003",
+          "overlapping_packet_ids": [
+            "packet_000021",
+            "packet_000022",
+            "packet_000023",
+            "packet_000024",
+            "packet_000025"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        }
+      ],
+      "summary": {
+        "accepted_group_count": 2,
+        "failed_modification_group_count": 0,
+        "metadata_count": 5,
+        "parsed_file_count": 5,
+        "skipped_group_count": 3,
+        "traffic_record_count": 20
+      }
+    },
+    {
+      "accepted_groups": [],
+      "condition": "Llama_smoke_group_size15",
+      "failed_modification_groups": [
+        {
+          "condition": "Llama_smoke_group_size15",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 15,
+          "failure_reason": "traffic_record_count_changed",
+          "group_id": "group_000002",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size15/group_000002.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000002.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000002.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000002.raw.txt",
+            "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000002.rejected.json"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size15/group_000002.prompt.json",
+          "status": "failed",
+          "validation_result": {
+            "accepted": false,
+            "actual_count": 14,
+            "expected_count": 15,
+            "reason": "traffic_record_count_changed"
+          }
+        },
+        {
+          "condition": "Llama_smoke_group_size15",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 15,
+          "failure_reason": "traffic_record_count_changed",
+          "group_id": "group_000005",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size15/group_000005.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000005.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000005.raw.txt",
+            "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.rejected.json"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size15/group_000005.prompt.json",
+          "status": "failed",
+          "validation_result": {
+            "accepted": false,
+            "actual_count": 14,
+            "expected_count": 15,
+            "reason": "traffic_record_count_changed"
+          }
+        }
+      ],
+      "failures_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\failures",
+      "metadata_accepted_without_parsed": [],
+      "metadata_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata",
+      "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "model_root": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "parsed_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed",
+      "skipped_groups": [
+        {
+          "condition": "Llama_smoke_group_size15",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000001",
+          "overlapping_packet_ids": [
+            "packet_000001",
+            "packet_000002",
+            "packet_000003",
+            "packet_000004",
+            "packet_000005",
+            "packet_000006",
+            "packet_000007",
+            "packet_000008",
+            "packet_000009",
+            "packet_000010",
+            "packet_000011",
+            "packet_000012",
+            "packet_000013",
+            "packet_000014",
+            "packet_000015"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000001.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        },
+        {
+          "condition": "Llama_smoke_group_size15",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000003",
+          "overlapping_packet_ids": [
+            "packet_000031",
+            "packet_000032",
+            "packet_000033",
+            "packet_000034",
+            "packet_000035",
+            "packet_000036",
+            "packet_000037",
+            "packet_000038",
+            "packet_000039",
+            "packet_000040",
+            "packet_000041",
+            "packet_000042",
+            "packet_000043",
+            "packet_000044",
+            "packet_000045"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        },
+        {
+          "condition": "Llama_smoke_group_size15",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000004",
+          "overlapping_packet_ids": [
+            "packet_000046",
+            "packet_000047",
+            "packet_000048",
+            "packet_000049",
+            "packet_000050"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000004.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        }
+      ],
+      "summary": {
+        "accepted_group_count": 0,
+        "failed_modification_group_count": 2,
+        "metadata_count": 5,
+        "parsed_file_count": 3,
+        "skipped_group_count": 3,
+        "traffic_record_count": 0
+      }
+    },
+    {
+      "accepted_groups": [],
+      "condition": "Llama_smoke_group_size20",
+      "failed_modification_groups": [
+        {
+          "condition": "Llama_smoke_group_size20",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 20,
+          "failure_reason": "JSONDecodeError",
+          "group_id": "group_000001",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000001.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000001.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000001.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000001.raw.txt"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000001.prompt.json",
+          "status": "failed",
+          "validation_result": null
+        },
+        {
+          "condition": "Llama_smoke_group_size20",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 20,
+          "failure_reason": "traffic_record_count_changed",
+          "group_id": "group_000003",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000003.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000003.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000003.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000003.raw.txt",
+            "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000003.rejected.json"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000003.prompt.json",
+          "status": "failed",
+          "validation_result": {
+            "accepted": false,
+            "actual_count": 12,
+            "expected_count": 20,
+            "reason": "traffic_record_count_changed"
+          }
+        },
+        {
+          "condition": "Llama_smoke_group_size20",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 20,
+          "failure_reason": "traffic_record_count_changed",
+          "group_id": "group_000004",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000004.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000004.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000004.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000004.raw.txt",
+            "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000004.rejected.json"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000004.prompt.json",
+          "status": "failed",
+          "validation_result": {
+            "accepted": false,
+            "actual_count": 16,
+            "expected_count": 20,
+            "reason": "traffic_record_count_changed"
+          }
+        },
+        {
+          "condition": "Llama_smoke_group_size20",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 20,
+          "failure_reason": "JSONDecodeError",
+          "group_id": "group_000005",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000005.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000005.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000005.raw.txt"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000005.prompt.json",
+          "status": "failed",
+          "validation_result": null
+        }
+      ],
+      "failures_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size20\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\failures",
+      "metadata_accepted_without_parsed": [],
+      "metadata_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size20\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata",
+      "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "model_root": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size20\\Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "parsed_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size20\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed",
+      "skipped_groups": [
+        {
+          "condition": "Llama_smoke_group_size20",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000002",
+          "overlapping_packet_ids": [
+            "packet_000021",
+            "packet_000022",
+            "packet_000023",
+            "packet_000024",
+            "packet_000025",
+            "packet_000031",
+            "packet_000032",
+            "packet_000033",
+            "packet_000034",
+            "packet_000035",
+            "packet_000036",
+            "packet_000037",
+            "packet_000038",
+            "packet_000039",
+            "packet_000040"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size20\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        }
+      ],
+      "summary": {
+        "accepted_group_count": 0,
+        "failed_modification_group_count": 4,
+        "metadata_count": 5,
+        "parsed_file_count": 1,
+        "skipped_group_count": 1,
+        "traffic_record_count": 0
+      }
+    },
+    {
+      "accepted_groups": [
+        {
+          "condition": "Llama_smoke_group_size25",
+          "evaluation_status": "Pending Step 19 Validation",
+          "group_id": "group_000003",
+          "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000003.metadata.json",
+          "packet_count": 25,
+          "packet_ids": [
+            "packet_000051",
+            "packet_000052",
+            "packet_000053",
+            "packet_000054",
+            "packet_000055",
+            "packet_000056",
+            "packet_000057",
+            "packet_000058",
+            "packet_000059",
+            "packet_000060",
+            "packet_000061",
+            "packet_000062",
+            "packet_000063",
+            "packet_000064",
+            "packet_000065",
+            "packet_000066",
+            "packet_000067",
+            "packet_000068",
+            "packet_000069",
+            "packet_000070",
+            "packet_000071",
+            "packet_000072",
+            "packet_000073",
+            "packet_000074",
+            "packet_000075"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+          "status": "accepted"
+        }
+      ],
+      "condition": "Llama_smoke_group_size25",
+      "failed_modification_groups": [
+        {
+          "condition": "Llama_smoke_group_size25",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 25,
+          "failure_reason": "JSONDecodeError",
+          "group_id": "group_000001",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size25/group_000001.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000001.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000001.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000001.raw.txt"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size25/group_000001.prompt.json",
+          "status": "failed",
+          "validation_result": null
+        },
+        {
+          "condition": "Llama_smoke_group_size25",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 25,
+          "failure_reason": "JSONDecodeError",
+          "group_id": "group_000004",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size25/group_000004.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000004.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000004.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000004.raw.txt"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size25/group_000004.prompt.json",
+          "status": "failed",
+          "validation_result": null
+        },
+        {
+          "condition": "Llama_smoke_group_size25",
+          "evaluation_status": "Failed Modification",
+          "expected_packet_count": 25,
+          "failure_reason": "JSONDecodeError",
+          "group_id": "group_000005",
+          "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size25/group_000005.json",
+          "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+          "output_paths": {
+            "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.failure.json",
+            "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000005.metadata.json",
+            "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000005.raw.txt"
+          },
+          "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size25/group_000005.prompt.json",
+          "status": "failed",
+          "validation_result": null
+        }
+      ],
+      "failures_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\failures",
+      "metadata_accepted_without_parsed": [],
+      "metadata_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata",
+      "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "model_root": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+      "parsed_dir": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed",
+      "skipped_groups": [
+        {
+          "condition": "Llama_smoke_group_size25",
+          "evaluation_status": "Skipped Technical Overlap",
+          "group_id": "group_000002",
+          "overlapping_packet_ids": [
+            "packet_000031",
+            "packet_000032",
+            "packet_000033",
+            "packet_000034",
+            "packet_000035",
+            "packet_000036",
+            "packet_000037",
+            "packet_000038",
+            "packet_000039",
+            "packet_000040",
+            "packet_000041",
+            "packet_000042",
+            "packet_000043",
+            "packet_000044",
+            "packet_000045",
+            "packet_000046",
+            "packet_000047",
+            "packet_000048",
+            "packet_000049",
+            "packet_000050"
+          ],
+          "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+          "reason": "packet_id_overlap_with_previous_group",
+          "status": "skipped"
+        }
+      ],
+      "summary": {
+        "accepted_group_count": 1,
+        "failed_modification_group_count": 3,
+        "metadata_count": 5,
+        "parsed_file_count": 2,
+        "skipped_group_count": 1,
+        "traffic_record_count": 25
+      }
+    }
+  ],
+  "duplicate_packet_ids": [],
+  "group_outcomes": {
+    "accepted_groups": [
+      {
+        "condition": "Llama_smoke_group_size5",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000001",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000001.metadata.json",
+        "packet_count": 5,
+        "packet_ids": [
+          "packet_000001",
+          "packet_000002",
+          "packet_000003",
+          "packet_000004",
+          "packet_000005"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000001.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size5",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000002",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000002.metadata.json",
+        "packet_count": 5,
+        "packet_ids": [
+          "packet_000006",
+          "packet_000007",
+          "packet_000008",
+          "packet_000009",
+          "packet_000010"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size5",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000003",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000003.metadata.json",
+        "packet_count": 5,
+        "packet_ids": [
+          "packet_000011",
+          "packet_000012",
+          "packet_000013",
+          "packet_000014",
+          "packet_000015"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size5",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000004",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000004.metadata.json",
+        "packet_count": 5,
+        "packet_ids": [
+          "packet_000016",
+          "packet_000017",
+          "packet_000018",
+          "packet_000019",
+          "packet_000020"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000004.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size5",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000005",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000005.metadata.json",
+        "packet_count": 5,
+        "packet_ids": [
+          "packet_000021",
+          "packet_000022",
+          "packet_000023",
+          "packet_000024",
+          "packet_000025"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size5\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000005.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size10",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000004",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000004.metadata.json",
+        "packet_count": 10,
+        "packet_ids": [
+          "packet_000031",
+          "packet_000032",
+          "packet_000033",
+          "packet_000034",
+          "packet_000035",
+          "packet_000036",
+          "packet_000037",
+          "packet_000038",
+          "packet_000039",
+          "packet_000040"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000004.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size10",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000005",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000005.metadata.json",
+        "packet_count": 10,
+        "packet_ids": [
+          "packet_000041",
+          "packet_000042",
+          "packet_000043",
+          "packet_000044",
+          "packet_000045",
+          "packet_000046",
+          "packet_000047",
+          "packet_000048",
+          "packet_000049",
+          "packet_000050"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000005.parsed.json",
+        "status": "accepted"
+      },
+      {
+        "condition": "Llama_smoke_group_size25",
+        "evaluation_status": "Pending Step 19 Validation",
+        "group_id": "group_000003",
+        "metadata_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\metadata\\group_000003.metadata.json",
+        "packet_count": 25,
+        "packet_ids": [
+          "packet_000051",
+          "packet_000052",
+          "packet_000053",
+          "packet_000054",
+          "packet_000055",
+          "packet_000056",
+          "packet_000057",
+          "packet_000058",
+          "packet_000059",
+          "packet_000060",
+          "packet_000061",
+          "packet_000062",
+          "packet_000063",
+          "packet_000064",
+          "packet_000065",
+          "packet_000066",
+          "packet_000067",
+          "packet_000068",
+          "packet_000069",
+          "packet_000070",
+          "packet_000071",
+          "packet_000072",
+          "packet_000073",
+          "packet_000074",
+          "packet_000075"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+        "status": "accepted"
+      }
+    ],
+    "failed_modification_groups": [
+      {
+        "condition": "Llama_smoke_group_size15",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 15,
+        "failure_reason": "traffic_record_count_changed",
+        "group_id": "group_000002",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size15/group_000002.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000002.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000002.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000002.raw.txt",
+          "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000002.rejected.json"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size15/group_000002.prompt.json",
+        "status": "failed",
+        "validation_result": {
+          "accepted": false,
+          "actual_count": 14,
+          "expected_count": 15,
+          "reason": "traffic_record_count_changed"
+        }
+      },
+      {
+        "condition": "Llama_smoke_group_size15",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 15,
+        "failure_reason": "traffic_record_count_changed",
+        "group_id": "group_000005",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size15/group_000005.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000005.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000005.raw.txt",
+          "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size15/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.rejected.json"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size15/group_000005.prompt.json",
+        "status": "failed",
+        "validation_result": {
+          "accepted": false,
+          "actual_count": 14,
+          "expected_count": 15,
+          "reason": "traffic_record_count_changed"
+        }
+      },
+      {
+        "condition": "Llama_smoke_group_size20",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 20,
+        "failure_reason": "JSONDecodeError",
+        "group_id": "group_000001",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000001.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000001.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000001.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000001.raw.txt"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000001.prompt.json",
+        "status": "failed",
+        "validation_result": null
+      },
+      {
+        "condition": "Llama_smoke_group_size20",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 20,
+        "failure_reason": "traffic_record_count_changed",
+        "group_id": "group_000003",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000003.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000003.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000003.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000003.raw.txt",
+          "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000003.rejected.json"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000003.prompt.json",
+        "status": "failed",
+        "validation_result": {
+          "accepted": false,
+          "actual_count": 12,
+          "expected_count": 20,
+          "reason": "traffic_record_count_changed"
+        }
+      },
+      {
+        "condition": "Llama_smoke_group_size20",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 20,
+        "failure_reason": "traffic_record_count_changed",
+        "group_id": "group_000004",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000004.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000004.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000004.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000004.raw.txt",
+          "rejected_json": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000004.rejected.json"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000004.prompt.json",
+        "status": "failed",
+        "validation_result": {
+          "accepted": false,
+          "actual_count": 16,
+          "expected_count": 20,
+          "reason": "traffic_record_count_changed"
+        }
+      },
+      {
+        "condition": "Llama_smoke_group_size20",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 20,
+        "failure_reason": "JSONDecodeError",
+        "group_id": "group_000005",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size20/group_000005.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000005.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size20/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000005.raw.txt"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size20/group_000005.prompt.json",
+        "status": "failed",
+        "validation_result": null
+      },
+      {
+        "condition": "Llama_smoke_group_size25",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 25,
+        "failure_reason": "JSONDecodeError",
+        "group_id": "group_000001",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size25/group_000001.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000001.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000001.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000001.raw.txt"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size25/group_000001.prompt.json",
+        "status": "failed",
+        "validation_result": null
+      },
+      {
+        "condition": "Llama_smoke_group_size25",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 25,
+        "failure_reason": "JSONDecodeError",
+        "group_id": "group_000004",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size25/group_000004.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000004.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000004.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000004.raw.txt"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size25/group_000004.prompt.json",
+        "status": "failed",
+        "validation_result": null
+      },
+      {
+        "condition": "Llama_smoke_group_size25",
+        "evaluation_status": "Failed Modification",
+        "expected_packet_count": 25,
+        "failure_reason": "JSONDecodeError",
+        "group_id": "group_000005",
+        "input_group_file": "/home/ubuntu/thesis_Santos/01_InputFiles/exp_cicids2017_thursday_baseline_001/05_groups_size25/group_000005.json",
+        "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+        "output_paths": {
+          "failure": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/failures/group_000005.failure.json",
+          "metadata": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/metadata/group_000005.metadata.json",
+          "raw": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/07_llm_outputs/Llama_smoke_group_size25/Meta-Llama-3.1-8B-Instruct-Q4_K_M/raw/group_000005.raw.txt"
+        },
+        "prompt_file": "/home/ubuntu/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_001/06_prompts/group_size25/group_000005.prompt.json",
+        "status": "failed",
+        "validation_result": null
+      }
+    ],
+    "skipped_groups": [
+      {
+        "condition": "Llama_smoke_group_size10",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000001",
+        "overlapping_packet_ids": [
+          "packet_000001",
+          "packet_000002",
+          "packet_000003",
+          "packet_000004",
+          "packet_000005",
+          "packet_000006",
+          "packet_000007",
+          "packet_000008",
+          "packet_000009",
+          "packet_000010"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000001.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size10",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000002",
+        "overlapping_packet_ids": [
+          "packet_000011",
+          "packet_000012",
+          "packet_000013",
+          "packet_000014",
+          "packet_000015",
+          "packet_000016",
+          "packet_000017",
+          "packet_000018",
+          "packet_000019",
+          "packet_000020"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size10",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000003",
+        "overlapping_packet_ids": [
+          "packet_000021",
+          "packet_000022",
+          "packet_000023",
+          "packet_000024",
+          "packet_000025"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size10\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size15",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000001",
+        "overlapping_packet_ids": [
+          "packet_000001",
+          "packet_000002",
+          "packet_000003",
+          "packet_000004",
+          "packet_000005",
+          "packet_000006",
+          "packet_000007",
+          "packet_000008",
+          "packet_000009",
+          "packet_000010",
+          "packet_000011",
+          "packet_000012",
+          "packet_000013",
+          "packet_000014",
+          "packet_000015"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000001.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size15",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000003",
+        "overlapping_packet_ids": [
+          "packet_000031",
+          "packet_000032",
+          "packet_000033",
+          "packet_000034",
+          "packet_000035",
+          "packet_000036",
+          "packet_000037",
+          "packet_000038",
+          "packet_000039",
+          "packet_000040",
+          "packet_000041",
+          "packet_000042",
+          "packet_000043",
+          "packet_000044",
+          "packet_000045"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000003.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size15",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000004",
+        "overlapping_packet_ids": [
+          "packet_000046",
+          "packet_000047",
+          "packet_000048",
+          "packet_000049",
+          "packet_000050"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size15\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000004.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size20",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000002",
+        "overlapping_packet_ids": [
+          "packet_000021",
+          "packet_000022",
+          "packet_000023",
+          "packet_000024",
+          "packet_000025",
+          "packet_000031",
+          "packet_000032",
+          "packet_000033",
+          "packet_000034",
+          "packet_000035",
+          "packet_000036",
+          "packet_000037",
+          "packet_000038",
+          "packet_000039",
+          "packet_000040"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size20\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      },
+      {
+        "condition": "Llama_smoke_group_size25",
+        "evaluation_status": "Skipped Technical Overlap",
+        "group_id": "group_000002",
+        "overlapping_packet_ids": [
+          "packet_000031",
+          "packet_000032",
+          "packet_000033",
+          "packet_000034",
+          "packet_000035",
+          "packet_000036",
+          "packet_000037",
+          "packet_000038",
+          "packet_000039",
+          "packet_000040",
+          "packet_000041",
+          "packet_000042",
+          "packet_000043",
+          "packet_000044",
+          "packet_000045",
+          "packet_000046",
+          "packet_000047",
+          "packet_000048",
+          "packet_000049",
+          "packet_000050"
+        ],
+        "parsed_file": "C:\\Users\\dorna\\VirtualBox VMs\\99_CarpetaCompartida\\output_step17\\Llama_smoke_group_size25\\Meta-Llama-3.1-8B-Instruct-Q4_K_M\\parsed\\group_000002.parsed.json",
+        "reason": "packet_id_overlap_with_previous_group",
+        "status": "skipped"
+      }
+    ]
+  },
+  "metadata": {
+    "dataset_label": "variable_size_proxy",
+    "experiment_id": "exp_cicids2017_thursday_baseline_001",
+    "generated_at_utc": "2026-06-01T14:18:43.009244+00:00",
+    "merged_output": "..\\90_Testing\\step18_19_smoke\\08_merged_outputs\\variable_size_proxy\\merged_modified_traffic.json",
+    "schema_version": "llm_output_merge_report_v1"
+  },
+  "summary": {
+    "accepted_group_count": 8,
+    "condition_count": 5,
+    "duplicate_packet_id_count": 0,
+    "failed_modification_group_count": 9,
+    "skipped_group_count": 8,
+    "traffic_record_count": 70
+  }
+}
