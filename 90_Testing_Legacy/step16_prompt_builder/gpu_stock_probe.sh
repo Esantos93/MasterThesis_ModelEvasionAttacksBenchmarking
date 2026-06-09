@@ -24,6 +24,8 @@ CURRENT_INSTANCE_NAME=""
 CURRENT_INSTANCE_ZONE=""
 declare -a AVAILABLE_ROWS=()
 
+# European regions are tried before every other region. The order keeps western Europe first,
+# then southern/central/northern Europe, before falling back to the rest of the world.
 EUROPE_REGION_ORDER=(
   europe-west1 europe-west2 europe-west3 europe-west4 europe-west6
   europe-west8 europe-west9 europe-west10 europe-west12
@@ -31,12 +33,18 @@ EUROPE_REGION_ORDER=(
 )
 
 DEFAULT_ZONES=(
-  europe-north1-a europe-north1-b europe-north1-c
   europe-west1-b europe-west1-c europe-west1-d
   europe-west2-a europe-west2-b europe-west2-c
   europe-west3-a europe-west3-b europe-west3-c
   europe-west4-a europe-west4-b europe-west4-c
   europe-west6-a europe-west6-b europe-west6-c
+  europe-west8-a europe-west8-b europe-west8-c
+  europe-west9-a europe-west9-b europe-west9-c
+  europe-west10-a europe-west10-b europe-west10-c
+  europe-west12-a europe-west12-b europe-west12-c
+  europe-southwest1-a europe-southwest1-b europe-southwest1-c
+  europe-central2-a europe-central2-b europe-central2-c
+  europe-north1-a europe-north1-b europe-north1-c
   asia-east1-a asia-east1-b asia-east1-c
   asia-northeast1-a asia-northeast1-b asia-northeast1-c
   asia-south1-a asia-south1-b asia-south1-c
@@ -96,6 +104,7 @@ order_zones() {
 
   for preferred_region in "${EUROPE_REGION_ORDER[@]}"; do
     for zone in "${zones[@]}"; do
+      [[ -z "$zone" ]] && continue
       region="${zone%-*}"
       if [[ "$region" == "$preferred_region" && -z "${emitted[$zone]+x}" ]]; then
         printf '%s\n' "$zone"
@@ -105,6 +114,7 @@ order_zones() {
   done
 
   for zone in "${zones[@]}"; do
+    [[ -z "$zone" ]] && continue
     if [[ "$zone" == europe-* && -z "${emitted[$zone]+x}" ]]; then
       printf '%s\n' "$zone"
       emitted["$zone"]=1
@@ -112,6 +122,7 @@ order_zones() {
   done
 
   for zone in "${zones[@]}"; do
+    [[ -z "$zone" ]] && continue
     if [[ "$zone" != europe-* && -z "${emitted[$zone]+x}" ]]; then
       printf '%s\n' "$zone"
       emitted["$zone"]=1
@@ -202,7 +213,7 @@ discover_l4_zones() {
     --format "value(zone.basename())" 2>/dev/null)" || discovered=""
 
   if [[ -n "$discovered" ]]; then
-    mapfile -t discovered_zones < <(printf '%s\n' "$discovered" | sort -u)
+    mapfile -t discovered_zones < <(printf '%s\n' "$discovered")
     order_zones "${discovered_zones[@]}"
     return 0
   fi
