@@ -28,13 +28,13 @@
   "llm": {
     "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
     "model_path": "/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-    "prompt_version": "baseline_v1",
+    "prompt_version": "compact_patch_prompting_v1",
     "temperature": 0.0,
     "top_p": 0.95,
-    "output_token_margin_percent": 20.0,
-    "context_reserve_tokens": 128,
-    "min_n_ctx": 2048,
-    "max_n_ctx": 32768,
+    "prompt_target_context": 4096,
+    "runtime_max_model_len": 12288,
+    "expected_output_patch_tokens": 768,
+    "context_reserve_tokens": 256,
     "chars_per_token_estimate": 3.0
   },
   "pipeline": {
