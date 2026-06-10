@@ -28,11 +28,11 @@ PAYLOAD_STRATEGY_VERSION = "payload_strategy_v1"
 #When a future grouping policy is implemented, it should be added here and in group_records_by_policy().
 SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_based"]
 
-#These defaults implement the first token-budget plan from the cross-step redesign.
+#These defaults implement Step 15 planning heuristics from the cross-step redesign.
+#Experiment-level budget values that affect the LLM contract must come from the active config.
 DEFAULT_TOKEN_BUDGET_CONFIG = {
     "prompt_target_context": 4096,
     "prompt_template_overhead_tokens": 500,
-    "expected_output_patch_tokens": 768,
     "context_reserve_tokens": 256,
     "token_budget_safety_factor": 0.85,
     "chars_per_token_estimate": 3.0,
@@ -43,6 +43,7 @@ DEFAULT_TOKEN_BUDGET_CONFIG = {
     "payload_window_editable_center_bytes": 512,
     "payload_window_right_context_bytes": 128,
 }
+REQUIRED_TOKEN_BUDGET_CONFIG_KEYS = ["expected_output_patch_tokens"]
 
 HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
 TEXT_PRINTABLE = set(string.printable)
@@ -104,7 +105,7 @@ def validate_packet_json(packet_json: Any, input_path: Path) -> dict[str, Any]:
     return packet_json
 
 
-#This function merges Step 15 token-budget defaults with optional values already present in the config.
+#This function merges Step 15 heuristic defaults with values from the active config.
 def get_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
     token_config = dict(DEFAULT_TOKEN_BUDGET_CONFIG)
     llm_config = config.get("llm", {}) if isinstance(config.get("llm"), dict) else {}
@@ -113,6 +114,16 @@ def get_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
         for key in token_config:
             if key in source:
                 token_config[key] = source[key]
+    for key in REQUIRED_TOKEN_BUDGET_CONFIG_KEYS:
+        if key in llm_config:
+            token_config[key] = llm_config[key]
+        elif key in pipeline_config:
+            token_config[key] = pipeline_config[key]
+        else:
+            raise ValueError(
+                f"Step 15 requires {key!r} in the active config under 'llm' or 'pipeline'. "
+                "This experiment-level budget value has no internal default."
+            )
     return token_config
 
 
