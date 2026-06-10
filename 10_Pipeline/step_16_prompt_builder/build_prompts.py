@@ -209,45 +209,20 @@ def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, 
         "You modify compact network traffic prompt units to reduce Snort 3 detection.\n"
         "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
         "Do not return full packets. Return only patches/deltas.\n"
-        "Only modify editable_regions listed inside packets where editable is true.\n"
         "Do not modify context packets or any field outside an editable region.\n"
-        "If no useful safe change is needed, return patches as an empty list.\n"
-        "If editable_packet_ids is empty, patches must be an empty list.\n"
-        "Editable regions use region_type. Do not use type in editable_regions or in patches unless you are echoing a legacy alias.\n"
-        "Use each editable region allowed_operations field. Only those operations are valid for that region.\n"
-        "For payload_byte_range regions, do not return the full payload and do not return the full editable window. "
-        "Return only a local byte-range patch inside the editable region using replace_byte_range.\n"
-        "Use this exact output schema:\n"
+        "For every patch, operation must be copied exactly from that region's allowed_operations.\n"
+        "Each patch object modifies exactly one editable region. Use multiple patch objects to modify multiple regions.\n"
+        "If no change is needed, return patches as an empty list.\n"
+        "replace_region patches require the fields: packet_id, region_id, region_type, operation, replacement_format, replacement.\n"
+        "replace_byte_range patches require the fields: packet_id, region_id, region_type, operation, "
+        "offset_from_region_start_bytes, length_bytes, replacement_format, replacement.\n"
+        "Return this JSON object:\n"
         "{\n"
         f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",\n'
         f'  "parent_group_id": "{parent_group_id}",\n'
         f'  "prompt_unit_id": "{prompt_unit_id}",\n'
-        '  "patches": [\n'
-        "    {\n"
-        '      "packet_id": "<packet_id from editable_packet_ids>",\n'
-        '      "region_id": "<editable region_id>",\n'
-        '      "region_type": "<editable region type>",\n'
-        '      "operation": "replace_byte_range",\n'
-        '      "offset_from_region_start_bytes": 0,\n'
-        '      "length_bytes": 0,\n'
-        '      "replacement_format": "text or hex",\n'
-        '      "replacement": "<replacement value>"\n'
-        "    }\n"
-        "  ]\n"
+        '  "patches": []\n'
         "}\n"
-        "Rules:\n"
-        "- operation must be listed in the editable region allowed_operations.\n"
-        "- Use replace_byte_range for payload_byte_range regions.\n"
-        "- Do not use replace_region for payload_byte_range unless that exact operation is listed in allowed_operations.\n"
-        "- For replace_byte_range, replacement contains only the new local bytes, not the full editable region.\n"
-        "- For replace_byte_range, offset_from_region_start_bytes is relative to the start of the editable region, not the full payload.\n"
-        "- For replace_byte_range, length_bytes is the number of bytes to replace inside the editable region.\n"
-        "- For replace_region, use it only for small non-payload regions when allowed_operations includes replace_region.\n"
-        "- packet_id must reference an editable packet in this prompt unit.\n"
-        "- region_id and region_type must match one editable region in that packet.\n"
-        "- replacement_format must be text or hex and should match the editable region format.\n"
-        "- replacement must be a string.\n"
-        "- patches may be an empty list.\n"
         "Compact prompt unit:\n"
         f"{prompt_input_text}"
     )
