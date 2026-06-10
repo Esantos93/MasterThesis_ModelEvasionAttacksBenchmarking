@@ -20,7 +20,7 @@ from common.io_utils import write_json
 
 
 #These are the Step 15 artifact schema names produced by the current code.
-PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v1"
+PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v2"
 GROUP_MANIFEST_SCHEMA_VERSION = "group_manifest_v2"
 PAYLOAD_STRATEGY_VERSION = "payload_strategy_v1"
 
@@ -321,6 +321,13 @@ def build_http_payload_view(packet: dict[str, Any], payload: bytes, text: str) -
     return view, regions
 
 
+#This function chooses the patch operations allowed for each editable region type.
+def allowed_operations_for_region(region_type: str) -> list[str]:
+    if region_type == "payload_byte_range":
+        return ["replace_byte_range"]
+    return ["replace_region"]
+
+
 #This function creates a stable editable region object for one packet payload area.
 def build_region(
     *,
@@ -332,16 +339,19 @@ def build_region(
     replacement_format: str,
     value: str,
 ) -> dict[str, Any]:
-    return {
+    region = {
         "packet_id": packet.get("packet_id"),
         "region_id": region_id,
-        "type": region_type,
-        "offset": offset,
-        "length": length,
+        "region_type": region_type,
+        "start_offset_bytes": offset,
+        "end_offset_bytes": offset + length,
+        "length_bytes": length,
         "format": replacement_format,
+        "allowed_operations": allowed_operations_for_region(region_type),
         "editable": True,
         "value": value,
     }
+    return region
 
 
 #This function builds summary text for payloads that are too large to include fully in the compact view.
