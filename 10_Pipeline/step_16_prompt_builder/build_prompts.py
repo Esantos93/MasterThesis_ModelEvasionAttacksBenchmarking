@@ -19,12 +19,13 @@ from common.io_utils import write_json
 #These are the schema names produced by the compact patch-based Step 16 contract.
 PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
 PROMPT_MANIFEST_SCHEMA_VERSION = "prompt_manifest_v2"
-SOURCE_PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v1"
+SOURCE_PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 
 #This is the historical full-JSON prompt policy name and the new compact patch policy name.
 FULL_PROMPT_VERSION = "full_prompting_v1"
-COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v1"
+COMPACT_PATCH_PROMPT_VERSION_V1 = "compact_patch_prompting_v1"
+COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v2"
 
 #This alias keeps old configs readable during the migration, but new configs should use full_prompting_v1 explicitly.
 LEGACY_PROMPT_VERSION_ALIASES = {"baseline_v1": FULL_PROMPT_VERSION}
@@ -33,7 +34,7 @@ LEGACY_PROMPT_VERSION_ALIASES = {"baseline_v1": FULL_PROMPT_VERSION}
 DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 
 #This list records the prompt versions that the current Step 16 implementation knows how to build.
-SUPPORTED_PROMPT_VERSIONS = [FULL_PROMPT_VERSION, COMPACT_PATCH_PROMPT_VERSION]
+SUPPORTED_PROMPT_VERSIONS = [FULL_PROMPT_VERSION, COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION]
 
 
 #This function reads a JSON file and returns the parsed Python object.
@@ -150,11 +151,11 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(region, dict):
                 raise ValueError(f"Editable region must be an object for packet_id={packet_id_text}")
             region_id = region.get("region_id")
-            region_type = region.get("type")
+            region_type = region.get("region_type")
             if not isinstance(region_id, str) or not region_id:
                 raise ValueError(f"Editable region is missing region_id for packet_id={packet_id_text}")
             if not isinstance(region_type, str) or not region_type:
-                raise ValueError(f"Editable region is missing type for packet_id={packet_id_text}, region_id={region_id}")
+                raise ValueError(f"Editable region is missing region_type for packet_id={packet_id_text}, region_id={region_id}")
             key = (packet_id_text, region_id)
             if key in region_keys:
                 raise ValueError(f"Duplicate editable region {key!r} in prompt unit {prompt_unit['prompt_unit_id']}")
@@ -165,8 +166,10 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
                     "region_id": region_id,
                     "region_type": region_type,
                     "format": region.get("format"),
-                    "byte_start": region.get("byte_start", region.get("offset")),
-                    "byte_length": region.get("byte_length", region.get("length")),
+                    "start_offset_bytes": region.get("start_offset_bytes"),
+                    "end_offset_bytes": region.get("end_offset_bytes"),
+                    "length_bytes": region.get("length_bytes"),
+                    "allowed_operations": region.get("allowed_operations", []),
                 }
             )
 
@@ -209,6 +212,11 @@ def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, 
         "Only modify editable_regions listed inside packets where editable is true.\n"
         "Do not modify context packets or any field outside an editable region.\n"
         "If no useful safe change is needed, return patches as an empty list.\n"
+        "If editable_packet_ids is empty, patches must be an empty list.\n"
+        "Editable regions use region_type. Do not use type in editable_regions or in patches unless you are echoing a legacy alias.\n"
+        "Use each editable region allowed_operations field. Only those operations are valid for that region.\n"
+        "For payload_byte_range regions, do not return the full payload and do not return the full editable window. "
+        "Return only a local byte-range patch inside the editable region using replace_byte_range.\n"
         "Use this exact output schema:\n"
         "{\n"
         f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",\n'
@@ -219,14 +227,22 @@ def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, 
         '      "packet_id": "<packet_id from editable_packet_ids>",\n'
         '      "region_id": "<editable region_id>",\n'
         '      "region_type": "<editable region type>",\n'
-        '      "operation": "replace_region",\n'
+        '      "operation": "replace_byte_range",\n'
+        '      "offset_from_region_start_bytes": 0,\n'
+        '      "length_bytes": 0,\n'
         '      "replacement_format": "text or hex",\n'
         '      "replacement": "<replacement value>"\n'
         "    }\n"
         "  ]\n"
         "}\n"
         "Rules:\n"
-        "- operation must be replace_region.\n"
+        "- operation must be listed in the editable region allowed_operations.\n"
+        "- Use replace_byte_range for payload_byte_range regions.\n"
+        "- Do not use replace_region for payload_byte_range unless that exact operation is listed in allowed_operations.\n"
+        "- For replace_byte_range, replacement contains only the new local bytes, not the full editable region.\n"
+        "- For replace_byte_range, offset_from_region_start_bytes is relative to the start of the editable region, not the full payload.\n"
+        "- For replace_byte_range, length_bytes is the number of bytes to replace inside the editable region.\n"
+        "- For replace_region, use it only for small non-payload regions when allowed_operations includes replace_region.\n"
         "- packet_id must reference an editable packet in this prompt unit.\n"
         "- region_id and region_type must match one editable region in that packet.\n"
         "- replacement_format must be text or hex and should match the editable region format.\n"
@@ -258,7 +274,7 @@ def build_messages_by_prompt_version(
     prompt_version: str,
     prompt_unit: dict[str, Any],
 ) -> list[dict[str, str]]:
-    if prompt_version == COMPACT_PATCH_PROMPT_VERSION:
+    if prompt_version in {COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION}:
         return build_compact_patch_messages(prompt_unit)
     if prompt_version == FULL_PROMPT_VERSION:
         return build_full_prompting_messages(prompt_unit)
@@ -282,7 +298,7 @@ def build_prompt_package(
         prompt_version=prompt_version,
         prompt_unit=prompt_unit,
     )
-    prompt_contract = "patch_output" if prompt_version == COMPACT_PATCH_PROMPT_VERSION else "full_json_legacy"
+    prompt_contract = "patch_output" if prompt_version in {COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION} else "full_json_legacy"
 
     return {
         "schema_version": PROMPT_PACKAGE_SCHEMA_VERSION,
@@ -302,7 +318,21 @@ def build_prompt_package(
             "root_type": "object",
             "required_top_level_keys": ["schema_version", "parent_group_id", "prompt_unit_id", "patches"],
             "patches_type": "list",
-            "supported_operations": ["replace_region"],
+            "supported_operations": ["replace_region", "replace_byte_range"],
+            "replace_byte_range_required_keys": [
+                "packet_id",
+                "region_id",
+                "region_type",
+                "operation",
+                "offset_from_region_start_bytes",
+                "length_bytes",
+                "replacement_format",
+                "replacement",
+            ],
+            "replace_byte_range_rule": (
+                "For payload_byte_range regions, return only a local byte-range patch inside the editable region. "
+                "Do not return the full payload or the full editable window."
+            ),
             "replacement_formats": ["text", "hex"],
             "format_rule": "Return valid JSON only, with no Markdown and no explanations.",
         },

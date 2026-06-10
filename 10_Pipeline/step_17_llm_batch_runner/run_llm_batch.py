@@ -30,6 +30,9 @@ MODEL_OUTPUT_SUBDIRS = ["raw", "parsed", "metadata", "failures"]
 PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
+FIELD_ALIASES = {
+    "region_type": ["region_type", "type"],
+}
 
 
 #This function reads a JSON file and returns the parsed Python object.
@@ -256,7 +259,7 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
         "expected_output_patch_tokens": (
             args.expected_output_patch_tokens
             if args.expected_output_patch_tokens is not None
-            else int(llm_config.get("expected_output_patch_tokens", 768))
+            else int(llm_config.get("expected_output_patch_tokens", 1536))
         ),
         "n_ctx": args.n_ctx if args.n_ctx is not None else runtime_max_model_len,
         "n_ctx_mode": "fixed_cli" if args.n_ctx is not None else "runtime_max_model_len",
@@ -519,6 +522,59 @@ def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[s
     return lookup
 
 
+def get_field_with_aliases(obj: dict[str, Any], canonical_name: str) -> Any:
+    for field_name in FIELD_ALIASES.get(canonical_name, [canonical_name]):
+        if field_name in obj:
+            return obj[field_name]
+    return None
+
+
+def validate_hex_string(value: str) -> bool:
+    cleaned = value.strip()
+    return len(cleaned) % 2 == 0 and re.fullmatch(r"[0-9A-Fa-f]*", cleaned) is not None
+
+
+def validate_replacement_format(
+    *,
+    patch: dict[str, Any],
+    region: dict[str, Any],
+    patch_index: int,
+) -> dict[str, Any] | None:
+    replacement_format = patch.get("replacement_format")
+    if replacement_format not in {"text", "hex"}:
+        return {
+            "accepted": False,
+            "reason": "invalid_replacement_format",
+            "patch_index": patch_index,
+            "replacement_format": replacement_format,
+        }
+
+    expected_format = region.get("format")
+    if expected_format in {"text", "hex"} and replacement_format != expected_format:
+        return {
+            "accepted": False,
+            "reason": "replacement_format_mismatch",
+            "patch_index": patch_index,
+            "expected_format": expected_format,
+            "actual_format": replacement_format,
+        }
+
+    replacement = patch.get("replacement")
+    if not isinstance(replacement, str):
+        return {
+            "accepted": False,
+            "reason": "replacement_not_string",
+            "patch_index": patch_index,
+        }
+    if replacement_format == "hex" and not validate_hex_string(replacement):
+        return {
+            "accepted": False,
+            "reason": "replacement_hex_invalid",
+            "patch_index": patch_index,
+        }
+    return None
+
+
 #This function validates the patch_output_v1 contract using the Step 16 editable-region index.
 def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed_output, dict):
@@ -582,58 +638,78 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "region_id": region_id,
             }
 
-        if patch.get("operation") != "replace_region":
+        operation = patch.get("operation")
+        allowed_operations = region.get("allowed_operations") or ["replace_region"]
+        if not isinstance(allowed_operations, list):
             return {
                 "accepted": False,
-                "reason": "unsupported_patch_operation",
+                "reason": "invalid_region_allowed_operations",
                 "patch_index": patch_index,
-                "operation": patch.get("operation"),
+                "region_id": region_id,
+            }
+        if operation not in allowed_operations:
+            return {
+                "accepted": False,
+                "reason": "operation_not_allowed_for_region",
+                "patch_index": patch_index,
+                "operation": operation,
+                "allowed_operations": allowed_operations,
             }
 
         expected_region_type = region.get("region_type")
-        if patch.get("region_type") != expected_region_type:
+        actual_region_type = get_field_with_aliases(patch, "region_type")
+        if actual_region_type != expected_region_type:
             return {
                 "accepted": False,
                 "reason": "region_type_mismatch",
                 "patch_index": patch_index,
                 "expected_region_type": expected_region_type,
-                "actual_region_type": patch.get("region_type"),
+                "actual_region_type": actual_region_type,
             }
 
-        replacement_format = patch.get("replacement_format")
-        if replacement_format not in {"text", "hex"}:
-            return {
-                "accepted": False,
-                "reason": "invalid_replacement_format",
-                "patch_index": patch_index,
-                "replacement_format": replacement_format,
-            }
+        replacement_error = validate_replacement_format(patch=patch, region=region, patch_index=patch_index)
+        if replacement_error:
+            return replacement_error
 
-        expected_format = region.get("format")
-        if expected_format in {"text", "hex"} and replacement_format != expected_format:
-            return {
-                "accepted": False,
-                "reason": "replacement_format_mismatch",
-                "patch_index": patch_index,
-                "expected_format": expected_format,
-                "actual_format": replacement_format,
-            }
-
-        replacement = patch.get("replacement")
-        if not isinstance(replacement, str):
-            return {
-                "accepted": False,
-                "reason": "replacement_not_string",
-                "patch_index": patch_index,
-            }
-        if replacement_format == "hex":
-            cleaned = replacement.strip()
-            if len(cleaned) % 2 != 0 or not re.fullmatch(r"[0-9A-Fa-f]*", cleaned):
+        if operation == "replace_byte_range":
+            offset = patch.get("offset_from_region_start_bytes")
+            length_bytes = patch.get("length_bytes")
+            if not isinstance(offset, int) or offset < 0:
                 return {
                     "accepted": False,
-                    "reason": "replacement_hex_invalid",
+                    "reason": "invalid_replace_byte_range_offset",
                     "patch_index": patch_index,
                 }
+            if not isinstance(length_bytes, int) or length_bytes < 0:
+                return {
+                    "accepted": False,
+                    "reason": "invalid_replace_byte_range_length",
+                    "patch_index": patch_index,
+                }
+            region_length = region.get("length_bytes")
+            if not isinstance(region_length, int) or region_length < 0:
+                return {
+                    "accepted": False,
+                    "reason": "editable_region_missing_length_bytes",
+                    "patch_index": patch_index,
+                    "region_id": region_id,
+                }
+            if offset + length_bytes > region_length:
+                return {
+                    "accepted": False,
+                    "reason": "replace_byte_range_exceeds_region",
+                    "patch_index": patch_index,
+                    "offset_from_region_start_bytes": offset,
+                    "length_bytes": length_bytes,
+                    "region_length_bytes": region_length,
+                }
+        elif operation != "replace_region":
+            return {
+                "accepted": False,
+                "reason": "unsupported_patch_operation",
+                "patch_index": patch_index,
+                "operation": operation,
+            }
 
     return {
         "accepted": True,
@@ -671,10 +747,13 @@ def build_run_metadata(
         "prompt_contract": prompt_package.get("prompt_contract"),
         "prompt_file": str(prompt_path),
         "source_prompt_unit_file": prompt_package.get("source_prompt_unit_file"),
+        "source_prompt_unit_schema_version": prompt_package.get("source_prompt_unit_schema_version"),
         "model_name": model_name,
         "model_path": str(model_path),
         "generation_params": generation_params,
         "token_plan": token_plan,
+        "real_input_tokens": token_plan.get("real_input_tokens") if token_plan else None,
+        "max_tokens": token_plan.get("max_tokens") if token_plan else None,
         "started_at_utc": started_at_utc,
         "finished_at_utc": finished_at_utc,
         "runtime_seconds": runtime_seconds,
@@ -734,6 +813,48 @@ def run_single_prompt(
     llama_response_metadata = None
     token_plan = None
     output_paths: dict[str, str] = {}
+
+    if not prompt_package["input_traceability"].get("editable_packet_ids", []):
+        parsed_output = {
+            "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
+            "parent_group_id": prompt_package.get("parent_group_id"),
+            "prompt_unit_id": prompt_package.get("prompt_unit_id"),
+            "patches": [],
+        }
+        validation_result = {"accepted": True, "reason": "auto_empty_no_editable_regions", "patch_count": 0}
+        token_plan = {
+            "mode": "auto_empty_no_editable_regions",
+            "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
+            "real_input_tokens": 0,
+            "runtime_max_model_len": generation_params["runtime_max_model_len"],
+            "desired_max_tokens": 0,
+            "max_tokens": 0,
+            "expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
+            "context_reserve_tokens": generation_params["context_reserve_tokens"],
+            "available_context_tokens": generation_params["runtime_max_model_len"],
+            "was_capped_by_context": False,
+        }
+        write_json(parsed_path, parsed_output)
+        output_paths["parsed"] = str(parsed_path)
+        output_paths["metadata"] = str(metadata_path)
+        metadata = build_run_metadata(
+            status="auto_empty_no_editable_regions",
+            failure_reason=None,
+            prompt_package=prompt_package,
+            prompt_path=prompt_path,
+            model_path=model_path,
+            model_name=model_name,
+            generation_params=generation_params,
+            started_at_utc=started_at_utc,
+            finished_at_utc=started_at_utc,
+            runtime_seconds=0.0,
+            output_paths=output_paths,
+            validation_result=validation_result,
+            token_plan=token_plan,
+            llama_response_metadata=None,
+        )
+        write_json(metadata_path, metadata)
+        return metadata
 
     try:
         prompt_generation_params, token_plan = build_prompt_generation_params(
@@ -906,7 +1027,7 @@ def run_model_batch(
             prompt_index=prompt_index,
             total_prompts=total_prompts,
         )
-        if metadata["status"] == "accepted":
+        if metadata["status"] in {"accepted", "auto_empty_no_editable_regions"}:
             accepted_count += 1
         else:
             failed_count += 1
