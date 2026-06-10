@@ -289,7 +289,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
         for reason, count in failure_counts.items():
             lines.append(f"| {reason} | {count} |")
     else:
-        lines.append("| none | 0 |")
+        lines.append("No failures recorded.")
 
     lines.extend(
         [
