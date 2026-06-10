@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -297,6 +298,74 @@ def gcs_path_leaf(gcs_path: str) -> str:
     return gcs_path.rstrip("/").split("/")[-1]
 
 
+# This function keeps run ids and grouping labels safe for local and remote path segments.
+def safe_path_label(value: str) -> str:
+    cleaned = []
+    for character in value.strip():
+        if character.isalnum() or character in {"-", "_", "."}:
+            cleaned.append(character)
+        else:
+            cleaned.append("_")
+    return "".join(cleaned).strip("._") or "default"
+
+
+# This function resolves the grouping label used in remote and local Step 16/17 output paths.
+def resolve_grouping_label(args: argparse.Namespace) -> str:
+    if args.grouping_label:
+        return safe_path_label(args.grouping_label)
+    for candidate in (args.step16_input_dir, args.gcs_groups_dir, args.local_groups_dir):
+        if candidate:
+            return safe_path_label(str(candidate).rstrip("/\\").replace("\\", "/").split("/")[-1])
+    return "05_groups"
+
+
+# This function resolves a stable run id before Step 16/17 execute so both steps use the same run-specific paths.
+def resolve_step17_run_id(args: argparse.Namespace) -> str:
+    if args.step17_run_id:
+        args.step17_run_id = safe_path_label(args.step17_run_id)
+        return args.step17_run_id
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    label = args.step17_run_label or resolve_grouping_label(args)
+    args.step17_run_id = f"run_{timestamp}_{safe_path_label(label)}"
+    return args.step17_run_id
+
+
+# This function resolves the run-specific remote prompt directory produced by Step 16.
+def resolve_step16_output_dir(args: argparse.Namespace) -> str:
+    if args.step16_output_dir:
+        return args.step16_output_dir.rstrip("/")
+    grouping_label = resolve_grouping_label(args)
+    run_id = resolve_step17_run_id(args)
+    args.step16_output_dir = (
+        f"{args.remote_root}/02_OutputFiles/{args.experiment_id}/06_prompts/{grouping_label}/{run_id}"
+    )
+    return args.step16_output_dir
+
+
+# This function resolves the remote Step 17 output root. Step 17 itself appends <model_name>/<run_id>.
+def resolve_step17_output_root(args: argparse.Namespace) -> str:
+    if args.step17_output_root:
+        return args.step17_output_root.rstrip("/")
+    grouping_label = resolve_grouping_label(args)
+    args.step17_output_root = f"{args.remote_root}/02_OutputFiles/{args.experiment_id}/07_llm_outputs/{grouping_label}"
+    return args.step17_output_root
+
+
+# This function finds model-specific Step 17 run directories below the resolved remote output root.
+def list_remote_model_run_dirs(args: argparse.Namespace, remote_step17_root: str, run_id: str) -> list[str]:
+    if args.dry_run:
+        return [f"{remote_step17_root}/MODEL_NAME/{run_id}"]
+    command = (
+        f"find {shlex.quote(remote_step17_root)} -mindepth 2 -maxdepth 2 "
+        f"-type d -name {shlex.quote(run_id)} | sort"
+    )
+    stdout = capture_remote(args, command)
+    model_run_dirs = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not model_run_dirs:
+        raise FileNotFoundError(f"No Step 17 model run directories found under {remote_step17_root} for run_id={run_id}.")
+    return model_run_dirs
+
+
 # This function synchronises Step 15 group files from Cloud Storage into the VM input directory used by Step 16.
 def sync_groups_from_gcs(args: argparse.Namespace) -> None:
     if not args.gcs_groups_dir:
@@ -456,6 +525,7 @@ def dockerized_command(args: argparse.Namespace, workdir: str, command: list[str
 def run_step16(args: argparse.Namespace) -> None:
     if args.skip_step16:
         return
+    step16_output_dir = resolve_step16_output_dir(args)
     command = [
         "python3",
         "build_prompts-googleCloud.py",
@@ -463,13 +533,17 @@ def run_step16(args: argparse.Namespace) -> None:
         f"{args.remote_root}/04_Steps/setups/config_LLM_baseline.json",
         "--cloud-root",
         args.remote_root,
+        "--output-dir",
+        step16_output_dir,
     ]
     if args.step16_input_dir:
         command.extend(["--input-dir", args.step16_input_dir])
-    if args.step16_output_dir:
-        command.extend(["--output-dir", args.step16_output_dir])
     if args.limit_groups is not None:
         command.extend(["--limit-groups", str(args.limit_groups)])
+    if not args.step17_prompt_dir:
+        args.step17_prompt_dir = step16_output_dir
+    if not args.step17_prompt_manifest:
+        args.step17_prompt_manifest = f"{step16_output_dir}/prompt_manifest.json"
     remote_command = dockerized_command(args, args.remote_root + "/04_Steps/Step16", command)
     run_remote(args, remote_command)
 
@@ -479,6 +553,12 @@ def run_step16(args: argparse.Namespace) -> None:
 def run_step17(args: argparse.Namespace) -> None:
     if args.skip_step17:
         return
+    resolve_step17_run_id(args)
+    resolve_step17_output_root(args)
+    if not args.step17_prompt_dir:
+        args.step17_prompt_dir = resolve_step16_output_dir(args)
+    if not args.step17_prompt_manifest:
+        args.step17_prompt_manifest = f"{args.step17_prompt_dir.rstrip('/')}/prompt_manifest.json"
     step17_script = "run_llm_batch-googleCloud.py" if args.step17_backend == "vllm" else "run_llm_batch.py"
     command = [
         "python3",
@@ -535,13 +615,23 @@ def run_step17(args: argparse.Namespace) -> None:
     run_remote(args, remote_command)
 
 
-# This function fetches the experiment output folder from the VM after Step 16/17 execution.
+# This function fetches only the run-specific Step 16 prompts and Step 17 model outputs from the VM.
 def fetch_outputs(args: argparse.Namespace) -> None:
     if not args.local_output_dir:
         return
-    local_output_dir = Path(args.local_output_dir)
-    remote_experiment_output = f"{args.remote_root}/02_OutputFiles/{args.experiment_id}"
-    scp_from_remote(args, remote_experiment_output, local_output_dir)
+    local_experiment_root = Path(args.local_output_dir).expanduser()
+    grouping_label = resolve_grouping_label(args)
+    run_id = resolve_step17_run_id(args)
+
+    remote_prompt_dir = resolve_step16_output_dir(args)
+    local_prompt_parent = local_experiment_root / "06_prompts" / grouping_label
+    scp_from_remote(args, remote_prompt_dir, local_prompt_parent)
+
+    remote_step17_root = resolve_step17_output_root(args)
+    for remote_model_run_dir in list_remote_model_run_dirs(args, remote_step17_root, run_id):
+        model_name = Path(remote_model_run_dir.rstrip("/")).parent.name
+        local_model_parent = local_experiment_root / "07_llm_outputs" / grouping_label / model_name
+        scp_from_remote(args, remote_model_run_dir, local_model_parent)
 
 
 # This function defines all command-line options used by the orchestrator.
@@ -576,7 +666,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-groups-dir")
     parser.add_argument("--gcs-groups-dir", help="Cloud Storage directory containing group_*.json and group_manifest.json for Step 16.")
     parser.add_argument("--gcs-group-root", default=DEFAULT_GCS_GROUP_ROOT, help="Cloud Storage root used when --gcs-groups-dir is a relative path.")
-    parser.add_argument("--local-output-dir")
+    parser.add_argument("--grouping-label", help="Explicit grouping label used in remote/local Step 16 and Step 17 output paths.")
+    parser.add_argument("--local-output-dir", help="Local experiment root where run-specific Step 16/17 artifacts are fetched.")
 
     parser.add_argument("--model-url", action="append", help="Direct downloadable model URL. Can be repeated.")
     parser.add_argument("--gcs-model-dir", action="append", help="Cloud Storage model directory to sync to the VM. Can be repeated.")
