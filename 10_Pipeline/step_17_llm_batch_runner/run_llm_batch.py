@@ -32,6 +32,7 @@ PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
 FIELD_ALIASES = {
     "region_type": ["region_type", "type"],
+    "operation": ["operation", "op"],
 }
 
 
@@ -638,7 +639,7 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "region_id": region_id,
             }
 
-        operation = patch.get("operation")
+        operation = get_field_with_aliases(patch, "operation")
         allowed_operations = region.get("allowed_operations") or ["replace_region"]
         if not isinstance(allowed_operations, list):
             return {
