@@ -216,6 +216,7 @@ def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, 
         "replace_region patches require the fields: packet_id, region_id, region_type, operation, replacement_format, replacement.\n"
         "replace_byte_range patches require the fields: packet_id, region_id, region_type, operation, "
         "offset_from_region_start_bytes, length_bytes, replacement_format, replacement.\n"
+        "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 for the first byte of that region, not start_offset_bytes from the original payload. offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes.\n"
         "Return this JSON object:\n"
         "{\n"
         f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",\n'
