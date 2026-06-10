@@ -4,6 +4,7 @@ import argparse
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -150,6 +151,22 @@ def scp_from_remote(args: argparse.Namespace, remote_path: str, local_path: Path
     ]
     if args.tunnel_through_iap:
         command.append("--tunnel-through-iap")
+    run_command(command, args.dry_run)
+
+
+# This function generates local runtime summaries after Step 17 artifacts have been fetched.
+def summarize_local_runtime(args: argparse.Namespace, local_model_run_dir: Path, local_prompt_dir: Path) -> None:
+    if args.skip_runtime_summary:
+        return
+    summarizer_path = PIPELINE_ROOT / "step_17_llm_batch_runner" / "summarize_llm_runtime.py"
+    command = [
+        sys.executable,
+        str(summarizer_path),
+        "--run-dir",
+        str(local_model_run_dir),
+        "--prompt-dir",
+        str(local_prompt_dir),
+    ]
     run_command(command, args.dry_run)
 
 
@@ -626,12 +643,14 @@ def fetch_outputs(args: argparse.Namespace) -> None:
     remote_prompt_dir = resolve_step16_output_dir(args)
     local_prompt_parent = local_experiment_root / "06_prompts" / grouping_label
     scp_from_remote(args, remote_prompt_dir, local_prompt_parent)
+    local_prompt_dir = local_prompt_parent / run_id
 
     remote_step17_root = resolve_step17_output_root(args)
     for remote_model_run_dir in list_remote_model_run_dirs(args, remote_step17_root, run_id):
         model_name = Path(remote_model_run_dir.rstrip("/")).parent.name
         local_model_parent = local_experiment_root / "07_llm_outputs" / grouping_label / model_name
         scp_from_remote(args, remote_model_run_dir, local_model_parent)
+        summarize_local_runtime(args, local_model_parent / run_id, local_prompt_dir)
 
 
 # This function defines all command-line options used by the orchestrator.
@@ -668,6 +687,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gcs-group-root", default=DEFAULT_GCS_GROUP_ROOT, help="Cloud Storage root used when --gcs-groups-dir is a relative path.")
     parser.add_argument("--grouping-label", help="Explicit grouping label used in remote/local Step 16 and Step 17 output paths.")
     parser.add_argument("--local-output-dir", help="Local experiment root where run-specific Step 16/17 artifacts are fetched.")
+    parser.add_argument("--skip-runtime-summary", action="store_true", help="Do not generate local Step 17 runtime_summary JSON/CSV/MD files after fetched outputs.")
 
     parser.add_argument("--model-url", action="append", help="Direct downloadable model URL. Can be repeated.")
     parser.add_argument("--gcs-model-dir", action="append", help="Cloud Storage model directory to sync to the VM. Can be repeated.")
