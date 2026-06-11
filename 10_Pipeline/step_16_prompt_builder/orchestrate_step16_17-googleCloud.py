@@ -39,6 +39,54 @@ GCS_MODEL_CATALOG = {
 }
 
 
+# This small wrapper mirrors orchestrator stdout/stderr into a persistent local log file.
+class TeeStream:
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+
+    def write(self, text: str) -> int:
+        written = self.stream.write(text)
+        self.log_file.write(text)
+        return written
+
+    def flush(self) -> None:
+        self.stream.flush()
+        self.log_file.flush()
+
+
+# This function starts persistent terminal logging for the orchestrator run.
+def configure_logging(args: argparse.Namespace):
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_id = args.step17_run_id or "no_run_id_yet"
+    if args.log_file:
+        log_path = Path(args.log_file).expanduser()
+    elif args.local_output_dir:
+        log_path = (
+            Path(args.local_output_dir).expanduser()
+            / "logs"
+            / "orchestrate_step16_17-googleCloud"
+            / run_id
+            / f"orchestrator_{timestamp}.log"
+        )
+    else:
+        log_path = (
+            Path("logs")
+            / "orchestrate_step16_17-googleCloud"
+            / run_id
+            / f"orchestrator_{timestamp}.log"
+        )
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("w", encoding="utf-8")
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = TeeStream(original_stdout, log_file)
+    sys.stderr = TeeStream(original_stderr, log_file)
+    print(f"Orchestrator log: {log_path}")
+    return log_file, original_stdout, original_stderr
+
+
 # This function formats command lists as shell-like strings for readable logs before execution.
 def quote_args(args: list[str]) -> str:
     return " ".join(shlex.quote(str(arg)) for arg in args)
@@ -47,8 +95,21 @@ def quote_args(args: list[str]) -> str:
 # This function prints and runs a local command. The dry-run flag keeps orchestration testable without touching Google Cloud.
 def run_command(command: list[str], dry_run: bool) -> None:
     print(quote_args(command))
-    if not dry_run:
-        subprocess.run(command, check=True)
+    if dry_run:
+        return
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="")
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
 
 
 # This function builds the gcloud SSH/SCP target. When --ssh-user is set, gcloud connects as that Linux user.
@@ -687,6 +748,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gcs-group-root", default=DEFAULT_GCS_GROUP_ROOT, help="Cloud Storage root used when --gcs-groups-dir is a relative path.")
     parser.add_argument("--grouping-label", help="Explicit grouping label used in remote/local Step 16 and Step 17 output paths.")
     parser.add_argument("--local-output-dir", help="Local experiment root where run-specific Step 16/17 artifacts are fetched.")
+    parser.add_argument("--log-file", help="Optional local log file for all orchestrator terminal output. Defaults to <local-output-dir>/logs/orchestrate_step16_17-googleCloud/<run_id>/ when --local-output-dir is available.")
     parser.add_argument("--skip-runtime-summary", action="store_true", help="Do not generate local Step 17 runtime_summary JSON/CSV/MD files after fetched outputs.")
 
     parser.add_argument("--model-url", action="append", help="Direct downloadable model URL. Can be repeated.")
@@ -741,6 +803,8 @@ def parse_args() -> argparse.Namespace:
 # The skip flags allow testing individual stages, for example Step 16 without immediately running Step 17.
 def main() -> None:
     args = parse_args()
+    resolve_step17_run_id(args)
+    log_file, original_stdout, original_stderr = configure_logging(args)
     try:
         if not args.skip_create_instance:
             create_instance(args)
@@ -764,6 +828,11 @@ def main() -> None:
     finally:
         if args.delete_instance_after_run:
             delete_instance(args)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        log_file.close()
 
 
 if __name__ == "__main__":
