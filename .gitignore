@@ -6,3 +6,4 @@ __pycache__/
 *.md
 *.code-workspace
 90_Testing/
+*.txt
