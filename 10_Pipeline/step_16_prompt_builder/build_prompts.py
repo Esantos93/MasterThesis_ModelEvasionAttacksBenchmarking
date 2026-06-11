@@ -385,13 +385,13 @@ def run_prompt_builder(
     input_dir: str | Path | None,
     output_dir: str | Path | None,
     cloud_root: str | Path,
-    limit_groups: int | None,
+    limit_prompts_s16: int | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
 
-    if limit_groups is not None and limit_groups <= 0:
-        raise ValueError("--limit-groups must be a positive integer when provided.")
+    if limit_prompts_s16 is not None and limit_prompts_s16 <= 0:
+        raise ValueError("--limit-prompts-s16 must be a positive integer when provided.")
 
     configured_prompt_version = str(config["llm"]["prompt_version"])
     prompt_version = normalize_prompt_version(configured_prompt_version)
@@ -408,7 +408,7 @@ def run_prompt_builder(
 
     group_manifest = validate_group_manifest(read_json(manifest_path), manifest_path)
     prompt_unit_entries = group_manifest["prompt_units"]
-    selected_entries = prompt_unit_entries[:limit_groups] if limit_groups is not None else prompt_unit_entries
+    selected_entries = prompt_unit_entries[:limit_prompts_s16] if limit_prompts_s16 is not None else prompt_unit_entries
 
     clear_previous_output_files(output_prompt_dir)
     prompt_summaries = []
@@ -475,7 +475,7 @@ def parse_cli_args() -> argparse.Namespace:
         default=str(DEFAULT_CLOUD_ROOT),
         help="RISE cloud root used for default input and output paths.",
     )
-    parser.add_argument("--limit-groups", type=int, help="Build prompts only for the first N prompt units.")
+    parser.add_argument("--limit-prompts-s16", type=int, help="Build prompts only for the first N Step 15 prompt units.")
     return parser.parse_args()
 
 
@@ -487,7 +487,7 @@ def main() -> None:
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         cloud_root=args.cloud_root,
-        limit_groups=args.limit_groups,
+        limit_prompts_s16=args.limit_prompts_s16,
     )
     print(f"Prompt packages written: {result['prompt_count']}")
     print(f"Source prompt units available: {result['source_group_count']}")

@@ -131,11 +131,11 @@ def collect_prompt_paths(
     *,
     prompt_manifest_path: Path,
     prompt_dir: Path,
-    limit_prompts: int | None,
+    limit_prompts_s17: int | None,
 ) -> list[Path]:
     prompt_manifest = validate_prompt_manifest(read_json(prompt_manifest_path), prompt_manifest_path)
     prompt_entries = prompt_manifest["prompts"]
-    selected_entries = prompt_entries[:limit_prompts] if limit_prompts is not None else prompt_entries
+    selected_entries = prompt_entries[:limit_prompts_s17] if limit_prompts_s17 is not None else prompt_entries
 
     prompt_paths = []
     for prompt_entry in selected_entries:
@@ -150,8 +150,8 @@ def collect_prompt_paths(
 def resolve_selected_prompt_paths(args: argparse.Namespace, paths: dict[str, Path]) -> list[Path]:
     if args.prompt_file and args.prompt_manifest:
         raise ValueError("Use either --prompt-file or --prompt-manifest, not both.")
-    if args.prompt_file and args.limit_prompts is not None:
-        raise ValueError("--limit-prompts is only valid with prompt manifest mode.")
+    if args.prompt_file and args.limit_prompts_s17 is not None:
+        raise ValueError("--limit-prompts-s17 is only valid with prompt manifest mode.")
 
     if args.prompt_file:
         prompt_path = Path(args.prompt_file).expanduser()
@@ -164,7 +164,7 @@ def resolve_selected_prompt_paths(args: argparse.Namespace, paths: dict[str, Pat
     return collect_prompt_paths(
         prompt_manifest_path=prompt_manifest_path,
         prompt_dir=prompt_dir,
-        limit_prompts=args.limit_prompts,
+        limit_prompts_s17=args.limit_prompts_s17,
     )
 
 
@@ -1065,8 +1065,8 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
     config = load_json_config(args.config)
     validate_config(config)
 
-    if args.limit_prompts is not None and args.limit_prompts <= 0:
-        raise ValueError("--limit-prompts must be a positive integer when provided.")
+    if args.limit_prompts_s17 is not None and args.limit_prompts_s17 <= 0:
+        raise ValueError("--limit-prompts-s17 must be a positive integer when provided.")
     if args.progress_every < 0:
         raise ValueError("--progress-every must be zero or a positive integer.")
     if args.heartbeat_seconds < 0:
@@ -1160,7 +1160,7 @@ def parse_cli_args() -> argparse.Namespace:
         action="append",
         help="Run only discovered/selected model paths containing this text. Can be repeated.",
     )
-    parser.add_argument("--limit-prompts", type=int, help="Run only the first N prompt files for smoke tests.")
+    parser.add_argument("--limit-prompts-s17", type=int, help="Run only the first N Step 16 prompt packages for smoke tests.")
     parser.add_argument(
         "--progress-every",
         type=int,

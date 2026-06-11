@@ -648,8 +648,8 @@ def run_step16(args: argparse.Namespace) -> None:
     ]
     if args.step16_input_dir:
         command.extend(["--input-dir", args.step16_input_dir])
-    if args.limit_groups is not None:
-        command.extend(["--limit-groups", str(args.limit_groups)])
+    if args.limit_prompts_s16 is not None:
+        command.extend(["--limit-prompts-s16", str(args.limit_prompts_s16)])
     if not args.step17_prompt_dir:
         args.step17_prompt_dir = step16_output_dir
     if not args.step17_prompt_manifest:
@@ -686,8 +686,8 @@ def run_step17(args: argparse.Namespace) -> None:
     ]
     if args.n_threads is not None:
         command.extend(["--n-threads", str(args.n_threads)])
-    if args.limit_prompts is not None:
-        command.extend(["--limit-prompts", str(args.limit_prompts)])
+    if args.limit_prompts_s17 is not None:
+        command.extend(["--limit-prompts-s17", str(args.limit_prompts_s17)])
     if args.step17_prompt_manifest:
         command.extend(["--prompt-manifest", args.step17_prompt_manifest])
     if args.step17_prompt_dir:
@@ -907,10 +907,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--step16-input-dir")
     parser.add_argument("--step16-output-dir")
-    parser.add_argument("--limit-groups", type=int)
+    parser.add_argument("--limit-prompts-s16", type=int, help="Build Step 16 prompts only for the first N Step 15 prompt units.")
     parser.add_argument("--skip-step16", action="store_true")
 
-    parser.add_argument("--limit-prompts", type=int)
+    parser.add_argument("--limit-prompts-s17", type=int, help="Run Step 17 only for the first N Step 16 prompt packages.")
     parser.add_argument("--skip-step17", action="store_true")
     parser.add_argument("--step17-prompt-manifest")
     parser.add_argument("--step17-prompt-dir")
