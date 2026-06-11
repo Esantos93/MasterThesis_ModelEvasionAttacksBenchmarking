@@ -66,6 +66,16 @@ def safe_rate(numerator: float, denominator: float) -> float | None:
     return numerator / denominator
 
 
+# This function parses ISO timestamps from Step 17 metadata.
+def parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 # This function calculates a nearest-rank percentile for small smoke-test samples.
 def percentile(values: list[float], percentile_value: float) -> float | None:
     if not values:
@@ -244,6 +254,25 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# This function summarizes run-level runtime totals from prompt metadata timestamps.
+def runtime_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    started_at = [value for row in rows if (value := parse_datetime(row.get("started_at_utc"))) is not None]
+    finished_at = [value for row in rows if (value := parse_datetime(row.get("finished_at_utc"))) is not None]
+    first_started = min(started_at) if started_at else None
+    last_finished = max(finished_at) if finished_at else None
+    observed_wall_clock_seconds = None
+    if first_started is not None and last_finished is not None:
+        observed_wall_clock_seconds = max(0.0, (last_finished - first_started).total_seconds())
+
+    return {
+        "prompt_count": len(rows),
+        "prompt_runtime_sum_seconds": sum(as_float(row.get("runtime_seconds")) for row in rows),
+        "observed_metadata_wall_clock_seconds": observed_wall_clock_seconds,
+        "first_started_at_utc": first_started.isoformat() if first_started else None,
+        "last_finished_at_utc": last_finished.isoformat() if last_finished else None,
+    }
+
+
 # This function formats optional numeric values for Markdown tables.
 def fmt(value: Any, digits: int = 2) -> str:
     if value is None:
@@ -257,6 +286,8 @@ def fmt(value: Any, digits: int = 2) -> str:
 def build_markdown_summary(summary: dict[str, Any]) -> str:
     aggregate_all = summary["aggregates"]["all_metadata"]
     aggregate_llm = summary["aggregates"]["llm_attempted"]
+    runtime_total_all = summary["runtime_totals"]["all_metadata"]
+    runtime_total_llm = summary["runtime_totals"]["llm_attempted"]
     status_counts = summary["counts"]["by_status"]
     failure_counts = summary["counts"]["by_failure_reason"]
 
@@ -293,6 +324,27 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
 
     lines.extend(
         [
+            "",
+            "## Runtime Totals",
+            "",
+            "| Scope | Prompts | Prompt runtime sum seconds | Observed metadata wall-clock seconds | First start UTC | Last finish UTC |",
+            "|---|---:|---:|---:|---|---|",
+            (
+                "| all metadata | "
+                f"{runtime_total_all['prompt_count']} | "
+                f"{fmt(runtime_total_all['prompt_runtime_sum_seconds'])} | "
+                f"{fmt(runtime_total_all['observed_metadata_wall_clock_seconds'])} | "
+                f"{fmt(runtime_total_all['first_started_at_utc'])} | "
+                f"{fmt(runtime_total_all['last_finished_at_utc'])} |"
+            ),
+            (
+                "| LLM attempted | "
+                f"{runtime_total_llm['prompt_count']} | "
+                f"{fmt(runtime_total_llm['prompt_runtime_sum_seconds'])} | "
+                f"{fmt(runtime_total_llm['observed_metadata_wall_clock_seconds'])} | "
+                f"{fmt(runtime_total_llm['first_started_at_utc'])} | "
+                f"{fmt(runtime_total_llm['last_finished_at_utc'])} |"
+            ),
             "",
             "## Aggregate Runtime",
             "",
@@ -342,6 +394,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             "",
             "- `all metadata` includes auto-empty prompt units resolved without model inference.",
             "- `LLM attempted` excludes `auto_empty_no_editable_regions` so it better reflects actual model runtime.",
+            "- Runtime totals from metadata usually exclude model load/compile time before the first prompt; the orchestrator terminal log preserves the full Step 17 printed runtime when available.",
             "- Packet, editable-packet, editable-region and payload-window rates use prompt package traceability when available.",
         ]
     )
@@ -475,6 +528,12 @@ def main() -> None:
             "llm_attempted": aggregate_rows(llm_rows),
             "accepted_only": aggregate_rows(accepted_rows),
             "failed_only": aggregate_rows(failed_rows),
+        },
+        "runtime_totals": {
+            "all_metadata": runtime_totals(rows),
+            "llm_attempted": runtime_totals(llm_rows),
+            "accepted_only": runtime_totals(accepted_rows),
+            "failed_only": runtime_totals(failed_rows),
         },
         "per_prompt": rows,
     }
