@@ -5,7 +5,6 @@
     "output_root": "/opt/tfm_benchmark/experiments"
   },
   "dataset": {
-    "pcap_dir": "/data/cicids2017",
     "pcap_path": "/data/cicids2017/Thursday-WorkingHours.pcap",
     "flow_csv_dir": "/data/cicids2017/Flows",
     "attack_labels": [

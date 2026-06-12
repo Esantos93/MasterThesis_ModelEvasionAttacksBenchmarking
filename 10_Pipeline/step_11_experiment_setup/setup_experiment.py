@@ -31,7 +31,11 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "dataset", "snort", "llm", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["dataset"], ["pcap_path", "flow_csv_dir", "attack_labels"], "dataset")
-    require_keys(config["snort"], ["snort_binary", "config_path", "enable_builtin_rules", "enable_ruleset", "ruleset_path"], "snort")
+    require_keys(
+        config["snort"],
+        ["snort_binary", "config_path", "plugin_path", "daq_dir", "enable_builtin_rules", "enable_ruleset", "ruleset_path"],
+        "snort",
+    )
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
     require_keys(
         config["pipeline"],
@@ -44,6 +48,10 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         raise ValueError("snort.enable_ruleset must be true or false.")
     if config["snort"]["enable_ruleset"] and not str(config["snort"].get("ruleset_path", "")).strip():
         raise ValueError("snort.ruleset_path must be set when snort.enable_ruleset is true.")
+    if not str(config["snort"].get("plugin_path", "")).strip():
+        raise ValueError("snort.plugin_path must be set because Snort needs the plugin path for this benchmark setup.")
+    if not str(config["snort"].get("daq_dir", "")).strip():
+        raise ValueError("snort.daq_dir must be set because Snort needs the DAQ directory for this benchmark setup.")
     if not isinstance(config["snort"].get("rules_policy_path", ""), str):
         raise ValueError("snort.rules_policy_path must be a string when provided.")
     experiment_config_label = config["pipeline"]["experiment_config_label"]
@@ -72,6 +80,8 @@ def collect_input_checks(config: dict[str, Any]) -> list[dict[str, Any]]:
         ("dataset.pcap_path", dataset["pcap_path"]),
         ("snort.snort_binary", snort["snort_binary"]),
         ("snort.config_path", snort["config_path"]),
+        ("snort.plugin_path", snort["plugin_path"]),
+        ("snort.daq_dir", snort["daq_dir"]),
         ("llm.model_path", llm["model_path"]),
     ]
 

@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_thursday_baseline_001",
-    "description": "First narrow CICIDS2017 Thursday baseline modification benchmark.",
+    "experiment_id": "exp_cicids2017_thursday_flow_based_001",
+    "description": "Flow-based CICIDS2017 Thursday modification benchmark experiment.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -38,11 +38,11 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "baseline-fixed-size",
+    "experiment_config_label": "baseline-flow-based-v1",
     "experiment_config_label_options": [
-      "baseline-fixed-size"
+      "baseline-flow-based-v1"
     ],
-    "grouping_policy": "fixed_packet_count",
+    "grouping_policy": "flow_based",
     "group_size_packets": 3,
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
