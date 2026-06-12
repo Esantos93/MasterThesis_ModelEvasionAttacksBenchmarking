@@ -488,15 +488,18 @@ def build_payload_windows(packet: dict[str, Any], payload: bytes, readability: d
         center_end = min(center_start + center_size, len(payload))
         window_start = max(0, center_start - left_context)
         window_end = min(len(payload), center_end + right_context)
+        left_context_bytes = payload[window_start:center_start]
         center_bytes = payload[center_start:center_end]
-        window_bytes = payload[window_start:window_end]
+        right_context_bytes = payload[center_end:window_end]
         if is_text:
+            left_context_value = left_context_bytes.decode("utf-8", errors="replace")
             center_value = center_bytes.decode("utf-8", errors="replace")
-            window_value = window_bytes.decode("utf-8", errors="replace")
+            right_context_value = right_context_bytes.decode("utf-8", errors="replace")
             replacement_format = "text"
         else:
+            left_context_value = left_context_bytes.hex()
             center_value = center_bytes.hex()
-            window_value = window_bytes.hex()
+            right_context_value = right_context_bytes.hex()
             replacement_format = "hex"
         region_id = f"payload_window_{window_index:04d}_center"
         windows.append(
@@ -514,7 +517,9 @@ def build_payload_windows(packet: dict[str, Any], payload: bytes, readability: d
                     "center_length": center_end - center_start,
                     "left_context_bytes": center_start - window_start,
                     "right_context_bytes": window_end - center_end,
-                    "value": window_value,
+                    "left_context_value": left_context_value,
+                    "editable_center_value_in_region": True,
+                    "right_context_value": right_context_value,
                 },
                 "editable_region": build_region(
                     packet=packet,
