@@ -706,6 +706,36 @@ def build_prompt_unit(
     return prompt_unit
 
 
+#This function records flow-window provenance without duplicating packet id lists already stored at prompt-unit level.
+def build_flow_packet_window_metadata(
+    *,
+    chunk_index: int,
+    chunk_count: int,
+    policy: str,
+    core_packet_count: int,
+    overlap_context_packet_count: int,
+    flow_payload_slide_window_overlap_units: int,
+    source_chunk_index: int | None = None,
+    sub_chunk_index: int | None = None,
+    sub_chunk_count: int | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        "chunk_index": chunk_index,
+        "chunk_count": chunk_count,
+        "policy": policy,
+        "core_packet_count": core_packet_count,
+        "overlap_context_packet_count": overlap_context_packet_count,
+        "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
+    }
+    if source_chunk_index is not None:
+        metadata["source_chunk_index"] = source_chunk_index
+    if sub_chunk_index is not None:
+        metadata["sub_chunk_index"] = sub_chunk_index
+    if sub_chunk_count is not None:
+        metadata["sub_chunk_count"] = sub_chunk_count
+    return metadata
+
+
 #This function refreshes packet ids, region counts, window counts, and token estimates after any prompt-unit planning change.
 def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[str, Any]) -> None:
     packets = prompt_unit["packets"]
@@ -844,33 +874,123 @@ def build_base_prompt_units(
         chunks = add_flow_chunk_context_overlap(chunks=chunks, overlap_packets=0)
 
     prompt_units = []
+    chunk_count = len(chunks)
     for chunk_index, chunk in enumerate(chunks, start=1):
-        chunk_count = len(chunks)
         prompt_unit_id = parent_group_id if chunk_count == 1 else f"{parent_group_id}_chunk_{chunk_index:04d}"
         chunk_metadata = dict(group_metadata)
         if chunk_count > 1:
-            chunk_metadata["flow_packet_window"] = {
-                "chunk_index": chunk_index,
-                "chunk_count": chunk_count,
-                "policy": "token_aware_packet_window",
-                "core_packet_ids": [str(packet["packet_id"]) for packet in chunk["core_packets"]],
-                "overlap_context_packet_ids": chunk["overlap_context_packet_ids"],
-                "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
+            chunk_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                policy="token_aware_packet_window",
+                core_packet_count=len(chunk["core_packets"]),
+                overlap_context_packet_count=len(chunk["overlap_context_packet_ids"]),
+                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
+            )
+        prompt_unit = build_prompt_unit(
+            experiment_id=experiment_id,
+            source_packet_json=source_packet_json,
+            source_packet_json_schema_version=source_packet_json_schema_version,
+            group_metadata=chunk_metadata,
+            prompt_unit_id=prompt_unit_id,
+            unit_type=unit_type if chunk_count == 1 else f"{unit_type}_packet_window",
+            packets=chunk["packets"],
+            token_config=token_config,
+            input_token_budget=input_token_budget,
+            context_truncation=None,
+        )
+        if prompt_unit["estimated_input_tokens"] <= input_token_budget or grouping_policy != "flow_based":
+            prompt_units.append(prompt_unit)
+            continue
+        if len(chunk["core_packets"]) <= 1:
+            prompt_unit["context_truncation"] = {
+                "applied": True,
+                "reason": "single_editable_packet_exceeds_input_token_budget",
+                "policy": "no_smaller_step15_packet_unit_available",
+                "source_prompt_unit_id": prompt_unit_id,
             }
-        prompt_units.append(
-            build_prompt_unit(
+            prompt_units.append(prompt_unit)
+            continue
+
+        fallback_chunks: list[list[dict[str, Any]]] = []
+        current_fallback_chunk: list[dict[str, Any]] = []
+        for packet in chunk["core_packets"]:
+            candidate_packets = current_fallback_chunk + [packet]
+            candidate_metadata = dict(group_metadata)
+            candidate_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                policy="final_budget_subwindow_fallback",
+                core_packet_count=len(candidate_packets),
+                overlap_context_packet_count=0,
+                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
+                source_chunk_index=chunk_index,
+            )
+            candidate_unit = build_prompt_unit(
                 experiment_id=experiment_id,
                 source_packet_json=source_packet_json,
                 source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=chunk_metadata,
+                group_metadata=candidate_metadata,
                 prompt_unit_id=prompt_unit_id,
-                unit_type=unit_type if chunk_count == 1 else f"{unit_type}_packet_window",
-                packets=chunk["packets"],
+                unit_type=f"{unit_type}_packet_window",
+                packets=candidate_packets,
                 token_config=token_config,
                 input_token_budget=input_token_budget,
-                context_truncation=None,
+                context_truncation={
+                    "applied": True,
+                    "reason": "final_flow_packet_window_exceeded_budget",
+                    "policy": "split_core_packets_without_overlap",
+                    "source_prompt_unit_id": prompt_unit_id,
+                },
             )
-        )
+            if current_fallback_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
+                fallback_chunks.append(current_fallback_chunk)
+                current_fallback_chunk = [packet]
+            else:
+                current_fallback_chunk = candidate_packets
+        if current_fallback_chunk:
+            fallback_chunks.append(current_fallback_chunk)
+
+        sub_chunk_count = len(fallback_chunks)
+        for sub_chunk_index, fallback_packets in enumerate(fallback_chunks, start=1):
+            sub_prompt_unit_id = f"{prompt_unit_id}_sub_{sub_chunk_index:04d}"
+            sub_metadata = dict(group_metadata)
+            sub_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                policy="final_budget_subwindow_fallback",
+                core_packet_count=len(fallback_packets),
+                overlap_context_packet_count=0,
+                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
+                source_chunk_index=chunk_index,
+                sub_chunk_index=sub_chunk_index,
+                sub_chunk_count=sub_chunk_count,
+            )
+            sub_prompt_unit = build_prompt_unit(
+                experiment_id=experiment_id,
+                source_packet_json=source_packet_json,
+                source_packet_json_schema_version=source_packet_json_schema_version,
+                group_metadata=sub_metadata,
+                prompt_unit_id=sub_prompt_unit_id,
+                unit_type=f"{unit_type}_packet_window",
+                packets=fallback_packets,
+                token_config=token_config,
+                input_token_budget=input_token_budget,
+                context_truncation={
+                    "applied": True,
+                    "reason": "final_flow_packet_window_exceeded_budget",
+                    "policy": "split_core_packets_without_overlap",
+                    "source_prompt_unit_id": prompt_unit_id,
+                },
+            )
+            if sub_prompt_unit["estimated_input_tokens"] > input_token_budget and len(fallback_packets) == 1:
+                sub_prompt_unit["context_truncation"] = {
+                    "applied": True,
+                    "reason": "single_editable_packet_exceeds_input_token_budget",
+                    "policy": "no_smaller_step15_packet_unit_available",
+                    "source_prompt_unit_id": prompt_unit_id,
+                }
+            prompt_units.append(sub_prompt_unit)
     return prompt_units
 
 
