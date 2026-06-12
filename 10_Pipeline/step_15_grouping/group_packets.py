@@ -5,6 +5,7 @@ import json
 import re
 import string
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1008,7 +1009,11 @@ def run_grouping(
     input_json: str | Path | None,
     output_dir: str | Path | None,
     group_size_packets: int | None,
+    heartbeat_seconds: int,
 ) -> dict[str, Any]:
+    if heartbeat_seconds < 0:
+        raise ValueError("--heartbeat-seconds must be zero or a positive integer.")
+
     config = load_json_config(config_path)
     validate_config(config)
 
@@ -1034,14 +1039,25 @@ def run_grouping(
         group_size_packets=effective_group_size,
     )
     parent_group_stats = parent_group_size_statistics(parent_groups)
+    if heartbeat_seconds > 0:
+        print(
+            "Step 15 heartbeat: "
+            f"parent_groups_ready={len(parent_groups)}, "
+            f"traffic_packets={len(traffic)}, "
+            f"grouping_policy={grouping_policy}, "
+            f"output_dir={output_group_dir}",
+            flush=True,
+        )
 
     clear_previous_output_files(output_group_dir)
     prompt_unit_summaries = []
     payload_mode_counts: Counter[str] = Counter()
     experiment_id = config["experiment"]["experiment_id"]
     source_schema = str(packet_json.get("metadata", {}).get("schema_version", ""))
+    start_time = time.monotonic()
+    last_heartbeat_time = start_time
 
-    for parent_group in parent_groups:
+    for processed_parent_groups, parent_group in enumerate(parent_groups, start=1):
         records = parent_group["records"]
         prompt_units = build_prompt_units_for_group(
             experiment_id=experiment_id,
@@ -1064,6 +1080,17 @@ def run_grouping(
             prompt_unit_path = output_group_dir / f"{prompt_unit['prompt_unit_id']}.json"
             write_json(prompt_unit_path, prompt_unit)
             prompt_unit_summaries.append(summarize_prompt_unit(prompt_unit, prompt_unit_path))
+        current_time = time.monotonic()
+        if heartbeat_seconds > 0 and current_time - last_heartbeat_time >= heartbeat_seconds:
+            elapsed_seconds = round(current_time - start_time, 1)
+            print(
+                "Step 15 heartbeat: "
+                f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
+                f"prompt_units_written={len(prompt_unit_summaries)}, "
+                f"elapsed_seconds={elapsed_seconds}",
+                flush=True,
+            )
+            last_heartbeat_time = current_time
 
     manifest = build_manifest(
         config=config,
@@ -1103,6 +1130,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--input-json", help="Path to selected_packet_records.json.")
     parser.add_argument("--output-dir", help="Root directory for Step 15 outputs. The script creates a policy-specific subfolder inside it.")
     parser.add_argument("--group-size-packets", type=int, help="Override pipeline.group_size_packets.")
+    parser.add_argument("--heartbeat-seconds", type=int, default=30, help="Print progress heartbeat every N seconds. Use 0 to disable.")
     return parser.parse_args()
 
 
@@ -1114,6 +1142,7 @@ def main() -> None:
         input_json=args.input_json,
         output_dir=args.output_dir,
         group_size_packets=args.group_size_packets,
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     print(f"Grouped packets: {result['packet_count']}")
     print(f"Parent group count: {result['parent_group_count']}")
