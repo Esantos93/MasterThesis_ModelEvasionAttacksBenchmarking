@@ -92,7 +92,7 @@ def validate_config(config: dict[str, Any]) -> None:
     if grouping_policy == "fixed_packet_count":
         require_keys(config["pipeline"], ["group_size_packets"], "pipeline")
     if grouping_policy == "flow_based":
-        require_keys(config["pipeline"], ["flow_slide_window_overlap_packets"], "pipeline")
+        require_keys(config["pipeline"], ["flow_payload_slide_window_overlap_units"], "pipeline")
 
 
 #This function validates the basic shape of the packet JSON produced by Step 14.
@@ -144,14 +144,14 @@ def compute_input_token_budget(token_config: dict[str, Any]) -> int:
     return max(1, int(available * float(token_config["token_budget_safety_factor"])))
 
 
-#This function reads the flow chunk overlap setting used by flow-based Step 15 prompt-unit planning.
-def get_flow_slide_window_overlap_packets(config: dict[str, Any], grouping_policy: str) -> int:
+#This function reads the flow/payload overlap setting used by flow-based Step 15 prompt-unit planning.
+def get_flow_payload_slide_window_overlap_units(config: dict[str, Any], grouping_policy: str) -> int:
     if grouping_policy != "flow_based":
         return 0
-    overlap_packets = int(config["pipeline"]["flow_slide_window_overlap_packets"])
-    if overlap_packets < 0:
-        raise ValueError("pipeline.flow_slide_window_overlap_packets must be zero or a positive integer.")
-    return overlap_packets
+    overlap_units = int(config["pipeline"]["flow_payload_slide_window_overlap_units"])
+    if overlap_units < 0:
+        raise ValueError("pipeline.flow_payload_slide_window_overlap_units must be zero or a positive integer.")
+    return overlap_units
 
 
 #This function implements the baseline parent grouping policy.
@@ -775,6 +775,21 @@ def add_flow_chunk_context_overlap(
     return chunks
 
 
+#This function selects local packet context for one payload-window prompt unit.
+def payload_window_context_indexes(
+    *,
+    source_index: int,
+    record_count: int,
+    grouping_policy: str,
+    overlap_units: int,
+) -> range:
+    if grouping_policy != "flow_based":
+        return range(0, record_count)
+    start_index = max(0, source_index - overlap_units)
+    end_index = min(record_count, source_index + overlap_units + 1)
+    return range(start_index, end_index)
+
+
 #This function creates base prompt units from compact packets, splitting large flows into packet windows when needed.
 def build_base_prompt_units(
     *,
@@ -786,7 +801,7 @@ def build_base_prompt_units(
     unit_type: str,
     base_packets: list[dict[str, Any]],
     grouping_policy: str,
-    flow_slide_window_overlap_packets: int,
+    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
 ) -> list[dict[str, Any]]:
@@ -820,7 +835,7 @@ def build_base_prompt_units(
     if grouping_policy == "flow_based":
         chunks = add_flow_chunk_context_overlap(
             chunks=chunks,
-            overlap_packets=flow_slide_window_overlap_packets,
+            overlap_packets=flow_payload_slide_window_overlap_units,
         )
     else:
         chunks = add_flow_chunk_context_overlap(chunks=chunks, overlap_packets=0)
@@ -837,7 +852,7 @@ def build_base_prompt_units(
                 "policy": "token_aware_packet_window",
                 "core_packet_ids": [str(packet["packet_id"]) for packet in chunk["core_packets"]],
                 "overlap_context_packet_ids": chunk["overlap_context_packet_ids"],
-                "flow_slide_window_overlap_packets": flow_slide_window_overlap_packets,
+                "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
             }
         prompt_units.append(
             build_prompt_unit(
@@ -869,7 +884,7 @@ def build_prompt_units_for_group(
     grouping_policy: str,
     group_size_packets: int | None,
     parent_group: dict[str, Any],
-    flow_slide_window_overlap_packets: int,
+    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     heartbeat: Any | None,
@@ -896,7 +911,7 @@ def build_prompt_units_for_group(
         unit_type=unit_type,
         base_packets=base_packets,
         grouping_policy=grouping_policy,
-        flow_slide_window_overlap_packets=flow_slide_window_overlap_packets,
+        flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
         input_token_budget=input_token_budget,
     )
@@ -910,8 +925,15 @@ def build_prompt_units_for_group(
                 "editable_regions": [payload_window["editable_region"]],
             }
             window_packets = []
-            for context_record, context_plan in zip(records, payload_plans):
-                if context_record.get("packet_id") == record.get("packet_id"):
+            for context_index in payload_window_context_indexes(
+                source_index=record_index - 1,
+                record_count=len(records),
+                grouping_policy=grouping_policy,
+                overlap_units=flow_payload_slide_window_overlap_units,
+            ):
+                context_record = records[context_index]
+                context_plan = payload_plans[context_index]
+                if context_index == record_index - 1:
                     window_packets.append(build_compact_packet(context_record, window_packet_plan, editable=True))
                 else:
                     summary_plan = {"payload_view": context_plan["payload_view"], "editable_regions": []}
@@ -971,7 +993,7 @@ def build_manifest(
     packet_json: dict[str, Any],
     grouping_policy: str,
     group_size_packets: int | None,
-    flow_slide_window_overlap_packets: int,
+    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     parent_group_count: int,
@@ -990,7 +1012,7 @@ def build_manifest(
             "output_dir": str(output_dir),
             "grouping_policy": grouping_policy,
             "group_size_packets": group_size_packets,
-            "flow_slide_window_overlap_packets": flow_slide_window_overlap_packets,
+            "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
             "parent_group_count": parent_group_count,
             "parent_group_size_statistics": parent_group_stats,
             "prompt_unit_count": len(prompt_unit_summaries),
@@ -1043,7 +1065,7 @@ def run_grouping(
     output_group_dir = output_root_dir / policy_output_subdir(grouping_policy, effective_group_size)
     token_config = get_token_budget_config(config)
     input_token_budget = compute_input_token_budget(token_config)
-    flow_slide_window_overlap_packets = get_flow_slide_window_overlap_packets(config, grouping_policy)
+    flow_payload_slide_window_overlap_units = get_flow_payload_slide_window_overlap_units(config, grouping_policy)
 
     packet_json = validate_packet_json(read_json(input_json_path), input_json_path)
     traffic = packet_json["traffic"]
@@ -1098,7 +1120,7 @@ def run_grouping(
             grouping_policy=grouping_policy,
             group_size_packets=effective_group_size,
             parent_group=parent_group,
-            flow_slide_window_overlap_packets=flow_slide_window_overlap_packets,
+            flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
             token_config=token_config,
             input_token_budget=input_token_budget,
             heartbeat=heartbeat,
@@ -1121,7 +1143,7 @@ def run_grouping(
         packet_json=packet_json,
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
-        flow_slide_window_overlap_packets=flow_slide_window_overlap_packets,
+        flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
         input_token_budget=input_token_budget,
         parent_group_count=len(parent_groups),
@@ -1139,7 +1161,7 @@ def run_grouping(
         "prompt_unit_count": len(prompt_unit_summaries),
         "packet_count": len(traffic),
         "group_size_packets": effective_group_size,
-        "flow_slide_window_overlap_packets": flow_slide_window_overlap_packets,
+        "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
         "parent_group_size_statistics": parent_group_stats,
         "input_token_budget": input_token_budget,
     }
