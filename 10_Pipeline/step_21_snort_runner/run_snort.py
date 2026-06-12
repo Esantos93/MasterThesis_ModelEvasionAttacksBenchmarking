@@ -40,7 +40,11 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "snort", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["snort"], ["snort_binary", "config_path", "enable_builtin_rules", "enable_ruleset", "ruleset_path"], "snort")
+    require_keys(
+        config["snort"],
+        ["snort_binary", "config_path", "plugin_path", "daq_dir", "enable_builtin_rules", "enable_ruleset", "ruleset_path"],
+        "snort",
+    )
     require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
 
     snort = config["snort"]
@@ -50,6 +54,10 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("snort.enable_ruleset must be true or false.")
     if snort["enable_ruleset"] and not str(snort.get("ruleset_path", "")).strip():
         raise ValueError("snort.ruleset_path must be set when snort.enable_ruleset is true.")
+    if not str(snort.get("plugin_path", "")).strip():
+        raise ValueError("snort.plugin_path must be set because Snort needs the plugin path for this benchmark setup.")
+    if not str(snort.get("daq_dir", "")).strip():
+        raise ValueError("snort.daq_dir must be set because Snort needs the DAQ directory for this benchmark setup.")
     if not isinstance(snort.get("rules_policy_path", ""), str):
         raise ValueError("snort.rules_policy_path must be a string when provided.")
 
@@ -133,10 +141,8 @@ def build_snort_command(
         "-c",
         expand_config_path(snort_config["config_path"]),
     ]
-    if snort_config.get("plugin_path"):
-        command.extend(["--plugin-path", expand_config_path(snort_config["plugin_path"])])
-    if snort_config.get("daq_dir"):
-        command.extend(["--daq-dir", expand_config_path(snort_config["daq_dir"])])
+    command.extend(["--plugin-path", expand_config_path(snort_config["plugin_path"])])
+    command.extend(["--daq-dir", expand_config_path(snort_config["daq_dir"])])
     command.extend(
         [
             "-l",
@@ -345,8 +351,8 @@ def run_one_snort_execution(
         "output_dir": str(output_dir),
         "snort_binary": expand_config_path(snort_config["snort_binary"]),
         "snort_config_path": expand_config_path(snort_config["config_path"]),
-        "plugin_path": expand_config_path(snort_config["plugin_path"]) if snort_config.get("plugin_path") else None,
-        "daq_dir": expand_config_path(snort_config["daq_dir"]) if snort_config.get("daq_dir") else None,
+        "plugin_path": expand_config_path(snort_config["plugin_path"]),
+        "daq_dir": expand_config_path(snort_config["daq_dir"]),
         "enable_builtin_rules": snort_config["enable_builtin_rules"],
         "enable_ruleset": snort_config["enable_ruleset"],
         "ruleset_path": expand_config_path(snort_config["ruleset_path"]) if snort_config["enable_ruleset"] else "",
