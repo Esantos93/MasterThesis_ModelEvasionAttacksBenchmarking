@@ -43,7 +43,7 @@
       "baseline-flow-based-v1"
     ],
     "grouping_policy": "flow_based",
-    "group_size_packets": 3,
+    "flow_slide_window_overlap_packets": 3,
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0

@@ -44,6 +44,7 @@
     ],
     "grouping_policy": "fixed_packet_count",
     "group_size_packets": 3,
+    "flow_slide_window_overlap_packets": 0,
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0
