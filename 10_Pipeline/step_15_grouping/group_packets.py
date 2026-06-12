@@ -6,6 +6,7 @@ import re
 import string
 import sys
 import time
+import traceback
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.terminal_logging import default_step_log_path, terminal_log
 
 
 #These are the Step 15 artifact schema names produced by the current code.
@@ -1167,6 +1169,21 @@ def run_grouping(
     }
 
 
+#This function resolves the Step 15 terminal log path from CLI arguments and the active config.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+    config = load_json_config(args.config)
+    experiment_root = build_experiment_root(config)
+    experiment_config_label = config.get("pipeline", {}).get("experiment_config_label")
+    return default_step_log_path(
+        experiment_root=experiment_root,
+        step_name="step_15_grouping",
+        branch_label=str(experiment_config_label) if experiment_config_label else None,
+        filename_prefix="step_15_grouping",
+    )
+
+
 #This function defines the command-line arguments accepted by Step 15.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build compact LLM-facing prompt units from packet JSON records.")
@@ -1175,26 +1192,37 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", help="Root directory for Step 15 outputs. The script creates a policy-specific subfolder inside it.")
     parser.add_argument("--group-size-packets", type=int, help="Override pipeline.group_size_packets.")
     parser.add_argument("--heartbeat-seconds", type=int, default=30, help="Print progress heartbeat every N seconds. Use 0 to disable.")
+    parser.add_argument("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_15_grouping/<experiment_config_label>/step_15_grouping_<timestamp>.log.")
     return parser.parse_args()
 
 
 #This is the command-line entry point. It runs the grouping/planning step and prints a short execution summary.
 def main() -> None:
     args = parse_cli_args()
-    result = run_grouping(
-        config_path=args.config,
-        input_json=args.input_json,
-        output_dir=args.output_dir,
-        group_size_packets=args.group_size_packets,
-        heartbeat_seconds=args.heartbeat_seconds,
-    )
-    print(f"Grouped packets: {result['packet_count']}")
-    print(f"Parent group count: {result['parent_group_count']}")
-    print(f"Prompt unit count: {result['prompt_unit_count']}")
-    print(f"Group size packets: {result['group_size_packets']}")
-    print(f"Input token budget: {result['input_token_budget']}")
-    print(f"Output directory: {result['output_dir']}")
-    print(f"Group manifest written to: {result['manifest_path']}")
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 15 terminal log"):
+        try:
+            result = run_grouping(
+                config_path=args.config,
+                input_json=args.input_json,
+                output_dir=args.output_dir,
+                group_size_packets=args.group_size_packets,
+                heartbeat_seconds=args.heartbeat_seconds,
+            )
+        except Exception:
+            print("Step 15 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        print(f"Grouped packets: {result['packet_count']}")
+        print(f"Parent group count: {result['parent_group_count']}")
+        print(f"Prompt unit count: {result['prompt_unit_count']}")
+        print(f"Group size packets: {result['group_size_packets']}")
+        print(f"Flow payload slide window overlap units: {result['flow_payload_slide_window_overlap_units']}")
+        print(f"Parent group size statistics: {result['parent_group_size_statistics']}")
+        print(f"Input token budget: {result['input_token_budget']}")
+        print(f"Output directory: {result['output_dir']}")
+        print(f"Group manifest written to: {result['manifest_path']}")
 
 
 if __name__ == "__main__":
