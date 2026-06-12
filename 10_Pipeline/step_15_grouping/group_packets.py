@@ -872,8 +872,16 @@ def build_prompt_units_for_group(
     flow_slide_window_overlap_packets: int,
     token_config: dict[str, Any],
     input_token_budget: int,
+    heartbeat: Any | None,
 ) -> list[dict[str, Any]]:
-    payload_plans = [build_payload_plan(record, token_config, input_token_budget) for record in records]
+    payload_plans = []
+    for record_index, record in enumerate(records, start=1):
+        payload_plans.append(build_payload_plan(record, token_config, input_token_budget))
+        if heartbeat:
+            heartbeat(
+                f"planning_parent_group={parent_group_id}, "
+                f"planned_packets={record_index}/{len(records)}"
+            )
     group_metadata = build_group_metadata(parent_group_id, group_index, records, grouping_policy, group_size_packets, unit_type, parent_group)
     base_packets = [
         build_compact_packet(record, payload_plan, editable=bool(payload_plan["editable_regions"]))
@@ -894,7 +902,7 @@ def build_prompt_units_for_group(
     )
 
     window_counter = 0
-    for record, payload_plan in zip(records, payload_plans):
+    for record_index, (record, payload_plan) in enumerate(zip(records, payload_plans), start=1):
         for payload_window in payload_plan["payload_windows"]:
             window_counter += 1
             window_packet_plan = {
@@ -921,6 +929,12 @@ def build_prompt_units_for_group(
                     input_token_budget=input_token_budget,
                     context_truncation=None,
                 )
+            )
+        if heartbeat:
+            heartbeat(
+                f"building_parent_group={parent_group_id}, "
+                f"payload_window_source_packets={record_index}/{len(records)}, "
+                f"payload_window_units={window_counter}"
             )
     return prompt_units
 
@@ -1039,26 +1053,40 @@ def run_grouping(
         group_size_packets=effective_group_size,
     )
     parent_group_stats = parent_group_size_statistics(parent_groups)
-    if heartbeat_seconds > 0:
-        print(
-            "Step 15 heartbeat: "
-            f"parent_groups_ready={len(parent_groups)}, "
-            f"traffic_packets={len(traffic)}, "
-            f"grouping_policy={grouping_policy}, "
-            f"output_dir={output_group_dir}",
-            flush=True,
-        )
+    start_time = time.monotonic()
+    last_heartbeat_time = [start_time]
+
+    def heartbeat(message: str, force: bool = False) -> None:
+        if heartbeat_seconds <= 0:
+            return
+        current_time = time.monotonic()
+        if force or current_time - last_heartbeat_time[0] >= heartbeat_seconds:
+            elapsed_seconds = round(current_time - start_time, 1)
+            print(f"Step 15 heartbeat: {message}, elapsed_seconds={elapsed_seconds}", flush=True)
+            last_heartbeat_time[0] = current_time
+
+    heartbeat(
+        f"parent_groups_ready={len(parent_groups)}, "
+        f"traffic_packets={len(traffic)}, "
+        f"grouping_policy={grouping_policy}, "
+        f"output_dir={output_group_dir}",
+        force=True,
+    )
 
     clear_previous_output_files(output_group_dir)
     prompt_unit_summaries = []
     payload_mode_counts: Counter[str] = Counter()
     experiment_id = config["experiment"]["experiment_id"]
     source_schema = str(packet_json.get("metadata", {}).get("schema_version", ""))
-    start_time = time.monotonic()
-    last_heartbeat_time = start_time
 
     for processed_parent_groups, parent_group in enumerate(parent_groups, start=1):
         records = parent_group["records"]
+        heartbeat(
+            f"processing_parent_group={parent_group['parent_group_id']}, "
+            f"parent_group_index={processed_parent_groups}/{len(parent_groups)}, "
+            f"parent_group_packets={len(records)}, "
+            f"prompt_units_written={len(prompt_unit_summaries)}"
+        )
         prompt_units = build_prompt_units_for_group(
             experiment_id=experiment_id,
             source_packet_json=input_json_path,
@@ -1066,31 +1094,25 @@ def run_grouping(
             parent_group_id=parent_group["parent_group_id"],
             group_index=parent_group["group_index"],
             unit_type=parent_group["unit_type"],
-                    records=records,
-                    grouping_policy=grouping_policy,
-                    group_size_packets=effective_group_size,
-                    parent_group=parent_group,
-                    flow_slide_window_overlap_packets=flow_slide_window_overlap_packets,
-                    token_config=token_config,
-                    input_token_budget=input_token_budget,
-                )
+            records=records,
+            grouping_policy=grouping_policy,
+            group_size_packets=effective_group_size,
+            parent_group=parent_group,
+            flow_slide_window_overlap_packets=flow_slide_window_overlap_packets,
+            token_config=token_config,
+            input_token_budget=input_token_budget,
+            heartbeat=heartbeat,
+        )
         for prompt_unit in prompt_units:
             for packet in prompt_unit["packets"]:
                 payload_mode_counts[str(packet.get("payload_view", {}).get("mode", "unknown"))] += 1
             prompt_unit_path = output_group_dir / f"{prompt_unit['prompt_unit_id']}.json"
             write_json(prompt_unit_path, prompt_unit)
             prompt_unit_summaries.append(summarize_prompt_unit(prompt_unit, prompt_unit_path))
-        current_time = time.monotonic()
-        if heartbeat_seconds > 0 and current_time - last_heartbeat_time >= heartbeat_seconds:
-            elapsed_seconds = round(current_time - start_time, 1)
-            print(
-                "Step 15 heartbeat: "
-                f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
-                f"prompt_units_written={len(prompt_unit_summaries)}, "
-                f"elapsed_seconds={elapsed_seconds}",
-                flush=True,
-            )
-            last_heartbeat_time = current_time
+        heartbeat(
+            f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
+            f"prompt_units_written={len(prompt_unit_summaries)}"
+        )
 
     manifest = build_manifest(
         config=config,
