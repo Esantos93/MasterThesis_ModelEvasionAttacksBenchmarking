@@ -447,21 +447,26 @@ def extract_stream_chunk_text(chunk: dict[str, Any]) -> str:
     return ""
 
 
-#This function reads the packet ids expected in the output from the Step 16 traceability block.
+#This function reads the packet ids expected in the output from the Step 16 traceability block (heartbeat).
 def expected_packet_ids_from_traceability(prompt_package: dict[str, Any]) -> list[str]:
     traceability = prompt_package.get("input_traceability", {})
+    packet_ids = traceability.get("packet_ids")
+    if isinstance(packet_ids, list):
+        return [str(packet_id) for packet_id in packet_ids]
+
+    # Legacy fallback for prompt packages produced before input_traceability.packet_ids existed.
     trace_records = traceability.get("records", [])
-    packet_ids = []
+    legacy_packet_ids = []
     if not isinstance(trace_records, list):
-        return packet_ids
+        return legacy_packet_ids
 
     for trace_record in trace_records:
         if not isinstance(trace_record, dict):
             continue
         identity = trace_record.get("immutable_identity", {})
         if isinstance(identity, dict) and identity.get("packet_id") is not None:
-            packet_ids.append(str(identity["packet_id"]))
-    return packet_ids
+            legacy_packet_ids.append(str(identity["packet_id"]))
+    return legacy_packet_ids
 
 
 #This function estimates packet-level output progress by counting expected packet ids already visible in generated text.
