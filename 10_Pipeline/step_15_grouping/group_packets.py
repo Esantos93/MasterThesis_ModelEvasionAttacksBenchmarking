@@ -613,7 +613,8 @@ def build_compact_packet(packet: dict[str, Any], payload_plan: dict[str, Any], e
         "editable_regions": payload_plan["editable_regions"] if editable else [],
     }
     if "flow_context" in packet:
-        compact_packet["flow_context"] = packet["flow_context"]
+        flow_context = packet.get("flow_context") or {}
+        compact_packet["packet_mapping_status"] = flow_context.get("packet_mapping_status")
     return compact_packet
 
 
