@@ -1066,7 +1066,7 @@ def run_grouping(
             last_heartbeat_time[0] = current_time
 
     heartbeat(
-        f"parent_groups_ready={len(parent_groups)}, "
+        f"parent_groups_identified={len(parent_groups)}, "
         f"traffic_packets={len(traffic)}, "
         f"grouping_policy={grouping_policy}, "
         f"output_dir={output_group_dir}",
