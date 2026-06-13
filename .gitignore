@@ -7,3 +7,4 @@ __pycache__/
 *.code-workspace
 90_Testing/
 *.txt
+_tmp*
