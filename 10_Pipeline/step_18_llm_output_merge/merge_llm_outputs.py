@@ -264,9 +264,39 @@ def build_absolute_edit(
 
     replacement_format = patch.get("replacement_format")
     replacement = patch.get("replacement")
-    if replacement_format != "hex" or not isinstance(replacement, str) or not is_valid_hex(replacement):
+    expected_format = region.get("format")
+    if expected_format in {"hex", "text"} and replacement_format != expected_format:
         return None, {
-            "reason": "replacement_hex_invalid_or_unsupported",
+            "reason": "replacement_format_mismatch",
+            "packet_id": packet_id_text,
+            "region_id": region_id,
+            "expected_format": expected_format,
+            "replacement_format": replacement_format,
+            "patch_index": patch_index,
+        }
+    if not isinstance(replacement, str):
+        return None, {
+            "reason": "replacement_not_string",
+            "packet_id": packet_id_text,
+            "region_id": region_id,
+            "replacement_format": replacement_format,
+            "patch_index": patch_index,
+        }
+    if replacement_format == "hex":
+        if not is_valid_hex(replacement):
+            return None, {
+                "reason": "replacement_hex_invalid",
+                "packet_id": packet_id_text,
+                "region_id": region_id,
+                "replacement_format": replacement_format,
+                "patch_index": patch_index,
+            }
+        replacement_hex = replacement.lower()
+    elif replacement_format == "text":
+        replacement_hex = replacement.encode("utf-8").hex()
+    else:
+        return None, {
+            "reason": "replacement_format_unsupported",
             "packet_id": packet_id_text,
             "region_id": region_id,
             "replacement_format": replacement_format,
@@ -322,8 +352,9 @@ def build_absolute_edit(
         "operation": operation,
         "absolute_start_offset_bytes": absolute_start,
         "replaced_length_bytes": replaced_length,
-        "replacement_hex": replacement.lower(),
-        "replacement_length_bytes": len(replacement) // 2,
+        "replacement_format": replacement_format,
+        "replacement_hex": replacement_hex,
+        "replacement_length_bytes": len(replacement_hex) // 2,
         "patch_index": patch_index,
         "parsed_file": str(parsed_path),
         "prompt_unit_id": prompt_package.get("prompt_unit_id"),
