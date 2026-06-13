@@ -988,14 +988,59 @@ def build_base_prompt_units(
                     "source_prompt_unit_id": prompt_unit_id,
                 },
             )
-            if sub_prompt_unit["estimated_input_tokens"] > input_token_budget and len(fallback_packets) == 1:
+            if sub_prompt_unit["estimated_input_tokens"] <= input_token_budget:
+                prompt_units.append(sub_prompt_unit)
+                continue
+            if len(fallback_packets) == 1:
                 sub_prompt_unit["context_truncation"] = {
                     "applied": True,
                     "reason": "single_editable_packet_exceeds_input_token_budget",
                     "policy": "no_smaller_step15_packet_unit_available",
                     "source_prompt_unit_id": prompt_unit_id,
                 }
-            prompt_units.append(sub_prompt_unit)
+                prompt_units.append(sub_prompt_unit)
+                continue
+
+            packet_sub_chunk_count = len(fallback_packets)
+            for packet_sub_chunk_index, packet in enumerate(fallback_packets, start=1):
+                packet_prompt_unit_id = f"{sub_prompt_unit_id}_pkt_{packet_sub_chunk_index:04d}"
+                packet_metadata = dict(group_metadata)
+                packet_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                    policy="final_budget_single_packet_fallback",
+                    core_packet_count=1,
+                    overlap_context_packet_count=0,
+                    flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
+                    source_chunk_index=chunk_index,
+                    sub_chunk_index=packet_sub_chunk_index,
+                    sub_chunk_count=packet_sub_chunk_count,
+                )
+                packet_prompt_unit = build_prompt_unit(
+                    experiment_id=experiment_id,
+                    source_packet_json=source_packet_json,
+                    source_packet_json_schema_version=source_packet_json_schema_version,
+                    group_metadata=packet_metadata,
+                    prompt_unit_id=packet_prompt_unit_id,
+                    unit_type=f"{unit_type}_packet_window",
+                    packets=[packet],
+                    token_config=token_config,
+                    input_token_budget=input_token_budget,
+                    context_truncation={
+                        "applied": True,
+                        "reason": "final_flow_packet_window_exceeded_budget",
+                        "policy": "single_packet_fallback_after_subwindow_overrun",
+                        "source_prompt_unit_id": sub_prompt_unit_id,
+                    },
+                )
+                if packet_prompt_unit["estimated_input_tokens"] > input_token_budget:
+                    packet_prompt_unit["context_truncation"] = {
+                        "applied": True,
+                        "reason": "single_editable_packet_exceeds_input_token_budget",
+                        "policy": "no_smaller_step15_packet_unit_available",
+                        "source_prompt_unit_id": sub_prompt_unit_id,
+                    }
+                prompt_units.append(packet_prompt_unit)
     return prompt_units
 
 
