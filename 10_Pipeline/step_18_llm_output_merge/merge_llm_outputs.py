@@ -712,11 +712,13 @@ def run_merge(
     merge_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
     experiment_config_label = experiment_config_label_from_config(config)
     model_name = model_name_from_config(config)
-    model_root = resolve_model_root(input_root=step17_root, model_name=model_name)
+    resolved_model_root = step17_root if input_root else resolve_model_root(input_root=step17_root, model_name=model_name)
+    if not resolved_model_root.exists():
+        raise FileNotFoundError(f"Step 17 model output folder does not exist: {resolved_model_root}")
 
     return merge_model_outputs(
         config=config,
-        model_root=model_root,
+        model_root=resolved_model_root,
         prompt_root=step16_prompt_root,
         reference_json=step14_reference_json,
         output_dir=merge_output_dir,
@@ -729,7 +731,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Apply accepted Step 17 patch_output_v1 files over the Step 14 packet reference.")
     add = parser.add_argument
     add("--config", required=True, help="Path to the experiment JSON config.")
-    add("--input-root", help="Directory containing Step 17 model output folders. Defaults to experiment/07_llm_outputs.")
+    add("--input-root", help="Direct path to one Step 17 output folder containing raw/, parsed/, metadata/, and failures/. Defaults to experiment/07_llm_outputs/<llm.model_name>.")
     add("--prompt-root", help="Directory containing Step 16 prompt packages. Defaults to experiment/06_prompts.")
     add("--reference-json", help="Step 14 selected_packet_records.json. Defaults to experiment/04_packet_json/selected_packet_records.json.")
     add("--output-dir", help="Directory where Step 18 merged outputs will be written. Defaults to experiment/08_merged_outputs.")
