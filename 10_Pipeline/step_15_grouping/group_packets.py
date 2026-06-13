@@ -752,6 +752,24 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
     prompt_unit["estimated_input_tokens"] = estimate_json_tokens(prompt_unit, float(token_config["chars_per_token_estimate"]))
 
 
+#This function marks prompt units that still exceed the soft Step 15 budget after all local splitting options.
+def mark_over_budget_prompt_unit(prompt_unit: dict[str, Any], source_prompt_unit_id: str) -> None:
+    if int(prompt_unit.get("editable_region_count", 0)) == 0:
+        prompt_unit["context_truncation"] = {
+            "applied": True,
+            "reason": "context_only_prompt_unit_exceeds_input_token_budget",
+            "policy": "not_llm_routable_no_editable_regions",
+            "source_prompt_unit_id": source_prompt_unit_id,
+        }
+        return
+    prompt_unit["context_truncation"] = {
+        "applied": True,
+        "reason": "single_editable_packet_exceeds_input_token_budget",
+        "policy": "no_smaller_step15_packet_unit_available",
+        "source_prompt_unit_id": source_prompt_unit_id,
+    }
+
+
 #This function copies a compact packet as context so overlapped flow windows do not edit the same packet twice.
 def as_context_packet(packet: dict[str, Any]) -> dict[str, Any]:
     context_packet = dict(packet)
@@ -908,12 +926,7 @@ def build_base_prompt_units(
             prompt_units.append(prompt_unit)
             continue
         if len(chunk["core_packets"]) <= 1:
-            prompt_unit["context_truncation"] = {
-                "applied": True,
-                "reason": "single_editable_packet_exceeds_input_token_budget",
-                "policy": "no_smaller_step15_packet_unit_available",
-                "source_prompt_unit_id": prompt_unit_id,
-            }
+            mark_over_budget_prompt_unit(prompt_unit, prompt_unit_id)
             prompt_units.append(prompt_unit)
             continue
 
@@ -992,12 +1005,7 @@ def build_base_prompt_units(
                 prompt_units.append(sub_prompt_unit)
                 continue
             if len(fallback_packets) == 1:
-                sub_prompt_unit["context_truncation"] = {
-                    "applied": True,
-                    "reason": "single_editable_packet_exceeds_input_token_budget",
-                    "policy": "no_smaller_step15_packet_unit_available",
-                    "source_prompt_unit_id": prompt_unit_id,
-                }
+                mark_over_budget_prompt_unit(sub_prompt_unit, prompt_unit_id)
                 prompt_units.append(sub_prompt_unit)
                 continue
 
@@ -1034,12 +1042,7 @@ def build_base_prompt_units(
                     },
                 )
                 if packet_prompt_unit["estimated_input_tokens"] > input_token_budget:
-                    packet_prompt_unit["context_truncation"] = {
-                        "applied": True,
-                        "reason": "single_editable_packet_exceeds_input_token_budget",
-                        "policy": "no_smaller_step15_packet_unit_available",
-                        "source_prompt_unit_id": sub_prompt_unit_id,
-                    }
+                    mark_over_budget_prompt_unit(packet_prompt_unit, sub_prompt_unit_id)
                 prompt_units.append(packet_prompt_unit)
     return prompt_units
 
@@ -1157,6 +1160,36 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
     return summary
 
 
+#This function separates over-budget prompt units that can be routed to the LLM from context-only units Step 17 will auto-accept.
+def build_over_budget_summary(prompt_unit_summaries: list[dict[str, Any]], input_token_budget: int) -> dict[str, Any]:
+    summary = {
+        "over_budget_count": 0,
+        "over_budget_editable_count": 0,
+        "over_budget_non_editable_count": 0,
+        "over_budget_context_only_count": 0,
+        "over_budget_reasons": {},
+    }
+    reason_counts: Counter[str] = Counter()
+    for prompt_unit in prompt_unit_summaries:
+        if int(prompt_unit.get("estimated_input_tokens") or 0) <= input_token_budget:
+            continue
+        summary["over_budget_count"] += 1
+        editable_region_count = int(prompt_unit.get("editable_region_count") or 0)
+        if editable_region_count > 0:
+            summary["over_budget_editable_count"] += 1
+        else:
+            summary["over_budget_non_editable_count"] += 1
+            summary["over_budget_context_only_count"] += 1
+        context_truncation = prompt_unit.get("context_truncation")
+        if isinstance(context_truncation, dict):
+            reason = str(context_truncation.get("reason", "unknown") or "unknown")
+        else:
+            reason = "unknown"
+        reason_counts[reason] += 1
+    summary["over_budget_reasons"] = dict(sorted(reason_counts.items()))
+    return summary
+
+
 #This function builds the top-level group_manifest.json artifact for compact prompt units.
 def build_manifest(
     *,
@@ -1194,6 +1227,7 @@ def build_manifest(
             "payload_strategy_version": PAYLOAD_STRATEGY_VERSION,
             "token_budget_config": token_config,
             "input_token_budget": input_token_budget,
+            "over_budget_summary": build_over_budget_summary(prompt_unit_summaries, input_token_budget),
             "payload_mode_counts": dict(sorted(payload_mode_counts.items())),
             "immutable_fields": packet_json.get("immutable_fields", []),
         },
