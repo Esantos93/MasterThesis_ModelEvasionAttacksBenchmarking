@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -218,6 +219,58 @@ def scp_to_remote(args: argparse.Namespace, local_path: Path, remote_path: str) 
     if args.tunnel_through_iap:
         command.append("--tunnel-through-iap")
     run_command(command, args.dry_run)
+
+
+# This function copies remote files or folders from the VM to the local machine using gcloud scp.
+def scp_file_from_remote(args: argparse.Namespace, remote_path: str, local_path: Path) -> None:
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        GCLOUD_COMMAND,
+        "compute",
+        "scp",
+        f"{remote_target(args)}:{remote_path}",
+        str(local_path),
+        "--project",
+        args.project,
+        "--zone",
+        args.zone,
+    ]
+    if args.tunnel_through_iap:
+        command.append("--tunnel-through-iap")
+    run_command(command, args.dry_run)
+
+
+def assert_safe_tar_members(archive: tarfile.TarFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.getmembers():
+        target = (destination / member.name).resolve()
+        if target != destination and destination not in target.parents:
+            raise ValueError(f"Unsafe path in remote archive: {member.name}")
+
+
+def scp_from_remote(args: argparse.Namespace, remote_path: str, local_dir: Path) -> None:
+    local_dir.mkdir(parents=True, exist_ok=True)
+    local_dir = local_dir.resolve()
+    archive_name = f"codex_fetch_{int(time.time() * 1000)}_{Path(remote_path.rstrip('/')).name}.tar.gz"
+    remote_archive = f"/tmp/{archive_name}"
+    local_archive = Path(tempfile.gettempdir()) / archive_name
+    run_remote(
+        args,
+        f"tar -C {shlex.quote(remote_path.rstrip('/'))} -czf {shlex.quote(remote_archive)} .",
+    )
+    try:
+        scp_file_from_remote(args, remote_archive, local_archive)
+        if not args.dry_run:
+            with tarfile.open(local_archive, "r:gz") as archive:
+                assert_safe_tar_members(archive, local_dir)
+                archive.extractall(local_dir, filter="data")
+    finally:
+        if not args.dry_run and local_archive.exists():
+            local_archive.unlink()
+        try:
+            run_remote(args, f"rm -f {shlex.quote(remote_archive)}")
+        except subprocess.CalledProcessError:
+            print(f"Warning: could not remove remote temporary archive: {remote_archive}", file=sys.stderr)
 
 
 # This function generates local runtime summaries after Step 17 artifacts have been fetched.
@@ -744,7 +797,7 @@ def upload_outputs_to_gcs(args: argparse.Namespace) -> None:
     run_id = resolve_step17_run_id(args)
     remote_prompt_dir = resolve_step16_output_dir(args)
     remote_step17_root = resolve_step17_output_root(args)
-    remote_model_run_dirs = [] if args.skip_step17 else list_remote_model_run_dirs(args, remote_step17_root, run_id)
+    remote_model_run_dirs = [] if args.skip_step17_upload else list_remote_model_run_dirs(args, remote_step17_root, run_id)
     gcs_run_root = resolve_gcs_run_root(args)
     gcs_output_root = resolve_gcs_output_root(args)
     metadata_dirs = " ".join(
@@ -759,49 +812,37 @@ def upload_outputs_to_gcs(args: argparse.Namespace) -> None:
         "rm -f \"$marker\"",
     ]
 
-    if args.fetch_all_prompts or args.skip_step17:
-        commands.append(
-            f"gcloud storage rsync -r {shlex.quote(remote_prompt_dir)} {shlex.quote(gcs_run_root + '/06_prompts')}"
-        )
-    else:
-        commands.extend(
-            [
-                "prompt_stage=$(mktemp -d)",
-                "mkdir -p \"$prompt_stage/06_prompts\"",
-                f"cp {shlex.quote(remote_prompt_dir + '/prompt_manifest.json')} \"$prompt_stage/06_prompts/\"",
-                f"python3 - {shlex.quote(remote_prompt_dir)} \"$prompt_stage/06_prompts\" {metadata_dirs} <<'PY'",
-                "import json",
-                "import shutil",
-                "import sys",
-                "from pathlib import Path",
-                "",
-                "prompt_dir = Path(sys.argv[1])",
-                "stage_dir = Path(sys.argv[2])",
-                "metadata_dirs = [Path(value) for value in sys.argv[3:]]",
-                "prompt_files = set()",
-                "for metadata_dir in metadata_dirs:",
-                "    for metadata_path in sorted(metadata_dir.glob('*.metadata.json')):",
-                "        try:",
-                "            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))",
-                "        except Exception:",
-                "            continue",
-                "        prompt_file = metadata.get('prompt_file')",
-                "        if isinstance(prompt_file, str) and prompt_file:",
-                "            prompt_files.add(Path(prompt_file).name)",
-                "            continue",
-                "        prompt_unit_id = metadata.get('prompt_unit_id') or metadata.get('group_id')",
-                "        if isinstance(prompt_unit_id, str) and prompt_unit_id:",
-                "            prompt_files.add(f'{prompt_unit_id}.prompt.json')",
-                "for prompt_file in sorted(prompt_files):",
-                "    source = prompt_dir / prompt_file",
-                "    if source.exists():",
-                "        shutil.copy2(source, stage_dir / prompt_file)",
-                "print(f'Staged prompt packages: {len(prompt_files)}')",
-                "PY",
-                f"gcloud storage rsync -r \"$prompt_stage/06_prompts\" {shlex.quote(gcs_run_root + '/06_prompts')}",
-                "rm -rf \"$prompt_stage\"",
-            ]
-        )
+    if not args.skip_step16_upload:
+        if args.fetch_all_prompts or not remote_model_run_dirs:
+            commands.append(
+                f"gcloud storage rsync -r {shlex.quote(remote_prompt_dir)} {shlex.quote(gcs_run_root + '/06_prompts')}"
+            )
+        else:
+            prompt_stage_script = (
+                "import json, shutil, sys; "
+                "from pathlib import Path; "
+                "prompt_dir = Path(sys.argv[1]); "
+                "stage_dir = Path(sys.argv[2]); "
+                "prompt_files = set(); "
+                "[prompt_files.add(Path((m.get('prompt_file') or f\"{m.get('prompt_unit_id') or m.get('group_id')}.prompt.json\")).name) "
+                "for metadata_dir in [Path(value) for value in sys.argv[3:]] "
+                "for metadata_path in sorted(metadata_dir.glob('*.metadata.json')) "
+                "for m in [json.loads(metadata_path.read_text(encoding='utf-8'))]]; "
+                "[shutil.copy2(prompt_dir / prompt_file, stage_dir / prompt_file) "
+                "for prompt_file in sorted(prompt_files) if (prompt_dir / prompt_file).exists()]; "
+                "print(f'Staged prompt packages: {len(prompt_files)}')"
+            )
+            commands.extend(
+                [
+                    "prompt_stage=$(mktemp -d)",
+                    "mkdir -p \"$prompt_stage/06_prompts\"",
+                    f"cp {shlex.quote(remote_prompt_dir + '/prompt_manifest.json')} \"$prompt_stage/06_prompts/\"",
+                    f"python3 -c {shlex.quote(prompt_stage_script)} "
+                    f"{shlex.quote(remote_prompt_dir)} \"$prompt_stage/06_prompts\" {metadata_dirs}",
+                    f"gcloud storage rsync -r \"$prompt_stage/06_prompts\" {shlex.quote(gcs_run_root + '/06_prompts')}",
+                    "rm -rf \"$prompt_stage\"",
+                ]
+            )
 
     for remote_model_run_dir in remote_model_run_dirs:
         model_name = Path(remote_model_run_dir.rstrip("/")).parent.name
@@ -816,41 +857,40 @@ def upload_outputs_to_gcs(args: argparse.Namespace) -> None:
 # This function fetches run-specific Step 16 prompts and Step 17 outputs from GCS into the local experiment tree.
 def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
     if not args.local_output_dir:
-        raise ValueError("--fetch-outputs-from-gcs requires --local-output-dir.")
+        raise ValueError("Fetching outputs requires --local-output-dir.")
     local_experiment_root = Path(args.local_output_dir).expanduser()
     grouping_label = resolve_grouping_label(args)
     run_id = resolve_step17_run_id(args)
     gcs_run_root = resolve_gcs_run_root(args)
     prompt_manifest_gcs = f"{gcs_run_root}/06_prompts/prompt_manifest.json"
     step17_outputs_gcs = f"{gcs_run_root}/07_llm_outputs/"
-    if not gcs_path_exists(args, prompt_manifest_gcs):
+    if not args.skip_step16_fetch and not gcs_path_exists(args, prompt_manifest_gcs):
         raise FileNotFoundError(
             f"No Step 16 prompt artifacts found for run_id={run_id} under {gcs_run_root}. "
-            "Run first with --upload-outputs-to-gcs, or pass both --upload-outputs-to-gcs "
-            "and --fetch-outputs-from-gcs in the same run."
+            "Run first without --skip-gcs-upload, or provide an existing GCS run root."
         )
-    if not args.skip_step17 and not gcs_path_exists(args, step17_outputs_gcs):
+    if not args.skip_step17_fetch and not gcs_path_exists(args, step17_outputs_gcs):
         raise FileNotFoundError(
             f"No complete Step 17 GCS artifacts found for run_id={run_id} under {gcs_run_root}. "
-            "Run first with --upload-outputs-to-gcs, or pass both --upload-outputs-to-gcs "
-            "and --fetch-outputs-from-gcs in the same run."
+            "Run first without --skip-gcs-upload, or provide an existing GCS run root."
         )
 
     local_prompt_dir = local_experiment_root / "06_prompts" / grouping_label / run_id
-    local_prompt_dir.mkdir(parents=True, exist_ok=True)
-    run_command(
-        [
-            GCLOUD_COMMAND,
-            "storage",
-            "rsync",
-            "-r",
-            f"{gcs_run_root}/06_prompts",
-            str(local_prompt_dir),
-        ],
-        args.dry_run,
-    )
+    if not args.skip_step16_fetch:
+        local_prompt_dir.mkdir(parents=True, exist_ok=True)
+        run_command(
+            [
+                GCLOUD_COMMAND,
+                "storage",
+                "rsync",
+                "-r",
+                f"{gcs_run_root}/06_prompts",
+                str(local_prompt_dir),
+            ],
+            args.dry_run,
+        )
 
-    if args.skip_step17:
+    if args.skip_step17_fetch:
         return
 
     for gcs_model_dir in list_gcs_model_output_dirs(args, gcs_run_root):
@@ -868,6 +908,30 @@ def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
             ],
             args.dry_run,
         )
+        summarize_local_runtime(args, local_model_run_dir, local_prompt_dir)
+
+
+# This function fetches Step 16/17 outputs directly from the GPU VM to the local experiment tree.
+def fetch_outputs_direct_from_gpu(args: argparse.Namespace) -> None:
+    if not args.local_output_dir:
+        raise ValueError("Fetching outputs requires --local-output-dir.")
+    local_experiment_root = Path(args.local_output_dir).expanduser()
+    grouping_label = resolve_grouping_label(args)
+    run_id = resolve_step17_run_id(args)
+    remote_prompt_dir = resolve_step16_output_dir(args)
+    remote_step17_root = resolve_step17_output_root(args)
+    local_prompt_dir = local_experiment_root / "06_prompts" / grouping_label / run_id
+
+    if not args.skip_step16_fetch:
+        scp_from_remote(args, remote_prompt_dir, local_prompt_dir)
+
+    if args.skip_step17_fetch:
+        return
+
+    for remote_model_run_dir in list_remote_model_run_dirs(args, remote_step17_root, run_id):
+        model_name = Path(remote_model_run_dir.rstrip("/")).parent.name
+        local_model_run_dir = local_experiment_root / "07_llm_outputs" / grouping_label / model_name / run_id
+        scp_from_remote(args, remote_model_run_dir, local_model_run_dir)
         summarize_local_runtime(args, local_model_run_dir, local_prompt_dir)
 
 
@@ -907,8 +971,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-output-dir", help="Local experiment root where run-specific Step 16/17 artifacts are fetched.")
     parser.add_argument("--log-file", help="Optional local log file for all orchestrator terminal output. Defaults to <local-output-dir>/logs/orchestrate_step16_17-googleCloud/<run_id>/ when --local-output-dir is available.")
     parser.add_argument("--gcs-output-root", help="Cloud Storage root for run artifact exchange. Defaults to gs://thesis-santos-llm-artifacts/<experiment_id>/runs.")
-    parser.add_argument("--upload-outputs-to-gcs", action="store_true", help="Upload run-specific Step 16 prompts and Step 17 outputs from the GPU VM to --gcs-output-root/<run_id>. If neither GCS transfer flag is passed, both upload and fetch run by default.")
-    parser.add_argument("--fetch-outputs-from-gcs", action="store_true", help="Fetch run-specific Step 16 prompts and Step 17 outputs from --gcs-output-root/<run_id> to --local-output-dir. If neither GCS transfer flag is passed, both upload and fetch run by default.")
+    parser.add_argument("--skip-gcs-upload", action="store_true", help="Skip uploading run artifacts from the GPU VM to Cloud Storage.")
+    parser.add_argument("--skip-gcs-fetch", action="store_true", help="Skip fetching run artifacts from Cloud Storage or directly from the GPU VM to --local-output-dir.")
+    parser.add_argument("--skip-step16-upload", action="store_true", help="Skip uploading Step 16 prompt artifacts from the GPU VM to Cloud Storage.")
+    parser.add_argument("--skip-step17-upload", action="store_true", help="Skip uploading Step 17 model output artifacts from the GPU VM to Cloud Storage.")
+    parser.add_argument("--skip-step16-fetch", action="store_true", help="Skip fetching Step 16 prompt artifacts to --local-output-dir.")
+    parser.add_argument("--skip-step17-fetch", action="store_true", help="Skip fetching Step 17 model output artifacts to --local-output-dir and skip local runtime summaries.")
+    parser.add_argument("--fetch-direct-from-gpu", action="store_true", help="Fetch artifacts directly from the GPU VM to --local-output-dir instead of fetching from Cloud Storage.")
     parser.add_argument("--fetch-all-prompts", action="store_true", help="Upload/fetch the full Step 16 prompt run directory. By default, only prompt_manifest.json and prompt packages referenced by Step 17 metadata are staged.")
     parser.add_argument("--skip-runtime-summary", action="store_true", help="Do not generate local Step 17 runtime_summary JSON/CSV/MD files after fetched outputs.")
 
@@ -990,13 +1059,13 @@ def main() -> None:
         install_llama_cpp(args)
         run_step16(args)
         run_step17(args)
-        transfer_flags_requested = args.upload_outputs_to_gcs or args.fetch_outputs_from_gcs
-        should_upload_to_gcs = args.upload_outputs_to_gcs or not transfer_flags_requested
-        should_fetch_from_gcs = args.fetch_outputs_from_gcs or not transfer_flags_requested
-        if should_upload_to_gcs:
+        if not args.skip_gcs_upload:
             upload_outputs_to_gcs(args)
-        if should_fetch_from_gcs:
-            fetch_outputs_from_gcs(args)
+        if not args.skip_gcs_fetch:
+            if args.fetch_direct_from_gpu:
+                fetch_outputs_direct_from_gpu(args)
+            else:
+                fetch_outputs_from_gcs(args)
     finally:
         if args.delete_instance_after_run:
             delete_instance(args)
