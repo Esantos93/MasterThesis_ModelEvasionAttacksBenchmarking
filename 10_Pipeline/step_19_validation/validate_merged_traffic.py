@@ -4,6 +4,7 @@ import argparse
 import binascii
 import json
 import sys
+import traceback
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.terminal_logging import default_step_log_path, terminal_log
 
 
 VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v1"
@@ -797,27 +799,50 @@ def parse_cli_args() -> argparse.Namespace:
     add("--input", dest="input_json", help="Path to Step 18 merged_modified_traffic.json.")
     add("--output-dir", help="Directory where validation outputs will be written.")
     add("--reference-json", help="Optional original Step 14 selected_packet_records.json for immutable checks.")
+    add("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_19_validation/<experiment_config_label>/step_19_validation_<timestamp>.log.")
     return parser.parse_args()
+
+
+#This function resolves the Step 19 terminal log path from CLI arguments and the active config.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+    config = load_json_config(args.config)
+    experiment_config_label = experiment_config_label_from_config(config)
+    return default_step_log_path(
+        experiment_root=build_experiment_root(config),
+        step_name="step_19_validation",
+        branch_label=experiment_config_label,
+        filename_prefix="step_19_validation",
+    )
 
 
 #This function is the command-line entry point for Step 19.
 def main() -> None:
     args = parse_cli_args()
-    result = run_validation(
-        config_path=args.config,
-        input_json=args.input_json,
-        output_dir=args.output_dir,
-        reference_json=args.reference_json,
-    )
-    print(f"Accepted packets: {result['accepted_packet_count']}")
-    print(f"Rejected packets: {result['rejected_packet_count']}")
-    print(f"Accepted groups: {result['accepted_group_count']}")
-    print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
-    print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
-    print(f"Errors: {result['error_count']}")
-    print(f"Warnings: {result['warning_count']}")
-    print(f"Validation report: {result['validation_report']}")
-    print(f"Validated output: {result['validated_output']}")
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 19 terminal log"):
+        try:
+            result = run_validation(
+                config_path=args.config,
+                input_json=args.input_json,
+                output_dir=args.output_dir,
+                reference_json=args.reference_json,
+            )
+        except Exception:
+            print("Step 19 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        print(f"Accepted packets: {result['accepted_packet_count']}")
+        print(f"Rejected packets: {result['rejected_packet_count']}")
+        print(f"Accepted groups: {result['accepted_group_count']}")
+        print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
+        print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
+        print(f"Errors: {result['error_count']}")
+        print(f"Warnings: {result['warning_count']}")
+        print(f"Validation report: {result['validation_report']}")
+        print(f"Validated output: {result['validated_output']}")
 
 
 if __name__ == "__main__":

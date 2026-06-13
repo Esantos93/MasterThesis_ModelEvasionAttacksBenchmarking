@@ -5,6 +5,7 @@ import copy
 import json
 import re
 import sys
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.terminal_logging import default_step_log_path, terminal_log
 
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
@@ -731,27 +733,51 @@ def parse_cli_args() -> argparse.Namespace:
     add("--prompt-root", help="Directory containing Step 16 prompt packages. Defaults to experiment/06_prompts.")
     add("--reference-json", help="Step 14 selected_packet_records.json. Defaults to experiment/04_packet_json/selected_packet_records.json.")
     add("--output-dir", help="Directory where Step 18 merged outputs will be written. Defaults to experiment/08_merged_outputs.")
+    add("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_18_llm_output_merge/<experiment_config_label>/step_18_llm_output_merge_<timestamp>.log.")
     return parser.parse_args()
+
+
+#This function resolves the Step 18 terminal log path from CLI arguments and the active config.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+    config = load_json_config(args.config)
+    experiment_root = build_experiment_root(config)
+    experiment_config_label = config.get("pipeline", {}).get("experiment_config_label")
+    return default_step_log_path(
+        experiment_root=experiment_root,
+        step_name="step_18_llm_output_merge",
+        branch_label=str(experiment_config_label) if experiment_config_label else None,
+        filename_prefix="step_18_llm_output_merge",
+    )
 
 
 #This function is the command-line entry point for Step 18.
 def main() -> None:
     args = parse_cli_args()
-    result = run_merge(
-        config_path=args.config,
-        input_root=args.input_root,
-        prompt_root=args.prompt_root,
-        reference_json=args.reference_json,
-        output_dir=args.output_dir,
-    )
-    print(f"Merged traffic records: {result['traffic_record_count']}")
-    print(f"Accepted groups: {result['accepted_group_count']}")
-    print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
-    print(f"Applied patches: {result['applied_patch_count']}")
-    print(f"Modified packets: {result['modified_packet_count']}")
-    print(f"Patch application errors: {result['patch_application_error_count']}")
-    print(f"Merged output: {result['merged_output']}")
-    print(f"Merge report: {result['merge_report']}")
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 18 terminal log"):
+        try:
+            result = run_merge(
+                config_path=args.config,
+                input_root=args.input_root,
+                prompt_root=args.prompt_root,
+                reference_json=args.reference_json,
+                output_dir=args.output_dir,
+            )
+        except Exception:
+            print("Step 18 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        print(f"Merged traffic records: {result['traffic_record_count']}")
+        print(f"Accepted groups: {result['accepted_group_count']}")
+        print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
+        print(f"Applied patches: {result['applied_patch_count']}")
+        print(f"Modified packets: {result['modified_packet_count']}")
+        print(f"Patch application errors: {result['patch_application_error_count']}")
+        print(f"Merged output: {result['merged_output']}")
+        print(f"Merge report: {result['merge_report']}")
 
 
 if __name__ == "__main__":
