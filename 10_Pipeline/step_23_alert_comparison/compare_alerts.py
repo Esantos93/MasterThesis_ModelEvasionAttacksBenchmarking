@@ -275,7 +275,7 @@ def compare_normalized_alerts(
             "detection_evidence": "Any normalized alert record counts as detection evidence, regardless of action value.",
             "classification_labels": ["Successful Evasion", "Alert Mutation", "Failed Evasion"],
             "new_post_alert_policy": "No standalone Induced Alert category. Unmatched POST-only alerts are reported as post_only_unmatched.",
-            "invalid_or_failed_modification_policy": "Invalid Traffic and Failed Modification come from previous pipeline stages, not from Snort comparison alone.",
+            "invalid_or_llm_output_failure_policy": "Invalid Traffic and LLM Output Failure come from previous pipeline stages, not from Snort comparison alone.",
         },
         "pre_normalization_metadata": pre_artifact.get("metadata", {}),
         "post_normalization_metadata": post_artifact.get("metadata", {}),
@@ -345,3 +345,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

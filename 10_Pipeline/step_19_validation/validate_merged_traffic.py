@@ -59,6 +59,7 @@ def default_paths(config: dict[str, Any], experiment_config_label: str) -> dict[
     return {
         "input_json": experiment_root / "08_merged_outputs" / experiment_config_label / "merged_modified_traffic.json",
         "output_dir": experiment_root / "09_validation" / experiment_config_label,
+        "reference_json": experiment_root / "04_packet_json" / "selected_packet_records.json",
     }
 
 #This function validates the minimum configuration keys required by Step 19.
@@ -287,6 +288,93 @@ def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tupl
             reference_by_packet_id[str(record["packet_id"])] = record
     return reference_by_packet_id, [str(field) for field in immutable_fields]
 
+#This function builds a packet-to-patch index from Step 18 patch_application metadata.
+#The index lets Step 19 verify that payload changes only occur on packets modified by accepted patches.
+def build_patch_application_indexes(merged_json: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], set[str]]:
+    patch_application = merged_json.get("patch_application", {})
+    if not isinstance(patch_application, dict):
+        return {}, set()
+    applied_patches = patch_application.get("applied_patches", [])
+    if not isinstance(applied_patches, list):
+        return {}, set()
+    patches_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    patch_group_keys = set()
+    for patch in applied_patches:
+        if not isinstance(patch, dict) or patch.get("packet_id") is None:
+            continue
+        packet_id = str(patch["packet_id"])
+        patches_by_packet[packet_id].append(patch)
+        prompt_unit_id = patch.get("prompt_unit_id")
+        if prompt_unit_id is not None:
+            patch_group_keys.add(f"patch::{prompt_unit_id}")
+    return patches_by_packet, patch_group_keys
+
+
+#This function extracts packet ids that belong to Step 17 groups classified as LLM Output Failure by Step 18.
+def llm_output_failure_packet_ids(llm_output_failure_groups: list[Any]) -> set[str]:
+    packet_ids = set()
+    for group in llm_output_failure_groups:
+        if not isinstance(group, dict):
+            continue
+        group_packet_ids = group.get("packet_ids", [])
+        if isinstance(group_packet_ids, list):
+            packet_ids.update(str(packet_id) for packet_id in group_packet_ids)
+    return packet_ids
+
+
+#This function maps packet ids back to accepted Step 18 prompt units whenever Step 18 could resolve prompt traceability.
+def accepted_group_by_packet_id(group_outcomes: dict[str, Any]) -> dict[str, str]:
+    accepted_groups = group_outcomes.get("accepted_groups", [])
+    if not isinstance(accepted_groups, list):
+        return {}
+    packet_to_group = {}
+    for group in accepted_groups:
+        if not isinstance(group, dict):
+            continue
+        prompt_unit_id = group.get("prompt_unit_id") or group.get("group_id")
+        if prompt_unit_id is None:
+            continue
+        packet_ids = group.get("packet_ids", [])
+        if not isinstance(packet_ids, list):
+            continue
+        for packet_id in packet_ids:
+            packet_to_group.setdefault(str(packet_id), str(prompt_unit_id))
+    return packet_to_group
+
+
+#This function verifies that a packet payload differs from Step 14 only when Step 18 recorded an accepted patch for it.
+def validate_patch_application_for_record(
+    *,
+    record: dict[str, Any],
+    record_index: int,
+    reference_by_packet_id: dict[str, dict[str, Any]],
+    patches_by_packet: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    if not reference_by_packet_id:
+        return []
+    packet_id = record.get("packet_id")
+    if packet_id is None:
+        return []
+    packet_id_text = str(packet_id)
+    reference = reference_by_packet_id.get(packet_id_text)
+    if reference is None:
+        return []
+    reference_payload = reference.get("payload_hex")
+    actual_payload = record.get("payload_hex")
+    if actual_payload == reference_payload:
+        return []
+    if packet_id_text not in patches_by_packet:
+        return [
+            issue(
+                "error",
+                "payload_changed_without_applied_patch",
+                "payload_hex differs from Step 14 but Step 18 did not record an accepted patch for this packet.",
+                record_index=record_index,
+                packet_id=packet_id,
+            )
+        ]
+    return []
+
 #This function compares one modified packet record against the original reference record for the same packet_id.
 #Any immutable-field difference is an error because it breaks PRE/POST traceability.
 def validate_against_reference(
@@ -333,11 +421,26 @@ def validate_against_reference(
     return issues
 
 
-#This function identifies the group that a packet record belongs to.
-#Step 19 validates at group level, so packet-level issues must be assigned back to their Step 18 group.
-def group_key_for_record(record: Any, record_index: int) -> tuple[str, str | None, str | None]:
+#This function identifies the validation group that a packet record belongs to.
+#Patch-modified packets are assigned to their prompt unit; untouched reference packets are isolated.
+def group_key_for_record(
+    record: Any,
+    record_index: int,
+    patches_by_packet: dict[str, list[dict[str, Any]]],
+    accepted_group_by_packet: dict[str, str],
+) -> tuple[str, str | None, str | None]:
     if not isinstance(record, dict):
         return (f"unassigned_record_{record_index}", None, None)
+    packet_id = record.get("packet_id")
+    if packet_id is not None:
+        patches = patches_by_packet.get(str(packet_id), [])
+        prompt_unit_ids = sorted({str(patch.get("prompt_unit_id")) for patch in patches if patch.get("prompt_unit_id") is not None})
+        if prompt_unit_ids:
+            prompt_unit_id = prompt_unit_ids[0]
+            return (f"patch::{prompt_unit_id}", None, prompt_unit_id)
+        prompt_unit_id = accepted_group_by_packet.get(str(packet_id))
+        if prompt_unit_id:
+            return (f"patch::{prompt_unit_id}", None, prompt_unit_id)
     merge_trace = record.get("_merge_trace")
     if isinstance(merge_trace, dict):
         condition = merge_trace.get("condition")
@@ -350,7 +453,7 @@ def group_key_for_record(record: Any, record_index: int) -> tuple[str, str | Non
     group_id = record.get("group_id")
     if group_id is not None:
         return (f"unknown_condition::{group_id}", None, str(group_id))
-    return (f"unassigned_record_{record_index}", None, None)
+    return ("uncovered_by_step17", None, None)
 
 
 #This function validates a full Step 18 merged traffic artifact.
@@ -371,7 +474,7 @@ def validate_merged_traffic(
             "accepted_packets": [],
             "rejected_packets": [],
             "invalid_traffic_groups": [],
-            "failed_modification_groups": [],
+            "llm_output_failure_groups": [],
             "summary": {"accepted_packet_count": 0, "rejected_packet_count": 0, "error_count": 1, "warning_count": 0},
         }
 
@@ -384,16 +487,19 @@ def validate_merged_traffic(
             "accepted_packets": [],
             "rejected_packets": [],
             "invalid_traffic_groups": [],
-            "failed_modification_groups": [],
+            "llm_output_failure_groups": [],
             "summary": {"accepted_packet_count": 0, "rejected_packet_count": 0, "error_count": 1, "warning_count": 0},
         }
 
     group_outcomes = merged_json.get("group_outcomes", {})
     if not isinstance(group_outcomes, dict):
         group_outcomes = {}
-    failed_modification_groups = group_outcomes.get("failed_modification_groups", [])
-    if not isinstance(failed_modification_groups, list):
-        failed_modification_groups = []
+    llm_output_failure_groups = group_outcomes.get("llm_output_failure_groups", [])
+    if not isinstance(llm_output_failure_groups, list):
+        llm_output_failure_groups = []
+    llm_output_failure_packet_id_set = llm_output_failure_packet_ids(llm_output_failure_groups)
+    patches_by_packet, _patch_group_keys = build_patch_application_indexes(merged_json)
+    accepted_group_by_packet = accepted_group_by_packet_id(group_outcomes)
 
     packet_id_counts = Counter(
         str(record.get("packet_id"))
@@ -408,7 +514,7 @@ def validate_merged_traffic(
 
     for record_index, record in enumerate(traffic, start=1):
         record_issues = validate_basic_record_schema(record, record_index, required_fields)
-        group_key, condition, group_id = group_key_for_record(record, record_index)
+        group_key, condition, group_id = group_key_for_record(record, record_index, patches_by_packet, accepted_group_by_packet)
         if group_key not in groups:
             groups[group_key] = {
                 "group_key": group_key,
@@ -438,6 +544,14 @@ def validate_merged_traffic(
                     record_index=record_index,
                     reference_by_packet_id=reference_by_packet_id,
                     immutable_fields=immutable_fields,
+                )
+            )
+            record_issues.extend(
+                validate_patch_application_for_record(
+                    record=record,
+                    record_index=record_index,
+                    reference_by_packet_id=reference_by_packet_id,
+                    patches_by_packet=patches_by_packet,
                 )
             )
 
@@ -483,19 +597,34 @@ def validate_merged_traffic(
     for item in preliminary_packets:
         record = item["record"]
         group_invalid = item["group_key"] in invalid_group_keys
+        packet_id = record.get("packet_id") if isinstance(record, dict) else None
+        llm_output_failure = packet_id is not None and str(packet_id) in llm_output_failure_packet_id_set
         packet_result = {
             "group_key": item["group_key"],
             "record_index": item["record_index"],
-            "packet_id": record.get("packet_id") if isinstance(record, dict) else None,
-            "status": "rejected" if group_invalid else "accepted",
-            "evaluation_status": "Invalid Traffic" if group_invalid else "Accepted for Reconstruction",
+            "packet_id": packet_id,
+            "status": "rejected" if group_invalid or llm_output_failure else "accepted",
+            "evaluation_status": (
+                "LLM Output Failure"
+                if llm_output_failure
+                else "Invalid Traffic"
+                if group_invalid
+                else "Accepted for Reconstruction"
+            ),
             "invalid_traffic": group_invalid,
+            "llm_output_failure": llm_output_failure,
             "record_has_direct_error": item["record_has_error"],
-            "group_rejection_reason": "group_contains_validation_error" if group_invalid else None,
+            "group_rejection_reason": (
+                "step17_llm_output_failure_group"
+                if llm_output_failure
+                else "group_contains_validation_error"
+                if group_invalid
+                else None
+            ),
             "issues": item["issues"],
         }
         packet_results.append(packet_result)
-        if group_invalid:
+        if group_invalid or llm_output_failure:
             rejected_packets.append(packet_result)
         elif isinstance(record, dict):
             accepted_packets.append(record)
@@ -515,6 +644,20 @@ def validate_merged_traffic(
             )
             warning_count += 1
 
+    covered_packet_ids = set(accepted_group_by_packet) | llm_output_failure_packet_id_set
+    merged_packet_ids = set(packet_id_counts)
+    uncovered_packet_ids = sorted(merged_packet_ids - covered_packet_ids)
+    if uncovered_packet_ids:
+        root_issues.append(
+            issue(
+                "warning",
+                "packets_not_covered_by_step17_traceability",
+                "Some merged packets are present in the full Step 14 reference but were not mapped to accepted or failed Step 17 prompt units.",
+                uncovered_packet_count=len(uncovered_packet_ids),
+            )
+        )
+        warning_count += 1
+
     issue_counts_by_reason: dict[str, int] = defaultdict(int)
     for packet_result in packet_results:
         for item in packet_result["issues"]:
@@ -532,9 +675,10 @@ def validate_merged_traffic(
             [group for group in group_results if group["invalid_traffic"]],
             key=lambda item: item["group_key"],
         ),
-        "failed_modification_groups": failed_modification_groups,
+        "llm_output_failure_groups": llm_output_failure_groups,
         "duplicate_packet_ids": sorted(duplicate_packet_ids),
         "reference_missing_packet_ids": reference_missing_packet_ids,
+        "uncovered_by_step17_packet_ids": uncovered_packet_ids,
         "summary": {
             "total_packet_count": len(traffic),
             "accepted_packet_count": len(accepted_packets),
@@ -542,11 +686,13 @@ def validate_merged_traffic(
             "total_group_count": len(group_results),
             "accepted_group_count": len(group_results) - len(invalid_group_keys),
             "invalid_traffic_group_count": len(invalid_group_keys),
-            "failed_modification_group_count": len(failed_modification_groups),
+            "llm_output_failure_group_count": len(llm_output_failure_groups),
+            "llm_output_failure_packet_count": len(llm_output_failure_packet_id_set),
             "error_count": error_count,
             "warning_count": warning_count,
             "duplicate_packet_id_count": len(duplicate_packet_ids),
             "reference_missing_packet_count": len(reference_missing_packet_ids),
+            "uncovered_by_step17_packet_count": len(uncovered_packet_ids),
             "invalid_traffic_packet_count": len(rejected_packets),
             "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
         },
@@ -568,11 +714,12 @@ def run_validation(
     paths = default_paths(config, experiment_config_label)
     input_path = Path(input_json).expanduser() if input_json else paths["input_json"]
     validation_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
+    reference_json_path = Path(reference_json).expanduser() if reference_json else paths["reference_json"]
     report_path = validation_output_dir / "validation_report.json"
     valid_output_path = validation_output_dir / "validated_modified_traffic.json"
 
     merged_json = read_json(input_path)
-    reference_by_packet_id, immutable_fields = build_reference_by_packet_id(reference_json)
+    reference_by_packet_id, immutable_fields = build_reference_by_packet_id(reference_json_path)
     validation = validate_merged_traffic(
         merged_json=merged_json,
         reference_by_packet_id=reference_by_packet_id,
@@ -588,7 +735,7 @@ def run_validation(
             "config_source": config.get("_config_path", ""),
             "experiment_config_label": experiment_config_label,
             "input_json": str(input_path),
-            "reference_json": str(reference_json) if reference_json else None,
+            "reference_json": str(reference_json_path),
             "classification_mapping_note": {
                 "validation_errors_map_to": "Invalid Traffic",
                 "evaluation_categories": [
@@ -596,9 +743,9 @@ def run_validation(
                     "Alert Mutation",
                     "Failed Evasion",
                     "Invalid Traffic",
-                    "Failed Modification",
+                    "LLM Output Failure",
                 ],
-                "failed_modification_source": "Step 18 maps rejected Step 17 groups to Failed Modification.",
+                "llm_output_failure_source": "Step 18 maps rejected Step 17 groups to LLM Output Failure.",
                 "invalid_traffic_source": "Step 19 maps validation errors in accepted Step 18 groups to Invalid Traffic.",
                 "validity_unit": "group",
                 "induced_alert_policy": (
@@ -611,7 +758,8 @@ def run_validation(
         "root_issues": validation["root_issues"],
         "duplicate_packet_ids": validation["duplicate_packet_ids"],
         "reference_missing_packet_ids": validation["reference_missing_packet_ids"],
-        "failed_modification_groups": validation["failed_modification_groups"],
+        "uncovered_by_step17_packet_ids": validation["uncovered_by_step17_packet_ids"],
+        "llm_output_failure_groups": validation["llm_output_failure_groups"],
         "invalid_traffic_groups": validation["invalid_traffic_groups"],
         "group_results": validation["group_results"],
         "packet_results": validation["packet_results"],
@@ -628,7 +776,7 @@ def run_validation(
             "rejected_packet_count": validation["summary"]["rejected_packet_count"],
             "accepted_group_count": validation["summary"]["accepted_group_count"],
             "invalid_traffic_group_count": validation["summary"]["invalid_traffic_group_count"],
-            "failed_modification_group_count": validation["summary"]["failed_modification_group_count"],
+            "llm_output_failure_group_count": validation["summary"]["llm_output_failure_group_count"],
         },
         "traffic": validation["accepted_packets"],
     }
@@ -665,7 +813,7 @@ def main() -> None:
     print(f"Rejected packets: {result['rejected_packet_count']}")
     print(f"Accepted groups: {result['accepted_group_count']}")
     print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
-    print(f"Failed modification groups: {result['failed_modification_group_count']}")
+    print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
     print(f"Errors: {result['error_count']}")
     print(f"Warnings: {result['warning_count']}")
     print(f"Validation report: {result['validation_report']}")
@@ -674,3 +822,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

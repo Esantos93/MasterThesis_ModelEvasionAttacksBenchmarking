@@ -496,7 +496,7 @@ def reconstruct_validated_traffic(
             "output_pcap": str(output_pcap_path),
             "reconstruction_policy": {
                 "source_of_reconstructible_post_traffic": "Step 19 validated_modified_traffic.json",
-                "failed_modification_groups_reconstructed": False,
+                "llm_output_failure_groups_reconstructed": False,
                 "invalid_traffic_groups_reconstructed": False,
                 "timestamp_policy": "preserve timestamp_epoch_pcap when numeric",
                 "checksum_policy": "Scapy recalculates checksums from rebuilt layers at write time",
@@ -599,3 +599,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
