@@ -46,7 +46,12 @@ class TeeStream:
         self.log_file = log_file
 
     def write(self, text: str) -> int:
-        written = self.stream.write(text)
+        try:
+            written = self.stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(self.stream, "encoding", None) or "utf-8"
+            safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+            written = self.stream.write(safe_text)
         self.log_file.write(text)
         self.log_file.flush()
         return written
@@ -103,6 +108,8 @@ def run_command(command: list[str], dry_run: bool) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
     assert process.stdout is not None
@@ -654,6 +661,9 @@ def run_step16(args: argparse.Namespace) -> None:
         command.extend(["--input-dir", args.step16_input_dir])
     if args.limit_prompts_s16 is not None:
         command.extend(["--limit-prompts-s16", str(args.limit_prompts_s16)])
+    if args.prompt_unit_id_s16:
+        for prompt_unit_id in args.prompt_unit_id_s16:
+            command.extend(["--prompt-unit-id", prompt_unit_id])
     if not args.step17_prompt_dir:
         args.step17_prompt_dir = step16_output_dir
     if not args.step17_prompt_manifest:
@@ -921,6 +931,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step16-input-dir")
     parser.add_argument("--step16-output-dir")
     parser.add_argument("--limit-prompts-s16", type=int, help="Build Step 16 prompts only for the first N Step 15 prompt units.")
+    parser.add_argument(
+        "--prompt-unit-id-s16",
+        action="append",
+        help="Build Step 16 prompts only for this Step 15 prompt_unit_id. Can be repeated.",
+    )
     parser.add_argument("--skip-step16", action="store_true")
 
     parser.add_argument("--limit-prompts-s17", type=int, help="Run Step 17 only for the first N Step 16 prompt packages.")

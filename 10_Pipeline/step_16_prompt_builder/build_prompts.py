@@ -105,14 +105,53 @@ def validate_prompt_unit(prompt_unit: Any, prompt_unit_path: Path) -> dict[str, 
     return prompt_unit
 
 
+#This function selects prompt units either by prefix limit or by explicit prompt_unit_id values.
+def select_prompt_unit_entries(
+    prompt_unit_entries: list[Any],
+    *,
+    limit_prompts_s16: int | None,
+    prompt_unit_ids: list[str] | None,
+) -> list[Any]:
+    if limit_prompts_s16 is not None and prompt_unit_ids:
+        raise ValueError("Use either --limit-prompts-s16 or --prompt-unit-id, not both.")
+    if limit_prompts_s16 is not None:
+        return prompt_unit_entries[:limit_prompts_s16]
+    if not prompt_unit_ids:
+        return prompt_unit_entries
+
+    requested_ids = [prompt_unit_id.strip() for prompt_unit_id in prompt_unit_ids if prompt_unit_id.strip()]
+    if len(requested_ids) != len(set(requested_ids)):
+        raise ValueError("--prompt-unit-id values must not contain duplicates.")
+    requested_set = set(requested_ids)
+    selected_entries = [
+        prompt_unit_entry
+        for prompt_unit_entry in prompt_unit_entries
+        if isinstance(prompt_unit_entry, dict) and prompt_unit_entry.get("prompt_unit_id") in requested_set
+    ]
+    found_ids = {
+        str(prompt_unit_entry.get("prompt_unit_id"))
+        for prompt_unit_entry in selected_entries
+        if isinstance(prompt_unit_entry, dict)
+    }
+    missing_ids = [prompt_unit_id for prompt_unit_id in requested_ids if prompt_unit_id not in found_ids]
+    if missing_ids:
+        joined_ids = ", ".join(missing_ids)
+        raise ValueError(f"Requested prompt_unit_id values were not found in group_manifest.json: {joined_ids}")
+    return selected_entries
+
+
 #This function resolves a compact prompt unit file path from a Step 15 manifest entry.
 #Manifest paths may point to another machine, so the current input directory is used as a filename fallback.
 def resolve_prompt_unit_file_path(prompt_unit_entry: dict[str, Any], input_dir: Path) -> Path:
     prompt_unit_file = prompt_unit_entry.get("prompt_unit_file")
     if isinstance(prompt_unit_file, str) and prompt_unit_file:
         manifest_path = Path(prompt_unit_file).expanduser()
-        if manifest_path.exists():
-            return manifest_path
+        try:
+            if manifest_path.exists():
+                return manifest_path
+        except OSError:
+            # Manifest entries may point to a source VM path whose parents are not accessible here.
+            pass
         fallback_path = input_dir / manifest_path.name
         if fallback_path.exists():
             return fallback_path
@@ -386,6 +425,7 @@ def run_prompt_builder(
     output_dir: str | Path | None,
     cloud_root: str | Path,
     limit_prompts_s16: int | None,
+    prompt_unit_ids: list[str] | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
@@ -408,7 +448,11 @@ def run_prompt_builder(
 
     group_manifest = validate_group_manifest(read_json(manifest_path), manifest_path)
     prompt_unit_entries = group_manifest["prompt_units"]
-    selected_entries = prompt_unit_entries[:limit_prompts_s16] if limit_prompts_s16 is not None else prompt_unit_entries
+    selected_entries = select_prompt_unit_entries(
+        prompt_unit_entries,
+        limit_prompts_s16=limit_prompts_s16,
+        prompt_unit_ids=prompt_unit_ids,
+    )
 
     clear_previous_output_files(output_prompt_dir)
     prompt_summaries = []
@@ -476,6 +520,11 @@ def parse_cli_args() -> argparse.Namespace:
         help="RISE cloud root used for default input and output paths.",
     )
     parser.add_argument("--limit-prompts-s16", type=int, help="Build prompts only for the first N Step 15 prompt units.")
+    parser.add_argument(
+        "--prompt-unit-id",
+        action="append",
+        help="Build prompts only for this Step 15 prompt_unit_id. Can be repeated. Mutually exclusive with --limit-prompts-s16.",
+    )
     return parser.parse_args()
 
 
@@ -488,6 +537,7 @@ def main() -> None:
         output_dir=args.output_dir,
         cloud_root=args.cloud_root,
         limit_prompts_s16=args.limit_prompts_s16,
+        prompt_unit_ids=args.prompt_unit_id,
     )
     print(f"Prompt packages written: {result['prompt_count']}")
     print(f"Source prompt units available: {result['source_group_count']}")
