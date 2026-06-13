@@ -602,11 +602,21 @@ def validate_merged_traffic(
 
     group_results = []
     invalid_group_keys = set()
+    llm_output_failure_group_keys = set()
     for group in groups.values():
         group_has_error = any(item["severity"] == "error" for item in group["issues"])
-        group_status = "Invalid Traffic" if group_has_error else "Accepted for Reconstruction"
+        group_has_llm_output_failure = any(str(packet_id) in llm_output_failure_packet_id_set for packet_id in group["packet_ids"])
+        group_status = (
+            "Invalid Traffic"
+            if group_has_error
+            else "LLM Output Failure"
+            if group_has_llm_output_failure
+            else "Accepted for Reconstruction"
+        )
         if group_has_error:
             invalid_group_keys.add(group["group_key"])
+        if group_has_llm_output_failure:
+            llm_output_failure_group_keys.add(group["group_key"])
         group_results.append(
             {
                 "group_key": group["group_key"],
@@ -614,6 +624,7 @@ def validate_merged_traffic(
                 "group_id": group["group_id"],
                 "status": group_status,
                 "invalid_traffic": group_has_error,
+                "llm_output_failure": group_has_llm_output_failure,
                 "packet_count": len(group["record_indexes"]),
                 "packet_ids": group["packet_ids"],
                 "record_indexes": group["record_indexes"],
@@ -722,9 +733,10 @@ def validate_merged_traffic(
             "accepted_packet_count": len(accepted_packets),
             "rejected_packet_count": len(rejected_packets),
             "total_group_count": len(group_results),
-            "accepted_group_count": len(group_results) - len(invalid_group_keys),
+            "accepted_group_count": len(group_results) - len(invalid_group_keys) - len(llm_output_failure_group_keys),
             "invalid_traffic_group_count": len(invalid_group_keys),
             "llm_output_failure_group_count": len(llm_output_failure_groups),
+            "llm_output_failure_rejected_group_count": len(llm_output_failure_group_keys),
             "llm_output_failure_packet_count": len(llm_output_failure_packet_id_set),
             "llm_output_failure_rejected_packet_count": len(llm_output_failure_packets),
             "error_count": error_count,
