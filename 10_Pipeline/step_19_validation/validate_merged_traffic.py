@@ -324,6 +324,23 @@ def llm_output_failure_packet_ids(llm_output_failure_groups: list[Any]) -> set[s
     return packet_ids
 
 
+#This function maps packet ids back to the Step 18 prompt unit that caused an LLM Output Failure.
+def llm_output_failure_group_by_packet_id(llm_output_failure_groups: list[Any]) -> dict[str, str]:
+    packet_to_group = {}
+    for group in llm_output_failure_groups:
+        if not isinstance(group, dict):
+            continue
+        prompt_unit_id = group.get("prompt_unit_id") or group.get("group_id")
+        if prompt_unit_id is None:
+            continue
+        packet_ids = group.get("packet_ids", [])
+        if not isinstance(packet_ids, list):
+            continue
+        for packet_id in packet_ids:
+            packet_to_group.setdefault(str(packet_id), str(prompt_unit_id))
+    return packet_to_group
+
+
 #This function maps packet ids back to accepted Step 18 prompt units whenever Step 18 could resolve prompt traceability.
 def accepted_group_by_packet_id(group_outcomes: dict[str, Any]) -> dict[str, str]:
     accepted_groups = group_outcomes.get("accepted_groups", [])
@@ -430,6 +447,7 @@ def group_key_for_record(
     record_index: int,
     patches_by_packet: dict[str, list[dict[str, Any]]],
     accepted_group_by_packet: dict[str, str],
+    llm_output_failure_group_by_packet: dict[str, str],
 ) -> tuple[str, str | None, str | None]:
     if not isinstance(record, dict):
         return (f"unassigned_record_{record_index}", None, None)
@@ -443,6 +461,9 @@ def group_key_for_record(
         prompt_unit_id = accepted_group_by_packet.get(str(packet_id))
         if prompt_unit_id:
             return (f"patch::{prompt_unit_id}", None, prompt_unit_id)
+        prompt_unit_id = llm_output_failure_group_by_packet.get(str(packet_id))
+        if prompt_unit_id:
+            return (f"llm_output_failure::{prompt_unit_id}", None, prompt_unit_id)
     merge_trace = record.get("_merge_trace")
     if isinstance(merge_trace, dict):
         condition = merge_trace.get("condition")
@@ -500,6 +521,7 @@ def validate_merged_traffic(
     if not isinstance(llm_output_failure_groups, list):
         llm_output_failure_groups = []
     llm_output_failure_packet_id_set = llm_output_failure_packet_ids(llm_output_failure_groups)
+    llm_output_failure_group_by_packet = llm_output_failure_group_by_packet_id(llm_output_failure_groups)
     patches_by_packet, _patch_group_keys = build_patch_application_indexes(merged_json)
     accepted_group_by_packet = accepted_group_by_packet_id(group_outcomes)
 
@@ -516,7 +538,13 @@ def validate_merged_traffic(
 
     for record_index, record in enumerate(traffic, start=1):
         record_issues = validate_basic_record_schema(record, record_index, required_fields)
-        group_key, condition, group_id = group_key_for_record(record, record_index, patches_by_packet, accepted_group_by_packet)
+        group_key, condition, group_id = group_key_for_record(
+            record,
+            record_index,
+            patches_by_packet,
+            accepted_group_by_packet,
+            llm_output_failure_group_by_packet,
+        )
         if group_key not in groups:
             groups[group_key] = {
                 "group_key": group_key,
@@ -596,6 +624,8 @@ def validate_merged_traffic(
     packet_results = []
     accepted_packets = []
     rejected_packets = []
+    invalid_traffic_packets = []
+    llm_output_failure_packets = []
     for item in preliminary_packets:
         record = item["record"]
         group_invalid = item["group_key"] in invalid_group_keys
@@ -628,6 +658,10 @@ def validate_merged_traffic(
         packet_results.append(packet_result)
         if group_invalid or llm_output_failure:
             rejected_packets.append(packet_result)
+            if group_invalid:
+                invalid_traffic_packets.append(packet_result)
+            if llm_output_failure:
+                llm_output_failure_packets.append(packet_result)
         elif isinstance(record, dict):
             accepted_packets.append(record)
 
@@ -673,6 +707,8 @@ def validate_merged_traffic(
         "group_results": sorted(group_results, key=lambda item: item["group_key"]),
         "accepted_packets": accepted_packets,
         "rejected_packets": rejected_packets,
+        "invalid_traffic_packets": invalid_traffic_packets,
+        "llm_output_failure_packets": llm_output_failure_packets,
         "invalid_traffic_groups": sorted(
             [group for group in group_results if group["invalid_traffic"]],
             key=lambda item: item["group_key"],
@@ -690,12 +726,13 @@ def validate_merged_traffic(
             "invalid_traffic_group_count": len(invalid_group_keys),
             "llm_output_failure_group_count": len(llm_output_failure_groups),
             "llm_output_failure_packet_count": len(llm_output_failure_packet_id_set),
+            "llm_output_failure_rejected_packet_count": len(llm_output_failure_packets),
             "error_count": error_count,
             "warning_count": warning_count,
             "duplicate_packet_id_count": len(duplicate_packet_ids),
             "reference_missing_packet_count": len(reference_missing_packet_ids),
             "uncovered_by_step17_packet_count": len(uncovered_packet_ids),
-            "invalid_traffic_packet_count": len(rejected_packets),
+            "invalid_traffic_packet_count": len(invalid_traffic_packets),
             "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
         },
     }
