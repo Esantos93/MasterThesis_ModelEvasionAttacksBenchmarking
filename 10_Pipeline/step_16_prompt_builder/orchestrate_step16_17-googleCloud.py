@@ -135,6 +135,8 @@ def remote_target(args: argparse.Namespace) -> str:
 
 # This function runs a command inside the Google Compute VM over gcloud SSH.
 def run_remote(args: argparse.Namespace, remote_command: str) -> None:
+    if "\n" in remote_command:
+        remote_command = "; ".join(line for line in remote_command.splitlines() if line.strip())
     command = [
         GCLOUD_COMMAND,
         "compute",
@@ -154,6 +156,8 @@ def run_remote(args: argparse.Namespace, remote_command: str) -> None:
 
 # This function runs a remote command and returns stdout. It is used when the local script needs information from the VM, such as the remote home directory.
 def capture_remote(args: argparse.Namespace, remote_command: str) -> str:
+    if "\n" in remote_command:
+        remote_command = "; ".join(line for line in remote_command.splitlines() if line.strip())
     command = [
         GCLOUD_COMMAND,
         "compute",
@@ -730,7 +734,7 @@ def upload_outputs_to_gcs(args: argparse.Namespace) -> None:
     run_id = resolve_step17_run_id(args)
     remote_prompt_dir = resolve_step16_output_dir(args)
     remote_step17_root = resolve_step17_output_root(args)
-    remote_model_run_dirs = list_remote_model_run_dirs(args, remote_step17_root, run_id)
+    remote_model_run_dirs = [] if args.skip_step17 else list_remote_model_run_dirs(args, remote_step17_root, run_id)
     gcs_run_root = resolve_gcs_run_root(args)
     gcs_output_root = resolve_gcs_output_root(args)
     metadata_dirs = " ".join(
@@ -745,7 +749,7 @@ def upload_outputs_to_gcs(args: argparse.Namespace) -> None:
         "rm -f \"$marker\"",
     ]
 
-    if args.fetch_all_prompts:
+    if args.fetch_all_prompts or args.skip_step17:
         commands.append(
             f"gcloud storage rsync -r {shlex.quote(remote_prompt_dir)} {shlex.quote(gcs_run_root + '/06_prompts')}"
         )
@@ -809,9 +813,15 @@ def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
     gcs_run_root = resolve_gcs_run_root(args)
     prompt_manifest_gcs = f"{gcs_run_root}/06_prompts/prompt_manifest.json"
     step17_outputs_gcs = f"{gcs_run_root}/07_llm_outputs/"
-    if not gcs_path_exists(args, prompt_manifest_gcs) or not gcs_path_exists(args, step17_outputs_gcs):
+    if not gcs_path_exists(args, prompt_manifest_gcs):
         raise FileNotFoundError(
-            f"No complete GCS artifacts found for run_id={run_id} under {gcs_run_root}. "
+            f"No Step 16 prompt artifacts found for run_id={run_id} under {gcs_run_root}. "
+            "Run first with --upload-outputs-to-gcs, or pass both --upload-outputs-to-gcs "
+            "and --fetch-outputs-from-gcs in the same run."
+        )
+    if not args.skip_step17 and not gcs_path_exists(args, step17_outputs_gcs):
+        raise FileNotFoundError(
+            f"No complete Step 17 GCS artifacts found for run_id={run_id} under {gcs_run_root}. "
             "Run first with --upload-outputs-to-gcs, or pass both --upload-outputs-to-gcs "
             "and --fetch-outputs-from-gcs in the same run."
         )
@@ -829,6 +839,9 @@ def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
         ],
         args.dry_run,
     )
+
+    if args.skip_step17:
+        return
 
     for gcs_model_dir in list_gcs_model_output_dirs(args, gcs_run_root):
         model_name = gcs_model_dir.rstrip("/").split("/")[-1]
