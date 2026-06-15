@@ -63,7 +63,7 @@ def default_paths(
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     pre_dir = experiment_root / "12_alerts_processed" / "pre"
     post_dir = experiment_root / "12_alerts_processed" / "post" / experiment_config_label
-    comparison_dir = experiment_root / "13_comparison" / experiment_config_label
+    comparison_dir = experiment_root / "13_comparison"
     return {
         "pre_normalized": pre_dir / "normalized-alerts__traffic-pre.json",
         "post_normalized": post_dir / f"normalized-alerts__traffic-post__experiment-config-{experiment_config_label}.json",
@@ -338,12 +338,11 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
         return Path(args.log_file).expanduser()
     config = load_json_config(args.config)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
     experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
     return default_step_log_path(
         experiment_root=experiment_root,
         step_name="step_23_alert_comparison",
-        branch_label=experiment_config_label,
+        branch_label=None,
         filename_prefix="step_23_alert_comparison",
     )
 
