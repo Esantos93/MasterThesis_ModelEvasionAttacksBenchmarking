@@ -18,6 +18,7 @@ from common.io_utils import write_json
 
 
 NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v1"
+PRE_COMMON_EXPERIMENT_LABEL = "PRE-modification-traffic"
 
 
 # This function reads a JSON file and returns the parsed Python value.
@@ -57,12 +58,15 @@ def default_snort_input_dir(
     config: dict[str, Any],
     traffic_version: str,
     experiment_config_label: str,
+    post_run_label: str | None = None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     if traffic_version == "pre":
         return experiment_root / "11_snort_raw" / "pre"
-    return experiment_root / "11_snort_raw" / "post" / experiment_config_label
+    if not post_run_label:
+        raise ValueError("POST normalization requires --post-run-label unless --input-dir is provided explicitly.")
+    return experiment_root / "11_snort_raw" / "post" / post_run_label
 
 
 # This function resolves the default Step 22 output directory for PRE or POST normalized alerts.
@@ -134,7 +138,7 @@ def normalize_one_alert(
     raw_alert: dict[str, Any],
     alert_index: int,
     traffic_version: str,
-    experiment_config_label: str,
+    experiment_config_label: str | None,
 ) -> dict[str, Any]:
     gid = optional_int(raw_alert.get("gid"))
     sid = optional_int(raw_alert.get("sid"))
@@ -205,7 +209,7 @@ def normalize_one_traffic_version(
     *,
     config: dict[str, Any],
     traffic_version: str,
-    experiment_config_label: str,
+    configured_experiment_config_label: str,
     input_dir: Path,
     output_dir: Path,
     input_alert_json: Path | None,
@@ -214,6 +218,19 @@ def normalize_one_traffic_version(
     if not metadata_path.exists():
         raise FileNotFoundError(f"Step 21 execution metadata does not exist: {metadata_path}")
     execution_metadata = read_json(metadata_path)
+    source_experiment_config_label = execution_metadata.get("experiment_config_label")
+    source_traffic_scope = execution_metadata.get("traffic_scope")
+    if traffic_version == "post" and source_experiment_config_label != configured_experiment_config_label:
+        raise ValueError(
+            "Step 21 POST metadata experiment_config_label does not match the active config: "
+            f"{source_experiment_config_label!r} != {configured_experiment_config_label!r}"
+        )
+    normalized_experiment_config_label = (
+        PRE_COMMON_EXPERIMENT_LABEL
+        if traffic_version == "pre" and source_experiment_config_label is None
+        else source_experiment_config_label
+    )
+
     alert_json_path = input_alert_json if input_alert_json else resolve_converted_alert_json(input_dir, execution_metadata)
     raw_alerts = read_json(alert_json_path)
     if not isinstance(raw_alerts, list):
@@ -223,15 +240,15 @@ def normalize_one_traffic_version(
     for alert_index, raw_alert in enumerate(raw_alerts, start=1):
         if not isinstance(raw_alert, dict):
             raise ValueError(f"Alert record {alert_index} is not a JSON object in: {alert_json_path}")
-        normalized_alerts.append(normalize_one_alert(raw_alert, alert_index, traffic_version, experiment_config_label))
+        normalized_alerts.append(normalize_one_alert(raw_alert, alert_index, traffic_version, normalized_experiment_config_label))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if traffic_version == "pre":
         normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}.json"
         metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}.json"
     else:
-        normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
-        metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}__experiment-config-{experiment_config_label}.json"
+        normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}__experiment-config-{configured_experiment_config_label}.json"
+        metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}__experiment-config-{configured_experiment_config_label}.json"
     summary = summarize_alerts(normalized_alerts)
     normalized_artifact = {
         "metadata": {
@@ -240,7 +257,10 @@ def normalize_one_traffic_version(
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "traffic_version": traffic_version,
-            "experiment_config_label": experiment_config_label,
+            "configured_experiment_config_label": configured_experiment_config_label,
+            "source_experiment_config_label": source_experiment_config_label,
+            "normalized_experiment_config_label": normalized_experiment_config_label,
+            "traffic_scope": source_traffic_scope,
             "source_snort_raw_dir": str(input_dir),
             "source_execution_metadata": str(metadata_path),
             "source_alert_json": str(alert_json_path),
@@ -265,7 +285,10 @@ def normalize_one_traffic_version(
         "schema_version": "snort_alert_normalization_metadata_v1",
         "generated_at_utc": utc_now(),
         "traffic_version": traffic_version,
-        "experiment_config_label": experiment_config_label,
+        "configured_experiment_config_label": configured_experiment_config_label,
+        "source_experiment_config_label": source_experiment_config_label,
+        "normalized_experiment_config_label": normalized_experiment_config_label,
+        "traffic_scope": source_traffic_scope,
         "source_alert_json": str(alert_json_path),
         "source_execution_metadata": str(metadata_path),
         "source_step_21_metadata": execution_metadata,
@@ -289,6 +312,7 @@ def normalize_alerts(
     config_path: str | Path,
     traffic_version: str,
     experiment_root: str | Path | None,
+    post_run_label: str | None,
     input_dir: str | Path | None,
     output_dir: str | Path | None,
     input_alert_json: str | Path | None,
@@ -299,13 +323,23 @@ def normalize_alerts(
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
     if (input_dir or output_dir or input_alert_json) and len(selected_versions) != 1:
         raise ValueError("--input-dir, --output-dir, and --input-alert-json overrides are only valid for one traffic version.")
+    if post_run_label and input_dir:
+        raise ValueError("--post-run-label cannot be combined with --input-dir.")
+    if "post" in selected_versions and not post_run_label and not input_dir:
+        raise ValueError("POST normalization requires --post-run-label unless --input-dir is provided explicitly.")
 
     results = []
     for selected_version in selected_versions:
         resolved_input_dir = (
             Path(input_dir).expanduser()
             if input_dir
-            else default_snort_input_dir(config, selected_version, experiment_config_label, experiment_root)
+            else default_snort_input_dir(
+                config,
+                selected_version,
+                experiment_config_label,
+                post_run_label if selected_version == "post" else None,
+                experiment_root,
+            )
         )
         resolved_output_dir = (
             Path(output_dir).expanduser()
@@ -317,7 +351,7 @@ def normalize_alerts(
             normalize_one_traffic_version(
                 config=config,
                 traffic_version=selected_version,
-                experiment_config_label=experiment_config_label,
+                configured_experiment_config_label=experiment_config_label,
                 input_dir=resolved_input_dir,
                 output_dir=resolved_output_dir,
                 input_alert_json=resolved_input_alert_json,
@@ -333,6 +367,7 @@ def parse_cli_args() -> argparse.Namespace:
     add("--config", required=True, help="Path to the experiment JSON config.")
     add("--traffic-version", choices=["pre", "post", "both"], default="both", help="Traffic side to normalize.")
     add("--experiment-root", help="Optional experiment root override.")
+    add("--post-run-label", help="Required for POST default input resolution. Step 21 POST run label under 11_snort_raw/post/.")
     add("--input-dir", help="Explicit Step 21 input directory. Only valid for one traffic version.")
     add("--input-alert-json", help="Explicit converted Step 21 alerts__*.json path. Only valid for one traffic version.")
     add("--output-dir", help="Explicit Step 22 output directory. Only valid for one traffic version.")
@@ -346,6 +381,7 @@ def main() -> None:
         config_path=args.config,
         traffic_version=args.traffic_version,
         experiment_root=args.experiment_root,
+        post_run_label=args.post_run_label,
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         input_alert_json=args.input_alert_json,
