@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 from common.naming import sanitize_name_component
+from common.terminal_logging import default_step_log_path, terminal_log
 
 
 # This schema version identifies the raw Snort execution metadata written by Step 21.
@@ -419,6 +421,24 @@ def run_snort(
     return runs
 
 
+# This function resolves the terminal log path for Step 21.
+# Terminal logs are grouped by the requested traffic execution scope, while POST artifacts remain separated by experiment_config_label.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+
+    config = load_json_config(args.config)
+    validate_config(config)
+    experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
+    branch_label = f"{args.traffic_version}-traffic"
+    return default_step_log_path(
+        experiment_root=experiment_root,
+        step_name="step_21_snort_runner",
+        branch_label=branch_label,
+        filename_prefix="step_21_snort_runner",
+    )
+
+
 # This function parses command-line arguments for Step 21.
 # The experiment_config_label, ruleset, policy, and built-in rule settings are intentionally read from the config rather than from CLI flags.
 def parse_cli_args() -> argparse.Namespace:
@@ -428,6 +448,7 @@ def parse_cli_args() -> argparse.Namespace:
     add("--traffic-version", choices=["pre", "post", "both"], default="both", help="Traffic side to run.")
     add("--input-pcap", help="Explicit PCAP path. Only valid for a single resolved run.")
     add("--output-dir", help="Explicit output directory. Only valid for a single resolved run.")
+    add("--log-file", help="Optional explicit terminal log file path.")
     add(
         "--experiment-root",
         help=(
@@ -446,17 +467,25 @@ def main() -> None:
     if (args.input_pcap or args.output_dir) and args.traffic_version == "both":
         raise ValueError("--input-pcap and --output-dir overrides are only valid for one resolved run.")
 
-    runs = run_snort(
-        config_path=args.config,
-        traffic_version=args.traffic_version,
-        input_pcap=args.input_pcap,
-        output_dir=args.output_dir,
-        experiment_root=args.experiment_root,
-        dry_run=args.dry_run,
-    )
-    for run in runs:
-        label = run["experiment_config_label"] or run["traffic_scope"]
-        print(f"{run['traffic_version']} {label}: exit_code={run['exit_code']} output_dir={run['output_dir']}")
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 21 terminal log"):
+        try:
+            runs = run_snort(
+                config_path=args.config,
+                traffic_version=args.traffic_version,
+                input_pcap=args.input_pcap,
+                output_dir=args.output_dir,
+                experiment_root=args.experiment_root,
+                dry_run=args.dry_run,
+            )
+        except Exception:
+            print("Step 21 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        for run in runs:
+            label = run["experiment_config_label"] or run["traffic_scope"]
+            print(f"{run['traffic_version']} {label}: exit_code={run['exit_code']} output_dir={run['output_dir']}")
 
 
 if __name__ == "__main__":
