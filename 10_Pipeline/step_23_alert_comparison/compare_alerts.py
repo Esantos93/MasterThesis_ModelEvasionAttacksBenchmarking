@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.terminal_logging import default_step_log_path, terminal_log
 
 
 COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v1"
@@ -183,12 +185,20 @@ def compare_alert_multisets(pre_alerts: list[dict[str, Any]], post_alerts: list[
         )
 
     classification_counts = Counter(record["classification"] for record in comparison_records)
+    pre_signature_counts = Counter(alert["signature_key"] for alert in pre_alerts)
+    post_signature_counts = Counter(alert["signature_key"] for alert in post_alerts)
+    pre_detector_source_counts = Counter(str(alert.get("detector_source")) for alert in pre_alerts)
+    post_detector_source_counts = Counter(str(alert.get("detector_source")) for alert in post_alerts)
     return {
         "records": comparison_records,
         "post_only_unmatched_alerts": post_only_records,
         "summary": {
             "pre_alert_count": len(pre_alerts),
             "post_alert_count": len(post_alerts),
+            "pre_unique_signature_count": len(pre_signature_counts),
+            "post_unique_signature_count": len(post_signature_counts),
+            "pre_detector_source_counts": dict(sorted(pre_detector_source_counts.items())),
+            "post_detector_source_counts": dict(sorted(post_detector_source_counts.items())),
             "same_signature_matches": same_signature_matches,
             "different_signature_replacements": mutation_matches,
             "post_only_unmatched_count": len(post_only_records),
@@ -307,11 +317,35 @@ def compare_normalized_alerts(
     return {
         "pre_alert_count": comparison["summary"]["pre_alert_count"],
         "post_alert_count": comparison["summary"]["post_alert_count"],
+        "pre_unique_signature_count": comparison["summary"]["pre_unique_signature_count"],
+        "post_unique_signature_count": comparison["summary"]["post_unique_signature_count"],
+        "pre_detector_source_counts": comparison["summary"]["pre_detector_source_counts"],
+        "post_detector_source_counts": comparison["summary"]["post_detector_source_counts"],
         "classification_counts": comparison["summary"]["classification_counts"],
+        "successful_evasion_count": comparison["summary"]["successful_evasion_count"],
+        "alert_mutation_count": comparison["summary"]["alert_mutation_count"],
+        "failed_evasion_count": comparison["summary"]["failed_evasion_count"],
+        "post_only_unmatched_count": comparison["summary"]["post_only_unmatched_count"],
         "alert_comparison": str(comparison_path),
         "signature_comparison_summary": str(signature_summary_path),
         "comparison_metadata": str(metadata_path),
     }
+
+
+# This function resolves the terminal log path for Step 23.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+    config = load_json_config(args.config)
+    validate_config(config)
+    experiment_config_label = experiment_config_label_from_config(config)
+    experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
+    return default_step_log_path(
+        experiment_root=experiment_root,
+        step_name="step_23_alert_comparison",
+        branch_label=experiment_config_label,
+        filename_prefix="step_23_alert_comparison",
+    )
 
 
 # This function parses Step 23 command-line arguments.
@@ -323,24 +357,41 @@ def parse_cli_args() -> argparse.Namespace:
     add("--pre-normalized", help="Explicit normalized PRE alert artifact.")
     add("--post-normalized", help="Explicit normalized POST alert artifact.")
     add("--output-dir", help="Explicit Step 23 output directory.")
+    add("--log-file", help="Optional explicit terminal log file path.")
     return parser.parse_args()
 
 
 # This function is the command-line entry point.
 def main() -> None:
     args = parse_cli_args()
-    result = compare_normalized_alerts(
-        config_path=args.config,
-        experiment_root=args.experiment_root,
-        pre_normalized=args.pre_normalized,
-        post_normalized=args.post_normalized,
-        output_dir=args.output_dir,
-    )
-    print(f"PRE alerts: {result['pre_alert_count']}")
-    print(f"POST alerts: {result['post_alert_count']}")
-    print(f"Classifications: {result['classification_counts']}")
-    print(f"Alert comparison: {result['alert_comparison']}")
-    print(f"Signature summary: {result['signature_comparison_summary']}")
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 23 terminal log"):
+        try:
+            result = compare_normalized_alerts(
+                config_path=args.config,
+                experiment_root=args.experiment_root,
+                pre_normalized=args.pre_normalized,
+                post_normalized=args.post_normalized,
+                output_dir=args.output_dir,
+            )
+        except Exception:
+            print("Step 23 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        print(f"PRE alerts: {result['pre_alert_count']}")
+        print(f"POST alerts: {result['post_alert_count']}")
+        print(f"PRE unique signatures: {result['pre_unique_signature_count']}")
+        print(f"POST unique signatures: {result['post_unique_signature_count']}")
+        print(f"PRE detector sources: {result['pre_detector_source_counts']}")
+        print(f"POST detector sources: {result['post_detector_source_counts']}")
+        print(f"Classifications: {result['classification_counts']}")
+        print(f"Successful evasion: {result['successful_evasion_count']}")
+        print(f"Alert mutation: {result['alert_mutation_count']}")
+        print(f"Failed evasion: {result['failed_evasion_count']}")
+        print(f"POST-only unmatched: {result['post_only_unmatched_count']}")
+        print(f"Alert comparison: {result['alert_comparison']}")
+        print(f"Signature summary: {result['signature_comparison_summary']}")
 
 
 if __name__ == "__main__":
