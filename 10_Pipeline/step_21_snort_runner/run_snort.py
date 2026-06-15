@@ -30,6 +30,11 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# This function returns a compact UTC minute timestamp for POST output run folders.
+def utc_minute_timestamp_for_path() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+
+
 # This function builds the experiment root directory from the experiment output_root and experiment_id fields in the config.
 def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
@@ -95,17 +100,19 @@ def default_input_pcap(
 
 
 # This function returns the default Step 21 output directory for a Snort run.
-# PRE artifacts are stored in a single common directory, while POST artifacts are separated by experiment_config_label.
+# PRE artifacts are stored in a single common directory, while POST artifacts are separated by execution timestamp.
 def default_output_dir(
     config: dict[str, Any],
     traffic_version: str,
-    experiment_config_label: str | None,
+    post_run_label: str | None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     if traffic_version == "pre":
         return experiment_root / "11_snort_raw" / "pre"
-    return experiment_root / "11_snort_raw" / "post" / experiment_config_label
+    if not post_run_label:
+        raise ValueError("post_run_label must be provided for POST Step 21 output directories.")
+    return experiment_root / "11_snort_raw" / "post" / post_run_label
 
 
 # This function builds the inline Lua ips table passed to Snort through --lua.
@@ -298,6 +305,7 @@ def run_one_snort_execution(
     config: dict[str, Any],
     traffic_version: str,
     experiment_config_label: str | None,
+    post_run_label: str | None,
     input_pcap_path: Path,
     output_dir: Path,
     dry_run: bool,
@@ -349,6 +357,7 @@ def run_one_snort_execution(
         "traffic_version": traffic_version,
         "traffic_scope": "pre_common" if traffic_version == "pre" else "post_experiment_config",
         "experiment_config_label": experiment_config_label,
+        "post_run_label": post_run_label,
         "input_pcap": str(input_pcap_path),
         "output_dir": str(output_dir),
         "snort_binary": expand_config_path(snort_config["snort_binary"]),
@@ -396,8 +405,10 @@ def run_snort(
     experiment_config_label = experiment_config_label_from_config(config)
     runs: list[dict[str, Any]] = []
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
+    post_run_label = f"run-{utc_minute_timestamp_for_path()}" if "post" in selected_versions else None
     for selected_version in selected_versions:
         run_experiment_config_label = None if selected_version == "pre" else experiment_config_label
+        run_post_label = post_run_label if selected_version == "post" else None
         resolved_input = (
             Path(input_pcap).expanduser()
             if input_pcap and len(selected_versions) == 1
@@ -406,13 +417,14 @@ def run_snort(
         resolved_output_dir = (
             Path(output_dir).expanduser()
             if output_dir and len(selected_versions) == 1
-            else default_output_dir(config, selected_version, run_experiment_config_label, experiment_root)
+            else default_output_dir(config, selected_version, run_post_label, experiment_root)
         )
         runs.append(
             run_one_snort_execution(
                 config=config,
                 traffic_version=selected_version,
                 experiment_config_label=run_experiment_config_label,
+                post_run_label=run_post_label,
                 input_pcap_path=resolved_input,
                 output_dir=resolved_output_dir,
                 dry_run=dry_run,
