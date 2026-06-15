@@ -4,6 +4,7 @@ import argparse
 import binascii
 import json
 import sys
+import traceback
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.terminal_logging import default_step_log_path, terminal_log
 
 
 REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v1"
@@ -556,6 +558,24 @@ def run_reconstruction(
     )
 
 
+# This function resolves the terminal log path for Step 20.
+# By default, logs are written under the active experiment root and branch label so Ubuntu runs keep their terminal evidence next to the artifacts.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+
+    config = load_json_config(args.config)
+    validate_config(config)
+    experiment_config_label = experiment_config_label_from_config(config)
+    experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
+    return default_step_log_path(
+        experiment_root=experiment_root,
+        step_name="step_20_json_to_pcap",
+        branch_label=experiment_config_label,
+        filename_prefix="step_20_json_to_pcap",
+    )
+
+
 # This function parses command-line arguments for Step 20.
 # The --experiment-root override is available because the active VM artifact folder may differ from experiment.output_root in the config.
 def parse_cli_args() -> argparse.Namespace:
@@ -565,6 +585,7 @@ def parse_cli_args() -> argparse.Namespace:
     add("--input", dest="input_json", help="Path to Step 19 validated_modified_traffic.json.")
     add("--output-dir", help="Directory where Step 20 outputs will be written.")
     add("--output-pcap", help="Optional explicit path for modified_traffic.pcap.")
+    add("--log-file", help="Optional explicit terminal log file path.")
     add(
         "--experiment-root",
         help=(
@@ -578,23 +599,31 @@ def parse_cli_args() -> argparse.Namespace:
 # This function is the command-line entry point. It prints the reconstruction summary and output paths.
 def main() -> None:
     args = parse_cli_args()
-    result = run_reconstruction(
-        config_path=args.config,
-        input_json=args.input_json,
-        output_dir=args.output_dir,
-        output_pcap=args.output_pcap,
-        experiment_root=args.experiment_root,
-    )
-    print(f"Input packets: {result['input_packet_count']}")
-    print(f"Reconstructed packets: {result['reconstructed_packet_count']}")
-    print(f"Failed packets: {result['failed_packet_count']}")
-    print(f"Reconstructed groups: {result['reconstructed_group_count']}")
-    print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
-    print(f"Warnings: {result['warning_count']}")
-    print(f"Errors: {result['error_count']}")
-    print(f"Input JSON: {result['input_json']}")
-    print(f"Modified PCAP: {result['output_pcap']}")
-    print(f"Reconstruction report: {result['reconstruction_report']}")
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 20 terminal log"):
+        try:
+            result = run_reconstruction(
+                config_path=args.config,
+                input_json=args.input_json,
+                output_dir=args.output_dir,
+                output_pcap=args.output_pcap,
+                experiment_root=args.experiment_root,
+            )
+        except Exception:
+            print("Step 20 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        print(f"Input packets: {result['input_packet_count']}")
+        print(f"Reconstructed packets: {result['reconstructed_packet_count']}")
+        print(f"Failed packets: {result['failed_packet_count']}")
+        print(f"Reconstructed groups: {result['reconstructed_group_count']}")
+        print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
+        print(f"Warnings: {result['warning_count']}")
+        print(f"Errors: {result['error_count']}")
+        print(f"Input JSON: {result['input_json']}")
+        print(f"Modified PCAP: {result['output_pcap']}")
+        print(f"Reconstruction report: {result['reconstruction_report']}")
 
 
 if __name__ == "__main__":
