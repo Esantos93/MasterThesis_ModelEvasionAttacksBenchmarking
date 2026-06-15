@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,6 +174,36 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+# This function runs an external command while teeing its stdout and stderr to the active terminal streams.
+# The same output is also returned so Step 21 can preserve Snort's stdout.log and stderr.log artifacts.
+def run_subprocess_with_tee(command: list[str]) -> tuple[str, str, int]:
+    completed = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def tee_stream(source: Any, destination: Any, chunks: list[str]) -> None:
+        for line in source:
+            chunks.append(line)
+            destination.write(line)
+            destination.flush()
+        source.close()
+
+    stdout_thread = threading.Thread(target=tee_stream, args=(completed.stdout, sys.stdout, stdout_chunks))
+    stderr_thread = threading.Thread(target=tee_stream, args=(completed.stderr, sys.stderr, stderr_chunks))
+    stdout_thread.start()
+    stderr_thread.start()
+    exit_code = completed.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    return "".join(stdout_chunks), "".join(stderr_chunks), exit_code
+
+
 # This function returns the ruleset value used in the converted alert JSON filename.
 # If the ruleset is disabled, the filename records that explicitly; otherwise it records the configured ruleset file stem.
 def ruleset_label(snort_config: dict[str, Any]) -> str:
@@ -316,6 +347,10 @@ def run_one_snort_execution(
     output_dir.mkdir(parents=True, exist_ok=True)
     snort_config = config["snort"]
     command = build_snort_command(snort_config=snort_config, input_pcap_path=input_pcap_path, output_dir=output_dir)
+    command_json = {
+        "argv": command,
+        "shell_escaped_hint": " ".join(json.dumps(part) for part in command),
+    }
 
     started_at = utc_now()
     completed_at = started_at
@@ -323,17 +358,26 @@ def run_one_snort_execution(
     stderr = ""
     exit_code: int | None = None
 
-    if not dry_run:
-        completed_process = subprocess.run(command, capture_output=True, text=True, check=False)
-        completed_at = utc_now()
-        stdout = completed_process.stdout
-        stderr = completed_process.stderr
-        exit_code = completed_process.returncode
+    traffic_scope = "pre_common" if traffic_version == "pre" else "post_experiment_config"
+    print(f"[{traffic_version}] scope={traffic_scope} dry_run={dry_run}")
+    print(f"[{traffic_version}] experiment_config_label={experiment_config_label or 'null'}")
+    print(f"[{traffic_version}] post_run_label={post_run_label or 'null'}")
+    print(f"[{traffic_version}] input_pcap={input_pcap_path}")
+    print(f"[{traffic_version}] output_dir={output_dir}")
+    print(f"[{traffic_version}] snort_binary={expand_config_path(snort_config['snort_binary'])}")
+    print(f"[{traffic_version}] snort_config_path={expand_config_path(snort_config['config_path'])}")
+    print(f"[{traffic_version}] plugin_path={expand_config_path(snort_config['plugin_path'])}")
+    print(f"[{traffic_version}] daq_dir={expand_config_path(snort_config['daq_dir'])}")
+    print(f"[{traffic_version}] enable_ruleset={snort_config['enable_ruleset']}")
+    print(f"[{traffic_version}] enable_builtin_rules={snort_config['enable_builtin_rules']}")
+    print(f"[{traffic_version}] ruleset_path={expand_config_path(snort_config['ruleset_path']) if snort_config['enable_ruleset'] else 'disabled'}")
+    print(f"[{traffic_version}] rules_policy_path={expand_config_path(snort_config.get('rules_policy_path', '')) or 'none'}")
+    print(f"[{traffic_version}] command={command_json['shell_escaped_hint']}")
 
-    command_json = {
-        "argv": command,
-        "shell_escaped_hint": " ".join(json.dumps(part) for part in command),
-    }
+    if not dry_run:
+        stdout, stderr, exit_code = run_subprocess_with_tee(command)
+        completed_at = utc_now()
+
     write_json(output_dir / "command.json", command_json)
     write_text(output_dir / "stdout.log", stdout)
     write_text(output_dir / "stderr.log", stderr)
@@ -355,7 +399,7 @@ def run_one_snort_execution(
         "experiment_id": config["experiment"]["experiment_id"],
         "config_source": config.get("_config_path", ""),
         "traffic_version": traffic_version,
-        "traffic_scope": "pre_common" if traffic_version == "pre" else "post_experiment_config",
+        "traffic_scope": traffic_scope,
         "experiment_config_label": experiment_config_label,
         "post_run_label": post_run_label,
         "input_pcap": str(input_pcap_path),
@@ -385,6 +429,16 @@ def run_one_snort_execution(
         },
     }
     write_json(output_dir / "execution_metadata.json", metadata)
+    print(f"[{traffic_version}] exit_code={exit_code}")
+    print(f"[{traffic_version}] stdout_log={output_dir / 'stdout.log'} bytes={len(stdout.encode('utf-8'))}")
+    print(f"[{traffic_version}] stderr_log={output_dir / 'stderr.log'} bytes={len(stderr.encode('utf-8'))}")
+    print(f"[{traffic_version}] command_json={output_dir / 'command.json'}")
+    print(f"[{traffic_version}] metadata_json={output_dir / 'execution_metadata.json'}")
+    print(
+        f"[{traffic_version}] alert_json_status={alert_postprocessing['status']} "
+        f"alert_count={alert_postprocessing['alert_count']} "
+        f"converted={alert_postprocessing['converted'] or 'null'}"
+    )
     return metadata
 
 
