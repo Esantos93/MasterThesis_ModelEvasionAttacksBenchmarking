@@ -135,7 +135,7 @@ def detector_source_from_gid(gid: int | None) -> str:
         return "ruleset_text"
     if gid == 3:
         return "ruleset_so"
-    if gid in {116, 119}:
+    if gid in {116, 119, 129}:
         return "builtin_decoder_or_inspector"
     return "unknown"
 
@@ -280,6 +280,7 @@ def normalize_one_traffic_version(
                     "gid_3": "ruleset_so",
                     "gid_116": "builtin_decoder_or_inspector",
                     "gid_119": "builtin_decoder_or_inspector",
+                    "gid_129": "builtin_decoder_or_inspector",
                     "fallback": "unknown",
                 },
                 "raw_alert_preservation": "Each normalized alert stores the original Snort alert object in raw_alert.",
@@ -375,7 +376,6 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
 
     config = load_json_config(args.config)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
     experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
     log_root = experiment_root / "logs" / "step_22_alert_normalization"
     if args.traffic_version == "pre":
@@ -385,12 +385,12 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
         if not args.post_run_label and not args.input_dir:
             raise ValueError("POST terminal logging requires --post-run-label unless --input-dir is provided explicitly.")
         post_branch_label = args.post_run_label or "manual-input-dir"
-        log_dir = log_root / experiment_config_label / "post" / post_branch_label
+        log_dir = log_root / "post" / post_branch_label
         label_for_filename = f"post_{post_branch_label}"
     else:
         if not args.post_run_label:
             raise ValueError("Combined PRE/POST terminal logging requires --post-run-label.")
-        log_dir = log_root / experiment_config_label / "both" / args.post_run_label
+        log_dir = log_root / "both" / args.post_run_label
         label_for_filename = f"both_{args.post_run_label}"
     return log_dir / f"step_22_alert_normalization_{label_for_filename}_{utc_timestamp_for_log_filename()}.log"
 
