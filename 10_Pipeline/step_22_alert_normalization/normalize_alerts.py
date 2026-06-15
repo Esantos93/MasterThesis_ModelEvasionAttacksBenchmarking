@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.terminal_logging import terminal_log
 
 
 NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v1"
@@ -30,6 +32,11 @@ def read_json(path: str | Path) -> Any:
 # This function returns the current UTC timestamp in ISO 8601 format for processing metadata.
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# This function returns a compact UTC timestamp for terminal log filenames.
+def utc_timestamp_for_log_filename() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 # This function builds the experiment root directory from the experiment output_root and experiment_id fields.
@@ -360,6 +367,34 @@ def normalize_alerts(
     return results
 
 
+# This function resolves the terminal log path for Step 22.
+# POST logs include the Step 21 run label in the directory path because POST Snort runs are stored by run timestamp.
+def resolve_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+
+    config = load_json_config(args.config)
+    validate_config(config)
+    experiment_config_label = experiment_config_label_from_config(config)
+    experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
+    log_root = experiment_root / "logs" / "step_22_alert_normalization"
+    if args.traffic_version == "pre":
+        log_dir = log_root / "pre"
+        label_for_filename = "pre"
+    elif args.traffic_version == "post":
+        if not args.post_run_label and not args.input_dir:
+            raise ValueError("POST terminal logging requires --post-run-label unless --input-dir is provided explicitly.")
+        post_branch_label = args.post_run_label or "manual-input-dir"
+        log_dir = log_root / experiment_config_label / "post" / post_branch_label
+        label_for_filename = f"post_{post_branch_label}"
+    else:
+        if not args.post_run_label:
+            raise ValueError("Combined PRE/POST terminal logging requires --post-run-label.")
+        log_dir = log_root / experiment_config_label / "both" / args.post_run_label
+        label_for_filename = f"both_{args.post_run_label}"
+    return log_dir / f"step_22_alert_normalization_{label_for_filename}_{utc_timestamp_for_log_filename()}.log"
+
+
 # This function parses Step 22 command-line arguments.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Normalize Step 21 Snort alert JSON artifacts for comparison.")
@@ -371,25 +406,34 @@ def parse_cli_args() -> argparse.Namespace:
     add("--input-dir", help="Explicit Step 21 input directory. Only valid for one traffic version.")
     add("--input-alert-json", help="Explicit converted Step 21 alerts__*.json path. Only valid for one traffic version.")
     add("--output-dir", help="Explicit Step 22 output directory. Only valid for one traffic version.")
+    add("--log-file", help="Optional explicit terminal log file path.")
     return parser.parse_args()
 
 
 # This function is the command-line entry point.
 def main() -> None:
     args = parse_cli_args()
-    results = normalize_alerts(
-        config_path=args.config,
-        traffic_version=args.traffic_version,
-        experiment_root=args.experiment_root,
-        post_run_label=args.post_run_label,
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        input_alert_json=args.input_alert_json,
-    )
-    for result in results:
-        print(
-            f"{result['traffic_version']}: alerts={result['alert_count']} "
-            f"unique_signatures={result['unique_signature_count']} output={result['normalized_alerts']}"
+    log_path = resolve_log_path(args)
+    with terminal_log(log_path, banner="Step 22 terminal log"):
+        try:
+            results = normalize_alerts(
+                config_path=args.config,
+                traffic_version=args.traffic_version,
+                experiment_root=args.experiment_root,
+                post_run_label=args.post_run_label,
+                input_dir=args.input_dir,
+                output_dir=args.output_dir,
+                input_alert_json=args.input_alert_json,
+            )
+        except Exception:
+            print("Step 22 failed. Traceback follows:", file=sys.stderr)
+            traceback.print_exc()
+            raise SystemExit(1)
+
+        for result in results:
+            print(
+                f"{result['traffic_version']}: alerts={result['alert_count']} "
+                f"unique_signatures={result['unique_signature_count']} output={result['normalized_alerts']}"
         )
 
 
