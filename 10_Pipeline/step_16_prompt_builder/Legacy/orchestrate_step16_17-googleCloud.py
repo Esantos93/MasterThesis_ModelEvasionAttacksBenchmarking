@@ -755,7 +755,6 @@ def run_step17(args: argparse.Namespace) -> None:
         command.extend(["--n-threads", str(args.n_threads)])
     if args.limit_prompts_s17 is not None:
         command.extend(["--limit-prompts-s17", str(args.limit_prompts_s17)])
-    command.extend(["--llm-batch-size", str(args.llm_batch_size)])
     if args.step17_prompt_manifest:
         command.extend(["--prompt-manifest", args.step17_prompt_manifest])
     if args.step17_prompt_dir:
@@ -777,8 +776,6 @@ def run_step17(args: argparse.Namespace) -> None:
     if args.step17_backend == "vllm":
         command.extend(["--vllm-dtype", args.vllm_dtype])
         command.extend(["--vllm-gpu-memory-utilization", str(args.vllm_gpu_memory_utilization)])
-        if args.probe_vllm_per_request_sampling:
-            command.append("--probe-vllm-per-request-sampling")
         if args.vllm_quantization:
             command.extend(["--vllm-quantization", args.vllm_quantization])
         if args.vllm_max_model_len is not None:
@@ -1011,7 +1008,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-step16", action="store_true")
 
     parser.add_argument("--limit-prompts-s17", type=int, help="Run Step 17 only for the first N Step 16 prompt packages.")
-    parser.add_argument("--llm-batch-size", type=int, default=1, help="Maximum number of real LLM prompt units per Step 17 generation batch.")
     parser.add_argument("--skip-step17", action="store_true")
     parser.add_argument("--step17-prompt-manifest")
     parser.add_argument("--step17-prompt-dir")
@@ -1026,7 +1022,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-quantization")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--vllm-max-model-len", type=int)
-    parser.add_argument("--probe-vllm-per-request-sampling", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--n-gpu-layers", type=int, default=-1)
     parser.add_argument("--n-threads", type=int)

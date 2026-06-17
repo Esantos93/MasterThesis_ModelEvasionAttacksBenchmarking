@@ -367,50 +367,6 @@ def measure_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
     return len(tokens)
 
 
-OUTPUT_BUDGET_POLICY_NAME = "editable_region_tiered_v1"
-OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT = {
-    1: 768,
-    2: 1024,
-}
-OUTPUT_BUDGET_FOR_THREE_OR_MORE_EDITABLE_REGIONS = 1280
-
-
-def get_editable_region_count(prompt_package: dict[str, Any]) -> int:
-    traceability = prompt_package.get("input_traceability", {})
-    editable_regions = traceability.get("editable_regions", [])
-    if isinstance(editable_regions, list):
-        return sum(1 for editable_region in editable_regions if isinstance(editable_region, dict))
-    return 0
-
-
-def estimate_desired_output_tokens(
-    *,
-    prompt_package: dict[str, Any],
-    legacy_output_token_cap: int,
-) -> tuple[int, dict[str, Any]]:
-    editable_region_count = get_editable_region_count(prompt_package)
-    if editable_region_count <= 0:
-        estimated_output_tokens = 0
-        budget_tier = "no_editable_regions"
-    elif editable_region_count in OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT:
-        estimated_output_tokens = OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT[editable_region_count]
-        budget_tier = f"{editable_region_count}_editable_region"
-    else:
-        estimated_output_tokens = OUTPUT_BUDGET_FOR_THREE_OR_MORE_EDITABLE_REGIONS
-        budget_tier = "3_or_more_editable_regions"
-
-    desired_output_tokens = min(estimated_output_tokens, legacy_output_token_cap)
-    policy_details = {
-        "policy": OUTPUT_BUDGET_POLICY_NAME,
-        "editable_region_count": editable_region_count,
-        "budget_tier": budget_tier,
-        "estimated_output_tokens": estimated_output_tokens,
-        "legacy_output_token_cap": legacy_output_token_cap,
-        "was_capped_by_legacy_output_token_cap": desired_output_tokens < estimated_output_tokens,
-    }
-    return desired_output_tokens, policy_details
-
-
 #This function calculates max_tokens for one compact patch prompt.
 def build_prompt_generation_params(
     *,
@@ -426,11 +382,7 @@ def build_prompt_generation_params(
     else:
         estimation_error_ratio = None
 
-    legacy_expected_output_patch_tokens = int(base_generation_params["expected_output_patch_tokens"])
-    desired_max_tokens, output_budget_policy = estimate_desired_output_tokens(
-        prompt_package=prompt_package,
-        legacy_output_token_cap=legacy_expected_output_patch_tokens,
-    )
+    desired_max_tokens = int(base_generation_params["expected_output_patch_tokens"])
     available_context_tokens = (
         int(base_generation_params["n_ctx"])
         - real_input_tokens
@@ -447,7 +399,7 @@ def build_prompt_generation_params(
     max_tokens = min(desired_max_tokens, available_context_tokens)
     prompt_generation_params["max_tokens"] = max_tokens
     token_plan = {
-        "mode": "compact_patch_dynamic_output_budget_v1",
+        "mode": "compact_patch_fixed_output_budget",
         "estimated_input_tokens": estimated_input_tokens,
         "real_input_tokens": real_input_tokens,
         "estimation_error_ratio": estimation_error_ratio,
@@ -456,9 +408,6 @@ def build_prompt_generation_params(
         "desired_max_tokens": desired_max_tokens,
         "max_tokens": max_tokens,
         "expected_output_patch_tokens": base_generation_params["expected_output_patch_tokens"],
-        "legacy_expected_output_patch_tokens": legacy_expected_output_patch_tokens,
-        "dynamic_output_budget_policy": output_budget_policy,
-        "editable_region_count": output_budget_policy["editable_region_count"],
         "context_reserve_tokens": base_generation_params["context_reserve_tokens"],
         "available_context_tokens": available_context_tokens,
         "was_capped_by_context": max_tokens < desired_max_tokens,
@@ -871,67 +820,7 @@ def run_single_prompt(
     token_plan = None
     output_paths: dict[str, str] = {}
 
-    traceability = prompt_package["input_traceability"]
-    editable_packet_ids = traceability.get("editable_packet_ids", [])
-    editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
-    editable_region_count = get_editable_region_count(prompt_package)
-
-    if editable_region_count == 0 and editable_packet_count > 0:
-        parsed_output = {
-            "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
-            "parent_group_id": prompt_package.get("parent_group_id"),
-            "prompt_unit_id": prompt_package.get("prompt_unit_id"),
-            "patches": [],
-        }
-        failure_reason = "editable_packet_ids_present_but_no_editable_regions"
-        validation_result = {"accepted": False, "reason": failure_reason, "patch_count": 0}
-        token_plan = {
-            "mode": "invalid_traceability_no_editable_regions",
-            "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
-            "real_input_tokens": 0,
-            "runtime_max_model_len": generation_params["runtime_max_model_len"],
-            "desired_max_tokens": 0,
-            "max_tokens": 0,
-            "expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "legacy_expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "dynamic_output_budget_policy": {
-                "policy": OUTPUT_BUDGET_POLICY_NAME,
-                "editable_region_count": editable_region_count,
-                "editable_packet_count": editable_packet_count,
-                "budget_tier": "invalid_traceability_no_editable_regions",
-                "estimated_output_tokens": 0,
-                "legacy_output_token_cap": generation_params["expected_output_patch_tokens"],
-                "was_capped_by_legacy_output_token_cap": False,
-            },
-            "editable_region_count": editable_region_count,
-            "editable_packet_count": editable_packet_count,
-            "context_reserve_tokens": generation_params["context_reserve_tokens"],
-            "available_context_tokens": generation_params["runtime_max_model_len"],
-            "was_capped_by_context": False,
-        }
-        write_json(parsed_path, parsed_output)
-        output_paths["parsed"] = str(parsed_path)
-        output_paths["metadata"] = str(metadata_path)
-        metadata = build_run_metadata(
-            status="invalid_traceability_no_editable_regions",
-            failure_reason=failure_reason,
-            prompt_package=prompt_package,
-            prompt_path=prompt_path,
-            model_path=model_path,
-            model_name=model_name,
-            generation_params=generation_params,
-            started_at_utc=started_at_utc,
-            finished_at_utc=started_at_utc,
-            runtime_seconds=0.0,
-            output_paths=output_paths,
-            validation_result=validation_result,
-            token_plan=token_plan,
-            llama_response_metadata=None,
-        )
-        write_json(metadata_path, metadata)
-        return metadata
-
-    if not editable_packet_ids:
+    if not prompt_package["input_traceability"].get("editable_packet_ids", []):
         parsed_output = {
             "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
             "parent_group_id": prompt_package.get("parent_group_id"),
@@ -947,9 +836,6 @@ def run_single_prompt(
             "desired_max_tokens": 0,
             "max_tokens": 0,
             "expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "legacy_expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "editable_region_count": editable_region_count,
-            "editable_packet_count": editable_packet_count,
             "context_reserve_tokens": generation_params["context_reserve_tokens"],
             "available_context_tokens": generation_params["runtime_max_model_len"],
             "was_capped_by_context": False,
@@ -1098,180 +984,6 @@ def run_single_prompt(
     return metadata
 
 
-def build_prompt_output_context(
-    *,
-    prompt_package: dict[str, Any],
-    prompt_path: Path,
-    model_name: str,
-    output_dirs: dict[str, Path],
-) -> dict[str, Any]:
-    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_package.get("group_id") or prompt_path.stem.replace(".prompt", ""))
-    output_stem = prompt_unit_id
-    return {
-        "prompt_unit_id": prompt_unit_id,
-        "parent_group_id": str(prompt_package.get("parent_group_id") or ""),
-        "output_stem": output_stem,
-        "raw_path": output_dirs["raw"] / f"{output_stem}.raw.txt",
-        "parsed_path": output_dirs["parsed"] / f"{output_stem}.parsed.json",
-        "metadata_path": output_dirs["metadata"] / f"{output_stem}.metadata.json",
-        "expected_packet_ids": expected_packet_ids_from_traceability(prompt_package),
-        "model_name": model_name,
-    }
-
-
-def write_generated_prompt_outputs(
-    *,
-    prompt_package: dict[str, Any],
-    prompt_path: Path,
-    model_path: Path,
-    model_name: str,
-    output_dirs: dict[str, Path],
-    generation_params: dict[str, Any],
-    token_plan: dict[str, Any],
-    raw_text: str,
-    started_at_utc: str,
-    start_time: float,
-    batch_index: int,
-    batch_size: int,
-) -> dict[str, Any]:
-    context = build_prompt_output_context(
-        prompt_package=prompt_package,
-        prompt_path=prompt_path,
-        model_name=model_name,
-        output_dirs=output_dirs,
-    )
-    status = "failed"
-    failure_reason = None
-    validation_result = None
-    parsed_output = None
-    output_paths: dict[str, str] = {}
-
-    try:
-        write_text(context["raw_path"], raw_text)
-        output_paths["raw"] = str(context["raw_path"])
-        parsed_output = parse_strict_json(raw_text)
-        validation_result = validate_patch_output(parsed_output, prompt_package)
-        if validation_result["accepted"]:
-            write_json(context["parsed_path"], parsed_output)
-            output_paths["parsed"] = str(context["parsed_path"])
-            status = "accepted"
-        else:
-            failure_reason = validation_result["reason"]
-            failure_report = {
-                "failure_reason": failure_reason,
-                "parent_group_id": context["parent_group_id"],
-                "prompt_unit_id": context["prompt_unit_id"],
-                "prompt_file": str(prompt_path),
-                "model_name": model_name,
-                "validation_result": validation_result,
-            }
-            output_paths.update(
-                write_failure_outputs(
-                    output_dirs=output_dirs,
-                    output_stem=context["output_stem"],
-                    failure_report=failure_report,
-                    rejected_json=parsed_output,
-                )
-            )
-    except Exception as error:
-        failure_reason = type(error).__name__
-        failure_report = {
-            "failure_reason": failure_reason,
-            "failure_message": str(error),
-            "parent_group_id": context["parent_group_id"],
-            "prompt_unit_id": context["prompt_unit_id"],
-            "prompt_file": str(prompt_path),
-            "model_name": model_name,
-        }
-        output_paths.update(
-            write_failure_outputs(
-                output_dirs=output_dirs,
-                output_stem=context["output_stem"],
-                failure_report=failure_report,
-                rejected_json=parsed_output,
-            )
-        )
-
-    finished_at_utc = datetime.now(timezone.utc).isoformat()
-    output_paths["metadata"] = str(context["metadata_path"])
-    llama_response_metadata = {
-        "stream": False,
-        "batch_index": batch_index,
-        "batch_size": batch_size,
-        "stream_visible_packet_ids": count_visible_packet_ids(raw_text, context["expected_packet_ids"]),
-        "stream_expected_packet_ids": len(context["expected_packet_ids"]),
-    }
-    metadata = build_run_metadata(
-        status=status,
-        failure_reason=failure_reason,
-        prompt_package=prompt_package,
-        prompt_path=prompt_path,
-        model_path=model_path,
-        model_name=model_name,
-        generation_params=generation_params,
-        started_at_utc=started_at_utc,
-        finished_at_utc=finished_at_utc,
-        runtime_seconds=time.perf_counter() - start_time,
-        output_paths=output_paths,
-        validation_result=validation_result,
-        token_plan=token_plan,
-        llama_response_metadata=llama_response_metadata,
-    )
-    write_json(context["metadata_path"], metadata)
-    return metadata
-
-
-def run_prompt_generation_batch(
-    *,
-    llm: Any,
-    model_path: Path,
-    model_name: str,
-    output_dirs: dict[str, Path],
-    generation_params: dict[str, Any],
-    batch_items: list[dict[str, Any]],
-    batch_index: int,
-) -> list[dict[str, Any]]:
-    messages_batch = [item["prompt_package"]["messages"] for item in batch_items]
-    generation_params_batch = [item["prompt_generation_params"] for item in batch_items]
-    if hasattr(llm, "create_chat_completions_batch"):
-        raw_texts = llm.create_chat_completions_batch(
-            messages_batch=messages_batch,
-            generation_params_batch=generation_params_batch,
-        )
-    else:
-        raw_texts = []
-        for item in batch_items:
-            response_chunks = llm.create_chat_completion(
-                messages=item["prompt_package"]["messages"],
-                temperature=item["prompt_generation_params"]["temperature"],
-                top_p=item["prompt_generation_params"]["top_p"],
-                max_tokens=item["prompt_generation_params"]["max_tokens"],
-                stream=True,
-            )
-            raw_texts.append("".join(extract_stream_chunk_text(chunk) for chunk in response_chunks))
-
-    metadata_rows = []
-    batch_size = len(batch_items)
-    for item, raw_text in zip(batch_items, raw_texts):
-        metadata_rows.append(
-            write_generated_prompt_outputs(
-                prompt_package=item["prompt_package"],
-                prompt_path=item["prompt_path"],
-                model_path=model_path,
-                model_name=model_name,
-                output_dirs=output_dirs,
-                generation_params=generation_params,
-                token_plan=item["token_plan"],
-                raw_text=raw_text,
-                started_at_utc=item["started_at_utc"],
-                start_time=item["start_time"],
-                batch_index=batch_index,
-                batch_size=batch_size,
-            )
-        )
-    return metadata_rows
-
-
 #This function loads one GGUF model through llama-cpp-python.
 def load_llama_model(model_path: Path, generation_params: dict[str, Any]) -> Any:
     from llama_cpp import Llama
@@ -1297,7 +1009,6 @@ def run_model_batch(
     generation_params: dict[str, Any],
     progress_every: int,
     heartbeat_seconds: int,
-    llm_batch_size: int,
 ) -> dict[str, Any]:
     model_name = safe_model_name(model_path)
     output_dirs = prepare_model_output_dirs(output_root, model_name, run_id)
@@ -1306,101 +1017,26 @@ def run_model_batch(
 
     accepted_count = 0
     failed_count = 0
-    invalid_traceability_count = 0
     total_prompts = len(prompt_paths)
     model_start = time.perf_counter()
-    pending_batch: list[dict[str, Any]] = []
-    generation_batch_index = 0
 
-    def record_metadata(metadata: dict[str, Any]) -> None:
-        nonlocal accepted_count
-        nonlocal failed_count
-        nonlocal invalid_traceability_count
-        if metadata["status"] in {"accepted", "auto_empty_no_editable_regions"}:
-            accepted_count += 1
-        elif metadata["status"] == "invalid_traceability_no_editable_regions":
-            invalid_traceability_count += 1
-        else:
-            failed_count += 1
-
-    def flush_pending_batch(prompt_index: int) -> None:
-        nonlocal generation_batch_index
-        if not pending_batch:
-            return
-        generation_batch_index += 1
-        batch_started = time.perf_counter()
-        metadata_rows = run_prompt_generation_batch(
+    for prompt_index, prompt_path in enumerate(prompt_paths, start=1):
+        prompt_started = time.perf_counter()
+        metadata = run_single_prompt(
             llm=llm,
+            prompt_path=prompt_path,
             model_path=model_path,
             model_name=model_name,
             output_dirs=output_dirs,
             generation_params=generation_params,
-            batch_items=list(pending_batch),
-            batch_index=generation_batch_index,
+            heartbeat_seconds=heartbeat_seconds,
+            prompt_index=prompt_index,
+            total_prompts=total_prompts,
         )
-        pending_batch.clear()
-        for metadata in metadata_rows:
-            record_metadata(metadata)
-        print(
-            f"[{datetime.now().isoformat(timespec='seconds')}] "
-            f"{model_name}: generation batch {generation_batch_index} finished "
-            f"(items={len(metadata_rows)}, last_batch={time.perf_counter() - batch_started:.1f}s, "
-            f"processed={prompt_index}/{total_prompts}, accepted={accepted_count}, "
-            f"failed={failed_count}, invalid_traceability={invalid_traceability_count})"
-        )
-
-    for prompt_index, prompt_path in enumerate(prompt_paths, start=1):
-        prompt_started = time.perf_counter()
-        if llm_batch_size <= 1:
-            metadata = run_single_prompt(
-                llm=llm,
-                prompt_path=prompt_path,
-                model_path=model_path,
-                model_name=model_name,
-                output_dirs=output_dirs,
-                generation_params=generation_params,
-                heartbeat_seconds=heartbeat_seconds,
-                prompt_index=prompt_index,
-                total_prompts=total_prompts,
-            )
-            record_metadata(metadata)
+        if metadata["status"] in {"accepted", "auto_empty_no_editable_regions"}:
+            accepted_count += 1
         else:
-            prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
-            editable_packet_ids = prompt_package["input_traceability"].get("editable_packet_ids", [])
-            editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
-            editable_region_count = get_editable_region_count(prompt_package)
-            if editable_region_count == 0 or not editable_packet_ids:
-                flush_pending_batch(prompt_index - 1)
-                metadata = run_single_prompt(
-                    llm=llm,
-                    prompt_path=prompt_path,
-                    model_path=model_path,
-                    model_name=model_name,
-                    output_dirs=output_dirs,
-                    generation_params=generation_params,
-                    heartbeat_seconds=heartbeat_seconds,
-                    prompt_index=prompt_index,
-                    total_prompts=total_prompts,
-                )
-                record_metadata(metadata)
-            else:
-                prompt_generation_params, token_plan = build_prompt_generation_params(
-                    llm=llm,
-                    prompt_package=prompt_package,
-                    base_generation_params=generation_params,
-                )
-                pending_batch.append(
-                    {
-                        "prompt_path": prompt_path,
-                        "prompt_package": prompt_package,
-                        "prompt_generation_params": prompt_generation_params,
-                        "token_plan": token_plan,
-                        "started_at_utc": datetime.now(timezone.utc).isoformat(),
-                        "start_time": time.perf_counter(),
-                    }
-                )
-                if len(pending_batch) >= llm_batch_size:
-                    flush_pending_batch(prompt_index)
+            failed_count += 1
 
         should_print = (
             prompt_index == 1
@@ -1414,11 +1050,8 @@ def run_model_batch(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
                 f"{model_name}: {prompt_index}/{total_prompts} prompts processed "
                 f"(accepted={accepted_count}, failed={failed_count}, "
-                f"invalid_traceability={invalid_traceability_count}, "
                 f"last={last_runtime:.1f}s, elapsed={elapsed:.1f}s)"
             )
-
-    flush_pending_batch(total_prompts)
 
     return {
         "model_name": model_name,
@@ -1427,8 +1060,6 @@ def run_model_batch(
         "prompt_count": total_prompts,
         "accepted_count": accepted_count,
         "failed_count": failed_count,
-        "invalid_traceability_count": invalid_traceability_count,
-        "llm_batch_size": llm_batch_size,
         "runtime_seconds": time.perf_counter() - model_start,
     }
 
@@ -1445,8 +1076,6 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--progress-every must be zero or a positive integer.")
     if args.heartbeat_seconds < 0:
         raise ValueError("--heartbeat-seconds must be zero or a positive integer.")
-    if args.llm_batch_size <= 0:
-        raise ValueError("--llm-batch-size must be a positive integer.")
     if args.expected_output_patch_tokens is not None and args.expected_output_patch_tokens <= 0:
         raise ValueError("--expected-output-patch-tokens must be a positive integer.")
     run_id = args.run_id or build_default_run_id(args.run_label)
@@ -1505,7 +1134,6 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
                 generation_params=generation_params,
                 progress_every=args.progress_every,
                 heartbeat_seconds=args.heartbeat_seconds,
-                llm_batch_size=args.llm_batch_size,
             )
         )
 
@@ -1596,7 +1224,6 @@ def parse_cli_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-gpu-layers", type=int, default=-1, help="llama-cpp-python GPU layer count.")
     parser.add_argument("--n-threads", type=int, help="CPU thread count passed to llama-cpp-python.")
-    parser.add_argument("--llm-batch-size", type=int, default=1, help="Maximum number of real LLM prompt units per generation batch.")
     return parser.parse_args()
 
 

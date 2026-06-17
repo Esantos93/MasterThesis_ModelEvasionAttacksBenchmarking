@@ -68,29 +68,6 @@ class VllmChatCompletionAdapter:
             return {"choices": [{"message": {"content": text}}]}
         return iter([{"choices": [{"delta": {"content": text}}]}])
 
-    def create_chat_completions_batch(
-        self,
-        *,
-        messages_batch: list[list[dict[str, str]]],
-        generation_params_batch: list[dict[str, Any]],
-    ) -> list[str]:
-        from vllm import SamplingParams
-
-        sampling_params_batch = [
-            SamplingParams(
-                temperature=generation_params["temperature"],
-                top_p=generation_params["top_p"],
-                max_tokens=generation_params["max_tokens"],
-            )
-            for generation_params in generation_params_batch
-        ]
-        outputs = self.llm.chat(
-            messages=messages_batch,
-            sampling_params=sampling_params_batch,
-            use_tqdm=False,
-        )
-        return [output.outputs[0].text if output.outputs else "" for output in outputs]
-
 
 def collect_vllm_model_paths(
     *,
@@ -124,46 +101,6 @@ def load_vllm_model(model_path: Path, generation_params: dict[str, Any]) -> Vllm
     return VllmChatCompletionAdapter(str(model_path), max_model_len=max_model_len)
 
 
-def run_vllm_per_request_sampling_probe(args: argparse.Namespace) -> None:
-    from vllm import SamplingParams
-
-    model_dir = Path(args.model_dir).expanduser() if args.model_dir else Path(args.cloud_root).expanduser() / "03_Models"
-    model_paths = collect_vllm_model_paths(
-        model_dir=model_dir,
-        explicit_model_paths=args.model_path,
-        model_filters=args.model_filter,
-    )
-    model_path = model_paths[0]
-    max_model_len = VLLM_MAX_MODEL_LEN or args.vllm_max_model_len or args.runtime_max_model_len or 2048
-    adapter = VllmChatCompletionAdapter(str(model_path), max_model_len=max_model_len)
-    messages_batch = [
-        [{"role": "user", "content": "Reply with exactly one token: A"}],
-        [{"role": "user", "content": "Reply with a short five word sentence."}],
-    ]
-    sampling_params_batch = [
-        SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1),
-        SamplingParams(temperature=0.0, top_p=1.0, max_tokens=8),
-    ]
-    print("Running vLLM per-request SamplingParams probe.")
-    print(f"Probe model: {model_path}")
-    print(f"Probe max_model_len: {max_model_len}")
-    print("Probe request max_tokens: [1, 8]")
-    outputs = adapter.llm.chat(
-        messages=messages_batch,
-        sampling_params=sampling_params_batch,
-        use_tqdm=False,
-    )
-    print(f"Probe outputs returned: {len(outputs)}")
-    for index, output in enumerate(outputs):
-        text = output.outputs[0].text if output.outputs else ""
-        token_ids = output.outputs[0].token_ids if output.outputs else []
-        print(
-            f"Probe output {index}: generated_tokens={len(token_ids)}, "
-            f"text={text!r}"
-        )
-    print("VLLM_PER_REQUEST_SAMPLING_PROBE_OK")
-
-
 def parse_google_cloud_args() -> argparse.Namespace:
     extra_parser = argparse.ArgumentParser(add_help=False)
     extra_parser.add_argument("--hf-model-id", action="append", help="Hugging Face model id to load with vLLM. Can be repeated.")
@@ -172,11 +109,6 @@ def parse_google_cloud_args() -> argparse.Namespace:
     extra_parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     extra_parser.add_argument("--vllm-max-model-len", type=int)
     extra_parser.add_argument("--trust-remote-code", action="store_true")
-    extra_parser.add_argument(
-        "--probe-vllm-per-request-sampling",
-        action="store_true",
-        help="Load vLLM and verify whether LLM.chat accepts one SamplingParams object per request.",
-    )
     extra_args, remaining_argv = extra_parser.parse_known_args()
 
     original_argv = sys.argv
@@ -206,10 +138,6 @@ def main() -> None:
     VLLM_GPU_MEMORY_UTILIZATION = args.vllm_gpu_memory_utilization
     VLLM_MAX_MODEL_LEN = args.vllm_max_model_len
     VLLM_TRUST_REMOTE_CODE = args.trust_remote_code
-
-    if args.probe_vllm_per_request_sampling:
-        run_vllm_per_request_sampling_probe(args)
-        return
 
     base_step17.collect_model_paths = collect_vllm_model_paths
     base_step17.load_llama_model = load_vllm_model
