@@ -941,7 +941,7 @@ def fetch_outputs_direct_from_gpu(args: argparse.Namespace) -> None:
 # This function defines all command-line options used by the orchestrator.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create a Google GPU VM, run Step 16 and Step 17 there, and copy outputs back."
+        description="Create a Google GPU VM, run Step 16 and Step 17 there, and optionally fetch outputs locally."
     )
     parser.add_argument("--project", required=True)
     parser.add_argument("--zone", default=DEFAULT_ZONE)
@@ -975,7 +975,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-file", help="Optional local log file for all orchestrator terminal output. Defaults to <local-output-dir>/logs/orchestrate_step16_17-googleCloud/<run_id>/ when --local-output-dir is available.")
     parser.add_argument("--gcs-output-root", help="Cloud Storage root for run artifact exchange. Defaults to gs://thesis-santos-llm-artifacts/<experiment_id>/runs.")
     parser.add_argument("--skip-gcs-upload", action="store_true", help="Skip uploading run artifacts from the GPU VM to Cloud Storage.")
-    parser.add_argument("--skip-gcs-fetch", action="store_true", help="Skip fetching run artifacts from Cloud Storage or directly from the GPU VM to --local-output-dir.")
     parser.add_argument("--skip-step16-upload", action="store_true", help="Skip uploading Step 16 prompt artifacts from the GPU VM to Cloud Storage.")
     parser.add_argument("--skip-step17-upload", action="store_true", help="Skip uploading Step 17 model output artifacts from the GPU VM to Cloud Storage.")
     parser.add_argument("--skip-step16-fetch", action="store_true", help="Skip fetching Step 16 prompt artifacts to --local-output-dir.")
@@ -1066,11 +1065,13 @@ def main() -> None:
         run_step17(args)
         if not args.skip_gcs_upload:
             upload_outputs_to_gcs(args)
-        if not args.skip_gcs_fetch:
+        if args.local_output_dir:
             if args.fetch_direct_from_gpu:
                 fetch_outputs_direct_from_gpu(args)
             else:
                 fetch_outputs_from_gcs(args)
+        else:
+            print("No --local-output-dir provided; skipping local artifact fetch.")
     finally:
         if args.delete_instance_after_run:
             delete_instance(args)
