@@ -1133,6 +1133,7 @@ def write_generated_prompt_outputs(
     start_time: float,
     batch_index: int,
     batch_size: int,
+    batch_limit: int,
 ) -> dict[str, Any]:
     context = build_prompt_output_context(
         prompt_package=prompt_package,
@@ -1198,6 +1199,7 @@ def write_generated_prompt_outputs(
         "stream": False,
         "batch_index": batch_index,
         "batch_size": batch_size,
+        "batch_limit": batch_limit,
         "stream_visible_packet_ids": count_visible_packet_ids(raw_text, context["expected_packet_ids"]),
         "stream_expected_packet_ids": len(context["expected_packet_ids"]),
     }
@@ -1230,6 +1232,7 @@ def run_prompt_generation_batch(
     generation_params: dict[str, Any],
     batch_items: list[dict[str, Any]],
     batch_index: int,
+    batch_limit: int,
 ) -> list[dict[str, Any]]:
     messages_batch = [item["prompt_package"]["messages"] for item in batch_items]
     generation_params_batch = [item["prompt_generation_params"] for item in batch_items]
@@ -1267,6 +1270,7 @@ def run_prompt_generation_batch(
                 start_time=item["start_time"],
                 batch_index=batch_index,
                 batch_size=batch_size,
+                batch_limit=batch_limit,
             )
         )
     return metadata_rows
@@ -1337,6 +1341,7 @@ def run_model_batch(
             generation_params=generation_params,
             batch_items=list(pending_batch),
             batch_index=generation_batch_index,
+            batch_limit=llm_batch_size,
         )
         pending_batch.clear()
         for metadata in metadata_rows:
@@ -1370,7 +1375,6 @@ def run_model_batch(
             editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
             editable_region_count = get_editable_region_count(prompt_package)
             if editable_region_count == 0 or not editable_packet_ids:
-                flush_pending_batch(prompt_index - 1)
                 metadata = run_single_prompt(
                     llm=llm,
                     prompt_path=prompt_path,

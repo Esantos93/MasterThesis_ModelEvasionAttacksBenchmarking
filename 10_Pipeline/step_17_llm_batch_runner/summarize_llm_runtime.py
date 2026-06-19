@@ -191,6 +191,9 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
     if isinstance(validation_result, dict):
         patch_count = validation_result.get("patch_count")
         validation_reason = validation_result.get("reason")
+    llama_response_metadata = metadata.get("llama_response_metadata")
+    if not isinstance(llama_response_metadata, dict):
+        llama_response_metadata = {}
 
     row = {
         "metadata_file": str(metadata_path),
@@ -212,6 +215,9 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "patch_count": patch_count,
         "started_at_utc": metadata.get("started_at_utc"),
         "finished_at_utc": metadata.get("finished_at_utc"),
+        "generation_batch_index": llama_response_metadata.get("batch_index"),
+        "generation_batch_size": llama_response_metadata.get("batch_size"),
+        "generation_batch_limit": llama_response_metadata.get("batch_limit"),
         **counts,
     }
     row["seconds_per_packet"] = safe_rate(runtime_seconds, row["packet_count"])
@@ -273,6 +279,40 @@ def runtime_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# This function summarizes unique Step 17 generation batches recorded across per-prompt metadata.
+def generation_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    batches: dict[tuple[str, int], dict[str, int]] = {}
+    for row in rows:
+        batch_index = as_int(row.get("generation_batch_index"), default=0)
+        batch_size = as_int(row.get("generation_batch_size"), default=0)
+        batch_limit = as_int(row.get("generation_batch_limit"), default=0)
+        if batch_index <= 0 or batch_size <= 0:
+            continue
+        key = (str(row.get("model_name") or "unknown"), batch_index)
+        current = batches.get(key)
+        batch_record = {"batch_index": batch_index, "batch_size": batch_size, "batch_limit": batch_limit}
+        if current is not None and current != batch_record:
+            raise ValueError(f"Inconsistent generation batch metadata for {key}: {current} != {batch_record}")
+        batches[key] = batch_record
+
+    ordered_batches = [batches[key] for key in sorted(batches)]
+    batch_sizes = [float(batch["batch_size"]) for batch in ordered_batches]
+    configured_limits = sorted({batch["batch_limit"] for batch in ordered_batches if batch["batch_limit"] > 0})
+    size_distribution = Counter(batch["batch_size"] for batch in ordered_batches)
+    return {
+        "batch_count": len(ordered_batches),
+        "configured_limits": configured_limits,
+        "batches_reaching_configured_limit": sum(
+            1
+            for batch in ordered_batches
+            if batch["batch_limit"] > 0 and batch["batch_size"] == batch["batch_limit"]
+        ),
+        "batch_size_distribution": {str(size): count for size, count in sorted(size_distribution.items())},
+        "batch_size_stats": summarize_numbers(batch_sizes),
+        "batches": ordered_batches,
+    }
+
+
 # This function formats optional numeric values for Markdown tables.
 def fmt(value: Any, digits: int = 2) -> str:
     if value is None:
@@ -290,6 +330,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
     runtime_total_llm = summary["runtime_totals"]["llm_attempted"]
     status_counts = summary["counts"]["by_status"]
     failure_counts = summary["counts"]["by_failure_reason"]
+    generation_batches = summary["generation_batches"]
 
     lines = [
         "# LLM Runtime Summary",
@@ -321,6 +362,28 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             lines.append(f"| {reason} | {count} |")
     else:
         lines.append("No failures recorded.")
+
+    lines.extend(
+        [
+            "",
+            "## Generation Batches",
+            "",
+            f"- Batch count: `{generation_batches['batch_count']}`",
+            f"- Configured limits observed: `{generation_batches['configured_limits']}`",
+            f"- Batches reaching configured limit: `{generation_batches['batches_reaching_configured_limit']}`",
+            f"- Mean batch size: `{fmt(generation_batches['batch_size_stats']['avg'])}`",
+            f"- Median batch size: `{fmt(generation_batches['batch_size_stats']['median'])}`",
+            f"- Maximum batch size: `{fmt(generation_batches['batch_size_stats']['max'])}`",
+            "",
+            "| Actual batch size | Batch count |",
+            "|---:|---:|",
+        ]
+    )
+    if generation_batches["batch_size_distribution"]:
+        for batch_size, count in generation_batches["batch_size_distribution"].items():
+            lines.append(f"| {batch_size} | {count} |")
+    else:
+        lines.append("No generation batch metadata recorded.")
 
     lines.extend(
         [
@@ -435,6 +498,9 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "tokens_per_editable_region",
         "started_at_utc",
         "finished_at_utc",
+        "generation_batch_index",
+        "generation_batch_size",
+        "generation_batch_limit",
     ]
     with path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=fieldnames, extrasaction="ignore")
@@ -510,7 +576,7 @@ def main() -> None:
     accepted_rows = [row for row in rows if row.get("status") in ACCEPTED_STATUSES]
     failed_rows = [row for row in rows if row.get("status") not in ACCEPTED_STATUSES]
     summary = {
-        "schema_version": "llm_runtime_summary_v1",
+        "schema_version": "llm_runtime_summary_v2",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(run_dir),
         "metadata_dir": str(metadata_dir),
@@ -535,6 +601,7 @@ def main() -> None:
             "accepted_only": runtime_totals(accepted_rows),
             "failed_only": runtime_totals(failed_rows),
         },
+        "generation_batches": generation_batch_summary(rows),
         "per_prompt": rows,
     }
 
