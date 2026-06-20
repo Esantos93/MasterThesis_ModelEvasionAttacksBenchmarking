@@ -395,6 +395,7 @@ def create_remote_layout(args: argparse.Namespace) -> None:
             f"mkdir -p {remote_root}/03_Models",
             f"mkdir -p {remote_root}/04_Steps/Step16",
             f"mkdir -p {remote_root}/04_Steps/Step17",
+            f"mkdir -p {remote_root}/04_Steps/01_Executions",
             f"mkdir -p {remote_root}/04_Steps/common",
             f"mkdir -p {remote_root}/04_Steps/setups",
         ]
@@ -410,8 +411,14 @@ def transfer_pipeline_files(args: argparse.Namespace) -> None:
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "build_prompts.py", f"{remote_steps}/Step16/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "build_prompts-googleCloud.py", f"{remote_steps}/Step16/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "Dockerfile.step16-17-googleCloud", f"{remote_steps}/Step16/")
+    scp_to_remote(
+        args,
+        PIPELINE_ROOT / "01_Executions" / "GPU" / "run_step16_17_gpu_vm.sh",
+        f"{remote_steps}/01_Executions/",
+    )
     scp_to_remote(args, PIPELINE_ROOT / "step_17_llm_batch_runner" / "run_llm_batch.py", f"{remote_steps}/Step17/")
     scp_to_remote(args, PIPELINE_ROOT / "step_17_llm_batch_runner" / "run_llm_batch-googleCloud.py", f"{remote_steps}/Step17/")
+    scp_to_remote(args, PIPELINE_ROOT / "step_17_llm_batch_runner" / "summarize_llm_runtime.py", f"{remote_steps}/Step17/")
     scp_to_remote(args, Path(args.config), f"{remote_steps}/setups/config_LLM_baseline.json")
 
 
