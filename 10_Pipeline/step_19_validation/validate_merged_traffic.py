@@ -479,6 +479,23 @@ def group_key_for_record(
     return ("uncovered_by_step17", None, None)
 
 
+# Empty-payload packets cannot produce editable regions under the active Step 15
+# payload contract. They may therefore be preserved without appearing in Step 16/17.
+def is_preserved_non_llm_processed_packet(
+    record: dict[str, Any],
+    reference_record: dict[str, Any] | None,
+) -> bool:
+    if reference_record is None:
+        return False
+    return (
+        record.get("payload_hex") == ""
+        and record.get("payload_length_bytes") == 0
+        and reference_record.get("payload_hex") == ""
+        and reference_record.get("payload_length_bytes") == 0
+        and record == reference_record
+    )
+
+
 #This function validates a full Step 18 merged traffic artifact.
 #It first validates packet records, then promotes any packet error to group-level Invalid Traffic.
 def validate_merged_traffic(
@@ -694,13 +711,28 @@ def validate_merged_traffic(
     covered_packet_ids = set(accepted_group_by_packet) | llm_output_failure_packet_id_set
     merged_packet_ids = set(packet_id_counts)
     uncovered_packet_ids = sorted(merged_packet_ids - covered_packet_ids)
-    if uncovered_packet_ids:
+    merged_by_packet_id = {
+        str(record["packet_id"]): record
+        for record in traffic
+        if isinstance(record, dict) and record.get("packet_id") is not None
+    }
+    preserved_non_llm_processed_packet_ids = []
+    unexpectedly_uncovered_packet_ids = []
+    for packet_id in uncovered_packet_ids:
+        record = merged_by_packet_id.get(packet_id)
+        reference_record = reference_by_packet_id.get(packet_id)
+        if isinstance(record, dict) and is_preserved_non_llm_processed_packet(record, reference_record):
+            preserved_non_llm_processed_packet_ids.append(packet_id)
+        else:
+            unexpectedly_uncovered_packet_ids.append(packet_id)
+
+    if unexpectedly_uncovered_packet_ids:
         root_issues.append(
             issue(
                 "warning",
-                "packets_not_covered_by_step17_traceability",
-                "Some merged packets are present in the full Step 14 reference but were not mapped to accepted or failed Step 17 prompt units.",
-                uncovered_packet_count=len(uncovered_packet_ids),
+                "unexpectedly_uncovered_packets",
+                "Some merged packets cannot be classified as preserved without LLM processing but are absent from accepted and failed Step 17 traceability.",
+                unexpectedly_uncovered_packet_count=len(unexpectedly_uncovered_packet_ids),
             )
         )
         warning_count += 1
@@ -728,6 +760,8 @@ def validate_merged_traffic(
         "duplicate_packet_ids": sorted(duplicate_packet_ids),
         "reference_missing_packet_ids": reference_missing_packet_ids,
         "uncovered_by_step17_packet_ids": uncovered_packet_ids,
+        "preserved_non_llm_processed_packet_ids": preserved_non_llm_processed_packet_ids,
+        "unexpectedly_uncovered_packet_ids": unexpectedly_uncovered_packet_ids,
         "summary": {
             "total_packet_count": len(traffic),
             "accepted_packet_count": len(accepted_packets),
@@ -744,6 +778,8 @@ def validate_merged_traffic(
             "duplicate_packet_id_count": len(duplicate_packet_ids),
             "reference_missing_packet_count": len(reference_missing_packet_ids),
             "uncovered_by_step17_packet_count": len(uncovered_packet_ids),
+            "preserved_non_llm_processed_packets_count": len(preserved_non_llm_processed_packet_ids),
+            "unexpectedly_uncovered_packet_count": len(unexpectedly_uncovered_packet_ids),
             "invalid_traffic_packet_count": len(invalid_traffic_packets),
             "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
         },
@@ -798,6 +834,14 @@ def run_validation(
                 ],
                 "llm_output_failure_source": "Step 18 maps rejected Step 17 groups to LLM Output Failure.",
                 "invalid_traffic_source": "Step 19 maps validation errors in accepted Step 18 groups to Invalid Traffic.",
+                "preserved_non_llm_processed_source": (
+                    "Packets absent from Step 17 traceability are classified as preserved without LLM processing only when "
+                    "both merged and reference records have an empty payload and the complete records are identical."
+                ),
+                "unexpectedly_uncovered_warning_policy": (
+                    "A traceability warning is emitted only for uncovered packets that do not satisfy the preserved "
+                    "preserved non-LLM-processed contract."
+                ),
                 "validity_unit": "group",
                 "induced_alert_policy": (
                     "No standalone Induced Alert category. New POST alerts are handled as Alert Mutation "
@@ -810,6 +854,8 @@ def run_validation(
         "duplicate_packet_ids": validation["duplicate_packet_ids"],
         "reference_missing_packet_ids": validation["reference_missing_packet_ids"],
         "uncovered_by_step17_packet_ids": validation["uncovered_by_step17_packet_ids"],
+        "preserved_non_llm_processed_packet_ids": validation["preserved_non_llm_processed_packet_ids"],
+        "unexpectedly_uncovered_packet_ids": validation["unexpectedly_uncovered_packet_ids"],
         "llm_output_failure_groups": validation["llm_output_failure_groups"],
         "invalid_traffic_groups": validation["invalid_traffic_groups"],
         "group_results": validation["group_results"],
@@ -888,6 +934,8 @@ def main() -> None:
         print(f"Accepted groups: {result['accepted_group_count']}")
         print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
         print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
+        print(f"Preserved non-LLM-processed packets: {result['preserved_non_llm_processed_packets_count']}")
+        print(f"Unexpectedly uncovered packets: {result['unexpectedly_uncovered_packet_count']}")
         print(f"Errors: {result['error_count']}")
         print(f"Warnings: {result['warning_count']}")
         print(f"Validation report: {result['validation_report']}")
