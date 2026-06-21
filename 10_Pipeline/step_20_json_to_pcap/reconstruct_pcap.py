@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import binascii
 import json
 import sys
@@ -69,6 +70,7 @@ def experiment_config_label_from_config(config: dict[str, Any]) -> str:
 def import_scapy() -> dict[str, Any]:
     try:
         from scapy.all import Ether, ICMP, IP, IPv6, PcapWriter, Raw, TCP, UDP, raw
+        from scapy.layers.inet import TCPOptions
     except ImportError as exc:
         raise RuntimeError(
             "Scapy is required for step_20_json_to_pcap. Install it in the Ubuntu "
@@ -82,6 +84,7 @@ def import_scapy() -> dict[str, Any]:
         "PcapWriter": PcapWriter,
         "Raw": Raw,
         "TCP": TCP,
+        "TCP_OPTION_NAMES": frozenset(TCPOptions[1]),
         "UDP": UDP,
         "raw": raw,
     }
@@ -109,6 +112,44 @@ def int_or_default(value: Any, default: int | None) -> int | None:
     if is_int_like(value):
         return value
     return default
+
+
+def normalize_tcp_option_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bytes, str)) or is_int_like(value):
+        return value
+    if isinstance(value, (tuple, list)):
+        return tuple(normalize_tcp_option_value(item) for item in value)
+    raise ValueError(f"unsupported TCP option value type: {type(value).__name__}")
+
+
+# Step 14 stores Scapy's list-of-tuples display form as text. literal_eval parses
+# only Python literals; unlike eval, it cannot execute names, calls, or imports.
+def parse_tcp_options(value: Any, supported_names: set[str] | frozenset[str]) -> list[tuple[Any, Any]]:
+    if value in (None, "", "[]"):
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = ast.literal_eval(value)
+        except (SyntaxError, ValueError) as error:
+            raise ValueError(f"TCP options display string is not a valid literal: {error}") from error
+    else:
+        parsed = value
+
+    if not isinstance(parsed, (list, tuple)):
+        raise ValueError("TCP options must be a list or tuple of (name, value) pairs")
+
+    normalized = []
+    for index, option in enumerate(parsed):
+        if not isinstance(option, (list, tuple)) or len(option) != 2:
+            raise ValueError(f"TCP option at index {index} is not a two-item pair")
+        name, option_value = option
+        if isinstance(name, str):
+            if name not in supported_names:
+                raise ValueError(f"TCP option at index {index} has unsupported name {name!r}")
+        elif not (is_int_like(name) and 0 <= name <= 255):
+            raise ValueError(f"TCP option at index {index} must use a supported name or an 8-bit kind")
+        normalized.append((name, normalize_tcp_option_value(option_value)))
+    return normalized
 
 
 # This function decodes the mutable payload_hex field into bytes.
@@ -230,18 +271,22 @@ def build_transport_layer(record: dict[str, Any], scapy: dict[str, Any], packet_
         window = int_or_default(record.get("window"), None)
         if window is not None:
             kwargs["window"] = window
-        options = record.get("options")
-        if options not in (None, "", "[]"):
-            # Step 14 stores TCP options as a display string, not as a safe structured object for Scapy reconstruction.
+        try:
+            options = parse_tcp_options(record.get("options"), scapy["TCP_OPTION_NAMES"])
+        except ValueError as error:
             packet_issues.append(
                 issue(
-                    "warning",
-                    "tcp_options_not_reconstructed",
-                    "TCP options are stored as a display string and are not reconstructed by Step 20.",
+                    "error",
+                    "tcp_options_invalid",
+                    "TCP options could not be parsed and validated for reconstruction.",
                     field="options",
-                    policy="omit_non_structured_tcp_options",
+                    failure_message=str(error),
+                    policy="reject_instead_of_omitting_tcp_options",
                 )
             )
+            options = []
+        if options:
+            kwargs["options"] = options
         return TCP(**kwargs)
 
     if transport_protocol == "UDP":
@@ -337,9 +382,22 @@ def reconstruct_one_packet(record: Any, record_index: int, scapy: dict[str, Any]
 
     # These checks do not block reconstruction. They record differences caused by Scapy rebuilding the packet from structured fields.
     if packet is not None:
-        rebuilt_length = len(scapy["raw"](packet))
+        try:
+            rebuilt_length = len(scapy["raw"](packet))
+        except Exception as error:
+            packet_issues.append(
+                issue(
+                    "error",
+                    "packet_serialization_failed",
+                    "Scapy could not serialize the reconstructed packet.",
+                    failure_type=type(error).__name__,
+                    failure_message=str(error),
+                )
+            )
+            packet = None
+            rebuilt_length = None
         declared_packet_length = record.get("packet_length_bytes")
-        if is_int_like(declared_packet_length) and declared_packet_length != rebuilt_length:
+        if rebuilt_length is not None and is_int_like(declared_packet_length) and declared_packet_length != rebuilt_length:
             packet_issues.append(
                 issue(
                     "warning",
@@ -504,7 +562,7 @@ def reconstruct_validated_traffic(
                 "checksum_policy": "Scapy recalculates checksums from rebuilt layers at write time",
                 "length_policy": "Scapy recalculates IP, TCP, UDP, and frame lengths from rebuilt layers",
                 "automatic_repair_policy": "Do not silently repair; report omitted fields, recalculated lengths, and packet failures.",
-                "tcp_options_policy": "Step 14 stores TCP options as display strings, so Step 20 omits non-empty options and reports a warning.",
+                "tcp_options_policy": "Parse Step 14 display strings with ast.literal_eval, validate option pairs against Scapy, reconstruct them, and reject packets whose options cannot be safely encoded.",
             },
         },
         "summary": {
