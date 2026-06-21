@@ -1,0 +1,4 @@
+The file run_step16_17_gpu_vm.sh must be transferred to the host where the inference is run before being executed.
+
+The command to carry out the execution might be found in: 
+"C:\Users\dorna\OneDrive\Documentos\03_Academico\02_KTH_TCYSM\02_Asignaturas\TFM\30_Implementation\31_Code\20_Commands\02_LLM_inference\01_LLM_inference_remote_execution_GPU.txt"
