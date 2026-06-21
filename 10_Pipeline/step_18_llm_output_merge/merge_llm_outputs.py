@@ -371,23 +371,48 @@ def detect_overlapping_edits(edits: list[dict[str, Any]]) -> list[dict[str, Any]
         by_packet[edit["packet_id"]].append(edit)
     for packet_id, packet_edits in by_packet.items():
         ordered = sorted(packet_edits, key=lambda item: item["absolute_start_offset_bytes"])
-        previous_end = -1
-        previous_edit = None
-        for edit in ordered:
-            start = edit["absolute_start_offset_bytes"]
-            end = start + edit["replaced_length_bytes"]
-            if previous_edit is not None and start < previous_end:
+        for left_index, left_edit in enumerate(ordered):
+            left_start = left_edit["absolute_start_offset_bytes"]
+            left_end = left_start + left_edit["replaced_length_bytes"]
+            for right_edit in ordered[left_index + 1:]:
+                right_start = right_edit["absolute_start_offset_bytes"]
+                if right_start >= left_end:
+                    break
+                right_end = right_start + right_edit["replaced_length_bytes"]
+                if left_start >= right_end:
+                    continue
                 issues.append(
                     {
                         "reason": "overlapping_patches_for_packet",
                         "packet_id": packet_id,
-                        "previous_region_id": previous_edit["region_id"],
-                        "region_id": edit["region_id"],
+                        "previous_region_id": left_edit["region_id"],
+                        "region_id": right_edit["region_id"],
+                        "previous_prompt_unit_id": left_edit.get("prompt_unit_id"),
+                        "prompt_unit_id": right_edit.get("prompt_unit_id"),
+                        "previous_parent_group_id": left_edit.get("parent_group_id"),
+                        "parent_group_id": right_edit.get("parent_group_id"),
                     }
                 )
-            previous_end = max(previous_end, end)
-            previous_edit = edit
     return issues
+
+
+#This function removes every prompt unit involved in an overlap while preserving independent edits.
+def partition_overlapping_edits(
+    edits: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], list[dict[str, Any]]]:
+    issues = detect_overlapping_edits(edits)
+    conflicting_prompt_unit_ids = {
+        str(prompt_unit_id)
+        for issue in issues
+        for prompt_unit_id in (issue.get("previous_prompt_unit_id"), issue.get("prompt_unit_id"))
+        if prompt_unit_id is not None
+    }
+    safe_edits = [
+        edit
+        for edit in edits
+        if str(edit.get("prompt_unit_id")) not in conflicting_prompt_unit_ids
+    ]
+    return safe_edits, conflicting_prompt_unit_ids, issues
 
 
 #This function applies absolute payload edits to copied Step 14 records using original payload coordinates.
@@ -600,16 +625,29 @@ def apply_model_patches(
                 }
             )
 
-    overlap_errors = detect_overlapping_edits(candidate_edits)
+    candidate_edits, conflicting_prompt_unit_ids, overlap_errors = partition_overlapping_edits(candidate_edits)
     patch_application_errors.extend(overlap_errors)
-    if overlap_errors:
-        candidate_edits = []
+    if conflicting_prompt_unit_ids:
+        retained_accepted_groups = []
         for group in accepted_groups:
+            prompt_unit_id = str(group.get("prompt_unit_id"))
+            if prompt_unit_id not in conflicting_prompt_unit_ids:
+                retained_accepted_groups.append(group)
+                continue
             group["status"] = "failed"
             group["evaluation_status"] = "LLM Output Failure"
             group["failure_reason"] = "overlapping_patches_detected"
+            group["applied_patch_count"] = 0
+            group["patch_errors"] = [
+                issue
+                for issue in overlap_errors
+                if prompt_unit_id in {
+                    str(issue.get("previous_prompt_unit_id")),
+                    str(issue.get("prompt_unit_id")),
+                }
+            ]
             llm_output_failure_groups.append(group)
-        accepted_groups = []
+        accepted_groups = retained_accepted_groups
 
     modified_records = copy.deepcopy(reference_records)
     modified_records, applied_patches = apply_absolute_edits(traffic_records=modified_records, edits=candidate_edits)
