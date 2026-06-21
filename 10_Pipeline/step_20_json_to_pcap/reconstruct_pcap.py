@@ -23,6 +23,7 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v1"
 DEFAULT_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v1"
+ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = 60
 
 
 # This function reads a JSON file and returns the parsed Python object.
@@ -150,6 +151,22 @@ def parse_tcp_options(value: Any, supported_names: set[str] | frozenset[str]) ->
             raise ValueError(f"TCP option at index {index} must use a supported name or an 8-bit kind")
         normalized.append((name, normalize_tcp_option_value(option_value)))
     return normalized
+
+
+# PCAPs normally store Ethernet frames without the four-byte FCS but retain the
+# zero padding required to reach the 60-byte minimum frame size. Padding is
+# appended after serializing IP so it remains outside the IP/TCP lengths.
+def apply_ethernet_minimum_padding(packet: Any, scapy: dict[str, Any]) -> tuple[Any, bytes, int]:
+    serialized = scapy["raw"](packet)
+    padding_length = max(0, ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS - len(serialized))
+    if padding_length == 0:
+        return packet, serialized, 0
+
+    timestamp = getattr(packet, "time", None)
+    padded_packet = scapy["Ether"](serialized + (b"\x00" * padding_length))
+    if timestamp is not None:
+        padded_packet.time = timestamp
+    return padded_packet, scapy["raw"](padded_packet), padding_length
 
 
 # This function decodes the mutable payload_hex field into bytes.
@@ -383,7 +400,18 @@ def reconstruct_one_packet(record: Any, record_index: int, scapy: dict[str, Any]
     # These checks do not block reconstruction. They record differences caused by Scapy rebuilding the packet from structured fields.
     if packet is not None:
         try:
-            rebuilt_length = len(scapy["raw"](packet))
+            packet, rebuilt_bytes, ethernet_padding_length = apply_ethernet_minimum_padding(packet, scapy)
+            rebuilt_length = len(rebuilt_bytes)
+            if ethernet_padding_length:
+                packet_issues.append(
+                    issue(
+                        "info",
+                        "ethernet_minimum_padding_added",
+                        "Zero padding was added outside the IP packet to preserve the Ethernet minimum frame size.",
+                        padding_bytes=ethernet_padding_length,
+                        minimum_frame_bytes_without_fcs=ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS,
+                    )
+                )
         except Exception as error:
             packet_issues.append(
                 issue(
@@ -561,6 +589,7 @@ def reconstruct_validated_traffic(
                 "timestamp_policy": "preserve timestamp_epoch_pcap when numeric",
                 "checksum_policy": "Scapy recalculates checksums from rebuilt layers at write time",
                 "length_policy": "Scapy recalculates IP, TCP, UDP, and frame lengths from rebuilt layers",
+                "ethernet_padding_policy": "After IP/TCP serialization, append zero bytes outside the IP length until Ethernet frames reach the 60-byte minimum without FCS.",
                 "automatic_repair_policy": "Do not silently repair; report omitted fields, recalculated lengths, and packet failures.",
                 "tcp_options_policy": "Parse Step 14 display strings with ast.literal_eval, validate option pairs against Scapy, reconstruct them, and reject packets whose options cannot be safely encoded.",
             },
