@@ -22,6 +22,7 @@
     "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
     "plugin_path": "/usr/local/etc/snort/so_rules",
     "daq_dir": "/usr/local/lib/daq",
+    "snaplen": 65535,
     "enable_builtin_rules": true
   },
   "llm": {

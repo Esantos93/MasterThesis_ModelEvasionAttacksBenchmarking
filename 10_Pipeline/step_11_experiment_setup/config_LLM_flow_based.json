@@ -22,6 +22,7 @@
     "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
     "plugin_path": "/usr/local/etc/snort/so_rules",
     "daq_dir": "/usr/local/lib/daq",
+    "snaplen": 65535,
     "enable_builtin_rules": true
   },
   "llm": {
@@ -51,6 +52,7 @@
       "baseline-flow-based-v1"
     ],
     "grouping_policy": "flow_based",
+    "grouping_unit": "canonical_tcp_region",
     "flow_payload_slide_window_overlap_units": 3,
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
