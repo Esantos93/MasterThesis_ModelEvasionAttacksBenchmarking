@@ -15,9 +15,11 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
 
 
-SCHEMA_VERSION = "packet_json_v2"
+SCHEMA_VERSION = "packet_json_v3"
+GROUPING_UNIT = "canonical_tcp_region"
 
 
 # This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
@@ -213,6 +215,8 @@ def extract_transport(packet: Any, scapy: dict[str, Any]) -> dict[str, Any]:
             "dst_port": integer_or_none(layer.dport),
             "tcp_flags": int(layer.flags),
             "tcp_flags_str": str(layer.flags),
+            "tcp_seq": int(layer.seq),
+            "tcp_ack": int(layer.ack),
             "window": integer_or_none(layer.window),
             "options": str(layer.options),
         }
@@ -309,6 +313,9 @@ def convert_pcap_to_json_records(
 ) -> dict[str, Any]:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id"], "experiment")
+    require_keys(config["pipeline"], ["grouping_unit"], "pipeline")
+    if str(config["pipeline"]["grouping_unit"]).strip() != GROUPING_UNIT:
+        raise ValueError(f"Step 14 requires pipeline.grouping_unit={GROUPING_UNIT!r}.")
 
     scapy = import_scapy()
     PcapReader = scapy["PcapReader"]
@@ -345,6 +352,19 @@ def convert_pcap_to_json_records(
             f"Selected PCAP packet count ({len(records)}) does not match step 13 packet index count ({expected_count})."
         )
 
+    # TCP canonicalization is independent of the later grouping policy and always runs before Step 15.
+    tcp_canonicalization = canonicalize_tcp_records(records)
+    tcp_summary = tcp_canonicalization["summary"]
+    if tcp_summary["tcp_packet_count"] != protocol_counts.get("TCP", 0):
+        raise ValueError("TCP canonicalization did not account for every TCP packet record.")
+    tcp_packets_without_connection = [
+        record.get("packet_id")
+        for record in records
+        if record.get("transport_protocol") == "TCP" and not record.get("tcp_connection_id")
+    ]
+    if tcp_packets_without_connection:
+        raise ValueError(f"TCP packets without canonical connection identity: {tcp_packets_without_connection[:10]}")
+
     record_sizes = [compact_record_size(record) for record in records]
     output = {
         "metadata": {
@@ -353,6 +373,7 @@ def convert_pcap_to_json_records(
             "config_source": config.get("_config_path", ""),
             "schema_version": SCHEMA_VERSION,
             "grouping_policy": config.get("pipeline", {}).get("grouping_policy", ""),
+            "grouping_unit": GROUPING_UNIT,
             "include_flow_context": include_flow_context,
             "source_selected_pcap": str(input_pcap_path),
             "packet_manifest_path": str(packet_manifest_path),
@@ -366,6 +387,7 @@ def convert_pcap_to_json_records(
                 "max": max(record_sizes) if record_sizes else 0,
             },
             "protocol_counts": dict(sorted(protocol_counts.items())),
+            "tcp_canonicalization": tcp_summary,
         },
         "immutable_fields": [
             "packet_id",
@@ -374,6 +396,12 @@ def convert_pcap_to_json_records(
             "timestamp_epoch_pcap",
         ],
         "traffic": records,
+        "tcp_connections": tcp_canonicalization["tcp_connections"],
+        "tcp_streams": tcp_canonicalization["tcp_streams"],
+        "canonical_tcp_regions": tcp_canonicalization["canonical_tcp_regions"],
+        "tcp_physical_representations": tcp_canonicalization["tcp_physical_representations"],
+        "tcp_representation_sets": tcp_canonicalization["tcp_representation_sets"],
+        "tcp_canonicalization_conflicts": tcp_canonicalization["tcp_canonicalization_conflicts"],
     }
     if include_flow_context:
         flow_ids = referenced_flow_ids(records)
@@ -419,6 +447,7 @@ def run_conversion(
         "packet_count": packet_json["metadata"]["packet_count"],
         "output_json_size_bytes": output_json_file.stat().st_size,
         "average_record_size_bytes": packet_json["metadata"]["packet_record_size_bytes_compact"]["average"],
+        "tcp_canonicalization": packet_json["metadata"]["tcp_canonicalization"],
     }
 
 
@@ -448,6 +477,15 @@ def main() -> None:
     )
     print(f"Packet JSON records: {result['packet_count']}")
     print(f"Average compact record size: {result['average_record_size_bytes']} bytes")
+    tcp_summary = result["tcp_canonicalization"]
+    print(
+        "TCP canonicalization: "
+        f"connections={tcp_summary['tcp_connection_count']}, "
+        f"streams={tcp_summary['tcp_stream_count']}, "
+        f"regions={tcp_summary['canonical_region_count']}, "
+        f"conflicts={tcp_summary['conflict_count']}, "
+        f"oversized_frames={tcp_summary['oversized_frame_count']}"
+    )
     print(f"Packet JSON written to: {result['output_json']}")
 
 
