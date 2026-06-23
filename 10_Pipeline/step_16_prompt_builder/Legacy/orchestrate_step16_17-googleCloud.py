@@ -65,7 +65,8 @@ class TeeStream:
 # This function starts persistent terminal logging for the orchestrator run.
 def configure_logging(args: argparse.Namespace):
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    run_id = args.step17_run_id or "no_run_id_yet"
+    preferred_run_id = args.step16_run_id if args.skip_step17 else args.step17_run_id
+    run_id = preferred_run_id or args.step16_run_id or args.step17_run_id or "no_run_id_yet"
     if args.log_file:
         log_path = Path(args.log_file).expanduser()
     elif args.local_output_dir:
@@ -394,6 +395,7 @@ def create_remote_layout(args: argparse.Namespace) -> None:
             f"mkdir -p {remote_root}/03_Models",
             f"mkdir -p {remote_root}/04_Steps/Step16",
             f"mkdir -p {remote_root}/04_Steps/Step17",
+            f"mkdir -p {remote_root}/04_Steps/01_Executions",
             f"mkdir -p {remote_root}/04_Steps/common",
             f"mkdir -p {remote_root}/04_Steps/setups",
         ]
@@ -409,8 +411,14 @@ def transfer_pipeline_files(args: argparse.Namespace) -> None:
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "build_prompts.py", f"{remote_steps}/Step16/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "build_prompts-googleCloud.py", f"{remote_steps}/Step16/")
     scp_to_remote(args, PIPELINE_ROOT / "step_16_prompt_builder" / "Dockerfile.step16-17-googleCloud", f"{remote_steps}/Step16/")
+    scp_to_remote(
+        args,
+        PIPELINE_ROOT / "01_Executions" / "GPU" / "run_step16_17_gpu_vm.sh",
+        f"{remote_steps}/01_Executions/",
+    )
     scp_to_remote(args, PIPELINE_ROOT / "step_17_llm_batch_runner" / "run_llm_batch.py", f"{remote_steps}/Step17/")
     scp_to_remote(args, PIPELINE_ROOT / "step_17_llm_batch_runner" / "run_llm_batch-googleCloud.py", f"{remote_steps}/Step17/")
+    scp_to_remote(args, PIPELINE_ROOT / "step_17_llm_batch_runner" / "summarize_llm_runtime.py", f"{remote_steps}/Step17/")
     scp_to_remote(args, Path(args.config), f"{remote_steps}/setups/config_LLM_baseline.json")
 
 
@@ -455,7 +463,7 @@ def resolve_grouping_label(args: argparse.Namespace) -> str:
     return "05_groups"
 
 
-# This function resolves a stable run id before Step 16/17 execute so both steps use the same run-specific paths.
+# This function resolves the Step 17 inference run id.
 def resolve_step17_run_id(args: argparse.Namespace) -> str:
     if args.step17_run_id:
         args.step17_run_id = safe_path_label(args.step17_run_id)
@@ -466,12 +474,22 @@ def resolve_step17_run_id(args: argparse.Namespace) -> str:
     return args.step17_run_id
 
 
+# This function resolves the Step 16 prompt-generation run id.
+# An explicit Step 16 id wins; otherwise Step 17's id is shared for backwards compatibility.
+def resolve_step16_run_id(args: argparse.Namespace) -> str:
+    if args.step16_run_id:
+        args.step16_run_id = safe_path_label(args.step16_run_id)
+        return args.step16_run_id
+    args.step16_run_id = resolve_step17_run_id(args)
+    return args.step16_run_id
+
+
 # This function resolves the run-specific remote prompt directory produced by Step 16.
 def resolve_step16_output_dir(args: argparse.Namespace) -> str:
     if args.step16_output_dir:
         return args.step16_output_dir.rstrip("/")
     grouping_label = resolve_grouping_label(args)
-    run_id = resolve_step17_run_id(args)
+    run_id = resolve_step16_run_id(args)
     args.step16_output_dir = (
         f"{args.remote_root}/02_OutputFiles/{args.experiment_id}/06_prompts/{grouping_label}/{run_id}"
     )
@@ -510,9 +528,17 @@ def resolve_gcs_output_root(args: argparse.Namespace) -> str:
     return args.gcs_output_root
 
 
+# This function selects the run id that owns uploaded/fetched artifacts.
+# Inference runs are self-contained under the Step 17 id; Step16-only runs use the Step 16 id.
+def resolve_artifact_run_id(args: argparse.Namespace) -> str:
+    if args.skip_step17:
+        return resolve_step16_run_id(args)
+    return resolve_step17_run_id(args)
+
+
 # This function resolves the run-specific GCS artifact root.
 def resolve_gcs_run_root(args: argparse.Namespace) -> str:
-    return f"{resolve_gcs_output_root(args)}/{resolve_step17_run_id(args)}"
+    return f"{resolve_gcs_output_root(args)}/{resolve_artifact_run_id(args)}"
 
 
 # This function lists model folders already staged in the run-specific GCS Step 17 output tree.
@@ -755,6 +781,7 @@ def run_step17(args: argparse.Namespace) -> None:
         command.extend(["--n-threads", str(args.n_threads)])
     if args.limit_prompts_s17 is not None:
         command.extend(["--limit-prompts-s17", str(args.limit_prompts_s17)])
+    command.extend(["--llm-batch-size", str(args.llm_batch_size)])
     if args.step17_prompt_manifest:
         command.extend(["--prompt-manifest", args.step17_prompt_manifest])
     if args.step17_prompt_dir:
@@ -776,6 +803,8 @@ def run_step17(args: argparse.Namespace) -> None:
     if args.step17_backend == "vllm":
         command.extend(["--vllm-dtype", args.vllm_dtype])
         command.extend(["--vllm-gpu-memory-utilization", str(args.vllm_gpu_memory_utilization)])
+        if args.probe_vllm_per_request_sampling:
+            command.append("--probe-vllm-per-request-sampling")
         if args.vllm_quantization:
             command.extend(["--vllm-quantization", args.vllm_quantization])
         if args.vllm_max_model_len is not None:
@@ -794,10 +823,14 @@ def run_step17(args: argparse.Namespace) -> None:
 
 # This function uploads run-specific Step 16 prompts and Step 17 outputs from the GPU VM to GCS.
 def upload_outputs_to_gcs(args: argparse.Namespace) -> None:
-    run_id = resolve_step17_run_id(args)
+    run_id = resolve_artifact_run_id(args)
     remote_prompt_dir = resolve_step16_output_dir(args)
     remote_step17_root = resolve_step17_output_root(args)
-    remote_model_run_dirs = [] if args.skip_step17_upload else list_remote_model_run_dirs(args, remote_step17_root, run_id)
+    remote_model_run_dirs = (
+        []
+        if args.skip_step17 or args.skip_step17_upload
+        else list_remote_model_run_dirs(args, remote_step17_root, run_id)
+    )
     gcs_run_root = resolve_gcs_run_root(args)
     gcs_output_root = resolve_gcs_output_root(args)
     metadata_dirs = " ".join(
@@ -860,7 +893,7 @@ def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
         raise ValueError("Fetching outputs requires --local-output-dir.")
     local_experiment_root = Path(args.local_output_dir).expanduser()
     grouping_label = resolve_grouping_label(args)
-    run_id = resolve_step17_run_id(args)
+    run_id = resolve_artifact_run_id(args)
     gcs_run_root = resolve_gcs_run_root(args)
     prompt_manifest_gcs = f"{gcs_run_root}/06_prompts/prompt_manifest.json"
     step17_outputs_gcs = f"{gcs_run_root}/07_llm_outputs/"
@@ -869,7 +902,8 @@ def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
             f"No Step 16 prompt artifacts found for run_id={run_id} under {gcs_run_root}. "
             "Run first without --skip-gcs-upload, or provide an existing GCS run root."
         )
-    if not args.skip_step17_fetch and not gcs_path_exists(args, step17_outputs_gcs):
+    skip_step17_fetch = args.skip_step17 or args.skip_step17_fetch
+    if not skip_step17_fetch and not gcs_path_exists(args, step17_outputs_gcs):
         raise FileNotFoundError(
             f"No complete Step 17 GCS artifacts found for run_id={run_id} under {gcs_run_root}. "
             "Run first without --skip-gcs-upload, or provide an existing GCS run root."
@@ -890,7 +924,7 @@ def fetch_outputs_from_gcs(args: argparse.Namespace) -> None:
             args.dry_run,
         )
 
-    if args.skip_step17_fetch:
+    if skip_step17_fetch:
         return
 
     for gcs_model_dir in list_gcs_model_output_dirs(args, gcs_run_root):
@@ -917,7 +951,7 @@ def fetch_outputs_direct_from_gpu(args: argparse.Namespace) -> None:
         raise ValueError("Fetching outputs requires --local-output-dir.")
     local_experiment_root = Path(args.local_output_dir).expanduser()
     grouping_label = resolve_grouping_label(args)
-    run_id = resolve_step17_run_id(args)
+    run_id = resolve_artifact_run_id(args)
     remote_prompt_dir = resolve_step16_output_dir(args)
     remote_step17_root = resolve_step17_output_root(args)
     local_prompt_dir = local_experiment_root / "06_prompts" / grouping_label / run_id
@@ -925,7 +959,7 @@ def fetch_outputs_direct_from_gpu(args: argparse.Namespace) -> None:
     if not args.skip_step16_fetch:
         scp_from_remote(args, remote_prompt_dir, local_prompt_dir)
 
-    if args.skip_step17_fetch:
+    if args.skip_step17 or args.skip_step17_fetch:
         return
 
     for remote_model_run_dir in list_remote_model_run_dirs(args, remote_step17_root, run_id):
@@ -938,7 +972,7 @@ def fetch_outputs_direct_from_gpu(args: argparse.Namespace) -> None:
 # This function defines all command-line options used by the orchestrator.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create a Google GPU VM, run Step 16 and Step 17 there, and copy outputs back."
+        description="Create a Google GPU VM, run Step 16 and Step 17 there, and optionally fetch outputs locally."
     )
     parser.add_argument("--project", required=True)
     parser.add_argument("--zone", default=DEFAULT_ZONE)
@@ -972,7 +1006,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-file", help="Optional local log file for all orchestrator terminal output. Defaults to <local-output-dir>/logs/orchestrate_step16_17-googleCloud/<run_id>/ when --local-output-dir is available.")
     parser.add_argument("--gcs-output-root", help="Cloud Storage root for run artifact exchange. Defaults to gs://thesis-santos-llm-artifacts/<experiment_id>/runs.")
     parser.add_argument("--skip-gcs-upload", action="store_true", help="Skip uploading run artifacts from the GPU VM to Cloud Storage.")
-    parser.add_argument("--skip-gcs-fetch", action="store_true", help="Skip fetching run artifacts from Cloud Storage or directly from the GPU VM to --local-output-dir.")
     parser.add_argument("--skip-step16-upload", action="store_true", help="Skip uploading Step 16 prompt artifacts from the GPU VM to Cloud Storage.")
     parser.add_argument("--skip-step17-upload", action="store_true", help="Skip uploading Step 17 model output artifacts from the GPU VM to Cloud Storage.")
     parser.add_argument("--skip-step16-fetch", action="store_true", help="Skip fetching Step 16 prompt artifacts to --local-output-dir.")
@@ -999,6 +1032,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--step16-input-dir")
     parser.add_argument("--step16-output-dir")
+    parser.add_argument(
+        "--step16-run-id",
+        help="Run id for the Step 16 prompt directory. Defaults to --step17-run-id when omitted.",
+    )
     parser.add_argument("--limit-prompts-s16", type=int, help="Build Step 16 prompts only for the first N Step 15 prompt units.")
     parser.add_argument(
         "--prompt-unit-id-s16",
@@ -1008,6 +1045,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-step16", action="store_true")
 
     parser.add_argument("--limit-prompts-s17", type=int, help="Run Step 17 only for the first N Step 16 prompt packages.")
+    parser.add_argument("--llm-batch-size", type=int, default=1, help="Maximum number of real LLM prompt units per Step 17 generation batch.")
     parser.add_argument("--skip-step17", action="store_true")
     parser.add_argument("--step17-prompt-manifest")
     parser.add_argument("--step17-prompt-dir")
@@ -1022,6 +1060,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-quantization")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--vllm-max-model-len", type=int)
+    parser.add_argument("--probe-vllm-per-request-sampling", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--n-gpu-layers", type=int, default=-1)
     parser.add_argument("--n-threads", type=int)
@@ -1038,7 +1077,11 @@ def parse_args() -> argparse.Namespace:
 # The skip flags allow testing individual stages, for example Step 16 without immediately running Step 17.
 def main() -> None:
     args = parse_args()
-    resolve_step17_run_id(args)
+    if args.skip_step17:
+        resolve_step16_run_id(args)
+    else:
+        resolve_step17_run_id(args)
+        resolve_step16_run_id(args)
     log_file, original_stdout, original_stderr = configure_logging(args)
     try:
         if not args.skip_create_instance:
@@ -1061,11 +1104,13 @@ def main() -> None:
         run_step17(args)
         if not args.skip_gcs_upload:
             upload_outputs_to_gcs(args)
-        if not args.skip_gcs_fetch:
+        if args.local_output_dir:
             if args.fetch_direct_from_gpu:
                 fetch_outputs_direct_from_gpu(args)
             else:
                 fetch_outputs_from_gcs(args)
+        else:
+            print("No --local-output-dir provided; skipping local artifact fetch.")
     finally:
         if args.delete_instance_after_run:
             delete_instance(args)
