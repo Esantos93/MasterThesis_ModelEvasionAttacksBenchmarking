@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 
-#This Google Cloud runner keeps the original Step 17 validation/output logic, but replaces llama-cpp-python with vLLM.
-#It is meant for modern GPU instances such as NVIDIA L4/A100 where Hugging Face models are preferable to GGUF files.
+#This vLLM runner keeps the original Step 17 validation/output logic, but replaces llama-cpp-python with vLLM.
+#It is meant for modern GPU instances such as NVIDIA L4/H100 where Hugging Face models are preferable to GGUF files.
 
 STEP17_DIR = Path(__file__).resolve().parent
 if str(STEP17_DIR) not in sys.path:
