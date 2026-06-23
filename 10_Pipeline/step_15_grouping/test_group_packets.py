@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
-from step_15_grouping.group_packets import run_grouping
+from step_15_grouping.group_packets import build_token_estimation_view, estimate_json_tokens, run_grouping
 from step_16_prompt_builder.build_prompts import build_prompt_package
 
 
@@ -205,6 +205,10 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
 
         editable_unit = next(unit for unit in units if unit["editable_region_count"] > 0)
+        self.assertEqual(
+            editable_unit["estimated_input_tokens"],
+            estimate_json_tokens(build_token_estimation_view(editable_unit), 3.0),
+        )
         prompt_package = build_prompt_package(
             config=active_config,
             prompt_version="compact_patch_prompting_v2",

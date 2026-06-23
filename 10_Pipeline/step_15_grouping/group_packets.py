@@ -72,6 +72,24 @@ def estimate_json_tokens(data: Any, chars_per_token_estimate: float) -> int:
     return max(1, int(size_chars / chars_per_token_estimate) + 1)
 
 
+#This helper mirrors exactly the compact Step 15 fields that Step 16 embeds in the LLM prompt.
+def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": prompt_unit["schema_version"],
+        "experiment_id": prompt_unit.get("experiment_id"),
+        "parent_group_id": prompt_unit["parent_group_id"],
+        "prompt_unit_id": prompt_unit["prompt_unit_id"],
+        "unit_type": prompt_unit.get("unit_type"),
+        "group_metadata": prompt_unit.get("group_metadata", {}),
+        "token_budget": prompt_unit.get("token_budget", {}),
+        "packet_ids": prompt_unit.get("packet_ids", []),
+        "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
+        "context_packet_ids": prompt_unit.get("context_packet_ids", []),
+        "packets": prompt_unit.get("packets", []),
+        "context_truncation": prompt_unit.get("context_truncation"),
+    }
+
+
 #This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
 def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
@@ -803,8 +821,8 @@ def build_group_metadata(
 ) -> dict[str, Any]:
     first_timestamps = [record.get("first_timestamp_epoch_pcap") for record in records]
     last_timestamps = [record.get("last_timestamp_epoch_pcap") for record in records]
-    connections = unique_strings([record.get("tcp_connection_id") for record in records])
-    streams = unique_strings([record.get("tcp_stream_id") for record in records])
+    connections = {str(record.get("tcp_connection_id")) for record in records}
+    streams = {str(record.get("tcp_stream_id")) for record in records}
     metadata = {
         "parent_group_id": parent_group_id,
         "group_index": group_index,
@@ -816,8 +834,8 @@ def build_group_metadata(
         "source_packet_alias_count": len({packet_id for record in records for packet_id in record["source_packet_ids"]}),
         "first_timestamp_epoch_pcap": min(first_timestamps) if first_timestamps else None,
         "last_timestamp_epoch_pcap": max(last_timestamps) if last_timestamps else None,
-        "tcp_connection_ids": connections,
-        "tcp_stream_ids": streams,
+        "tcp_connection_count": len(connections),
+        "tcp_stream_count": len(streams),
     }
     if grouping_policy == "flow_based":
         mapping_status_counts: Counter[str] = Counter()
@@ -928,7 +946,10 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
     prompt_unit["context_packet_ids"] = context_region_ids
     prompt_unit["editable_region_count"] = sum(len(packet.get("editable_regions", [])) for packet in packets)
     prompt_unit["payload_window_count"] = sum(1 for packet in packets if packet.get("payload_view", {}).get("mode") == "payload_window")
-    prompt_unit["estimated_input_tokens"] = estimate_json_tokens(prompt_unit, float(token_config["chars_per_token_estimate"]))
+    prompt_unit["estimated_input_tokens"] = estimate_json_tokens(
+        build_token_estimation_view(prompt_unit),
+        float(token_config["chars_per_token_estimate"]),
+    )
 
 
 #This function marks prompt units that still exceed the soft Step 15 budget after all local splitting options.
@@ -1104,7 +1125,7 @@ def build_base_prompt_units(
             input_token_budget=input_token_budget,
             context_truncation=None,
         )
-        if prompt_unit["estimated_input_tokens"] <= input_token_budget or grouping_policy != "flow_based":
+        if prompt_unit["estimated_input_tokens"] <= input_token_budget:
             prompt_units.append(prompt_unit)
             continue
         if len(chunk["core_packets"]) <= 1:
