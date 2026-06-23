@@ -20,6 +20,7 @@ set -Eeuo pipefail
 #       setups/*.json
 
 CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
+VLLM_VENV="${VLLM_VENV:-${CLOUD_ROOT}/.venv-vllm}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_002}"
 GROUPING_LABEL="${GROUPING_LABEL:-fixed_packet_count_size_006}"
 RUN_ID="${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_step16_17_smoke}"
@@ -51,6 +52,16 @@ SKIP_STEP16="${SKIP_STEP16:-0}"
 SKIP_STEP17="${SKIP_STEP17:-0}"
 SKIP_RUNTIME_SUMMARY="${SKIP_RUNTIME_SUMMARY:-0}"
 ALLOW_EXISTING_RUN="${ALLOW_EXISTING_RUN:-0}"
+
+if [[ "${STEP17_BACKEND}" == "vllm" && "${SKIP_STEP17}" != "1" ]]; then
+  if [[ ! -f "${VLLM_VENV}/bin/activate" ]]; then
+    echo "vLLM virtual environment not found: ${VLLM_VENV}"
+    echo "Create it before running the pipeline or override VLLM_VENV."
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source "${VLLM_VENV}/bin/activate"
+fi
 
 STEP16_DIR="${CLOUD_ROOT}/04_Steps/Step16"
 STEP17_DIR="${CLOUD_ROOT}/04_Steps/Step17"
@@ -195,6 +206,7 @@ echo "HF model id override: ${HF_MODEL_ID:-<none>}"
 echo "Model path override: ${MODEL_PATH:-<none>}"
 echo "Model filter: ${MODEL_FILTER:-<none>}"
 echo "Step 17 backend: ${STEP17_BACKEND}"
+echo "vLLM virtual environment: ${VLLM_VENV}"
 echo "Step 17 runner: ${STEP17_RUNNER:-<skipped>}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Limit Step 16: ${LIMIT_PROMPTS_S16:-<none>}"

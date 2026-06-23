@@ -32,6 +32,7 @@ The script can be configured through environment variables such as:
 
 ```text
 CLOUD_ROOT
+VLLM_VENV
 EXPERIMENT_ID
 GROUPING_LABEL
 RUN_ID
@@ -47,6 +48,15 @@ STEP17_BACKEND
 SKIP_STEP16
 SKIP_STEP17
 ```
+
+For vLLM runs, the launcher automatically activates:
+
+```text
+${CLOUD_ROOT}/.venv-vllm
+```
+
+Set `VLLM_VENV` only when the virtual environment is stored elsewhere.
+Step 16-only runs with `SKIP_STEP17=1` do not require this environment.
 
 Recommended first RISE smoke:
 
