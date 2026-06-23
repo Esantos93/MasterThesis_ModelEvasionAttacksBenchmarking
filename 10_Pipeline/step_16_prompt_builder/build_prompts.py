@@ -22,19 +22,76 @@ PROMPT_MANIFEST_SCHEMA_VERSION = "prompt_manifest_v2"
 SOURCE_PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 
-#This is the historical full-JSON prompt policy name and the new compact patch policy name.
-FULL_PROMPT_VERSION = "full_prompting_v1"
+#This is the historical compact patch policy name and the active compact patch policy name.
 COMPACT_PATCH_PROMPT_VERSION_V1 = "compact_patch_prompting_v1"
 COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v2"
-
-#This alias keeps old configs readable during the migration, but new configs should use full_prompting_v1 explicitly.
-LEGACY_PROMPT_VERSION_ALIASES = {"baseline_v1": FULL_PROMPT_VERSION}
 
 #This is the fixed RISE cloud root agreed for the LLM-side pipeline steps.
 DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 
 #This list records the prompt versions that the current Step 16 implementation knows how to build.
-SUPPORTED_PROMPT_VERSIONS = [FULL_PROMPT_VERSION, COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION]
+SUPPORTED_PROMPT_VERSIONS = [COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION]
+
+DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_minimal_canonical_patch_v1"
+DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "compact_patch_baseline_v1"
+
+PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
+    "baseline_minimal_canonical_patch_v1": {
+        "profile": "baseline_minimal_canonical_patch_v1",
+        "region_container_name": "canonical_regions",
+        "top_level_fields": [
+            "schema_version",
+            "experiment_id",
+            "parent_group_id",
+            "prompt_unit_id",
+            "unit_type",
+            "canonical_region_ids",
+            "editable_canonical_region_ids",
+            "context_canonical_region_ids",
+        ],
+        "canonical_region_fields": [
+            "canonical_region_id",
+            "role",
+            "editable",
+            "payload_view",
+            "payload_length_bytes",
+        ],
+        "editable_region_fields": [
+            "canonical_region_id",
+            "region_id",
+            "region_type",
+            "format",
+            "start_offset_bytes",
+            "end_offset_bytes",
+            "length_bytes",
+            "allowed_operations",
+            "value",
+        ],
+    },
+}
+
+PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
+    "compact_patch_baseline_v1": [
+        "You modify compact network traffic prompt units to reduce Snort 3 detection.",
+        "Return valid JSON only. Do not include Markdown, comments, or explanations.",
+        "Do not return full packets. Return only patches/deltas.",
+        "Do not modify context regions or any field outside an editable region.",
+        "The editable identity is the canonical TCP region, identified by canonical_region_id.",
+        "For every patch, operation must be copied exactly from that region's allowed_operations.",
+        "Each patch object modifies exactly one editable region. Use multiple patch objects to modify multiple regions.",
+        "If no change is needed, return patches as an empty list.",
+        "replace_region patches require the fields: canonical_region_id, region_id, region_type, operation, replacement_format, replacement.",
+        (
+            "replace_byte_range patches require the fields: canonical_region_id, region_id, "
+            "region_type, operation, offset_from_region_start_bytes, length_bytes, replacement_format, replacement."
+        ),
+        (
+            "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 "
+            "for the first byte of that region, not start_offset_bytes from the original payload. "
+            "offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes."
+        ),
+    ],
+}
 
 
 #This function reads a JSON file and returns the parsed Python object.
@@ -61,10 +118,34 @@ def validate_config(config: dict[str, Any]) -> None:
     require_keys(config["llm"], ["prompt_version"], "llm")
 
 
-#This function normalises the configured prompt version during the baseline_v1 -> full_prompting_v1 migration.
+#This function normalises the configured prompt version before validation.
 def normalize_prompt_version(prompt_version: str) -> str:
-    normalized = prompt_version.strip()
-    return LEGACY_PROMPT_VERSION_ALIASES.get(normalized, normalized)
+    return prompt_version.strip()
+
+#This function loads the model-visible prompt JSON data structure from the experiment config.
+def load_prompt_input_json_data_structure(config: dict[str, Any]) -> dict[str, Any]:
+    llm_config = config.get("llm", {})
+    profile_name = str(
+        llm_config.get("prompt_input_json_data_profile", DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE)
+    ).strip()
+    if profile_name not in PROMPT_INPUT_JSON_DATA_PROFILES:
+        raise ValueError(
+            f"Unsupported llm.prompt_input_json_data_profile={profile_name!r}. "
+            f"Supported profiles: {sorted(PROMPT_INPUT_JSON_DATA_PROFILES)}"
+        )
+    return dict(PROMPT_INPUT_JSON_DATA_PROFILES[profile_name])
+
+#This function loads the named instructions profile that frames the model-visible JSON input.
+def load_prompt_instructions_profile(config: dict[str, Any]) -> tuple[str, list[str]]:
+    llm_config = config.get("llm", {})
+    profile_name = str(llm_config.get("prompt_instructions_profile", DEFAULT_PROMPT_INSTRUCTIONS_PROFILE)).strip()
+    if profile_name not in PROMPT_INSTRUCTIONS_PROFILES:
+        raise ValueError(
+            f"Unsupported llm.prompt_instructions_profile={profile_name!r}. "
+            f"Supported profiles: {sorted(PROMPT_INSTRUCTIONS_PROFILES)}"
+        )
+    lines = list(PROMPT_INSTRUCTIONS_PROFILES[profile_name])
+    return profile_name, lines
 
 
 #This function validates the basic shape of the Step 15 compact group manifest.
@@ -236,83 +317,119 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#This function builds the compact object embedded in the new patch-based prompt.
-def build_compact_prompt_input(prompt_unit: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": prompt_unit["schema_version"],
-        "experiment_id": prompt_unit.get("experiment_id"),
-        "parent_group_id": prompt_unit["parent_group_id"],
-        "prompt_unit_id": prompt_unit["prompt_unit_id"],
-        "unit_type": prompt_unit.get("unit_type"),
-        "group_metadata": prompt_unit.get("group_metadata", {}),
-        "token_budget": prompt_unit.get("token_budget", {}),
-        "packet_ids": prompt_unit.get("packet_ids", []),
-        "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
-        "context_packet_ids": prompt_unit.get("context_packet_ids", []),
-        "canonical_region_ids": prompt_unit.get("canonical_region_ids", []),
-        "editable_canonical_region_ids": prompt_unit.get("editable_canonical_region_ids", []),
-        "context_canonical_region_ids": prompt_unit.get("context_canonical_region_ids", []),
-        "packets": prompt_unit.get("packets", []),
-        "context_truncation": prompt_unit.get("context_truncation"),
-    }
+def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for field_name in field_names:
+        if not isinstance(field_name, str):
+            raise ValueError("Prompt input structure field names must be strings.")
+        if field_name in source:
+            copied[field_name] = source[field_name]
+    return copied
+
+
+def build_projected_canonical_regions(
+    *,
+    prompt_unit: dict[str, Any],
+    structure: dict[str, Any],
+) -> list[dict[str, Any]]:
+    canonical_region_fields = structure.get("canonical_region_fields", [])
+    editable_region_fields = structure.get("editable_region_fields", [])
+    if not isinstance(canonical_region_fields, list) or not isinstance(editable_region_fields, list):
+        raise ValueError("Prompt input structure field lists must be lists.")
+
+    projected_regions: list[dict[str, Any]] = []
+    for packet in prompt_unit.get("packets", []):
+        if not isinstance(packet, dict):
+            continue
+        projected_packet = copy_selected_fields(packet, canonical_region_fields)
+        canonical_region_id = packet.get("canonical_region_id") or packet.get("packet_id")
+        if canonical_region_id is not None:
+            projected_packet.setdefault("canonical_region_id", canonical_region_id)
+
+        editable_regions = packet.get("editable_regions", [])
+        if isinstance(editable_regions, list):
+            projected_editable_regions = []
+            for region in editable_regions:
+                if not isinstance(region, dict):
+                    continue
+                projected_region = copy_selected_fields(region, editable_region_fields)
+                projected_region.setdefault("canonical_region_id", canonical_region_id)
+                projected_editable_regions.append(projected_region)
+            projected_packet["editable_regions"] = projected_editable_regions
+
+        projected_regions.append(projected_packet)
+    return projected_regions
+
+
+#This function builds the compact object embedded in the patch-based prompt.
+def build_compact_prompt_input(
+    *,
+    prompt_unit: dict[str, Any],
+    structure: dict[str, Any],
+) -> dict[str, Any]:
+    top_level_fields = structure.get("top_level_fields", [])
+    if not isinstance(top_level_fields, list):
+        raise ValueError("Prompt input structure top_level_fields must be a list.")
+    prompt_input = copy_selected_fields(prompt_unit, top_level_fields)
+    region_container_name = structure.get("region_container_name", "canonical_regions")
+    if not isinstance(region_container_name, str) or not region_container_name:
+        raise ValueError("Prompt input structure region_container_name must be a non-empty string.")
+    prompt_input[region_container_name] = build_projected_canonical_regions(
+        prompt_unit=prompt_unit,
+        structure=structure,
+    )
+    return prompt_input
 
 
 #This function builds the compact patch prompt text.
-def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, str]]:
-    prompt_input = build_compact_prompt_input(prompt_unit)
-    prompt_input_text = json.dumps(prompt_input, indent=2, sort_keys=True)
+def build_compact_patch_messages(
+    *,
+    config: dict[str, Any],
+    prompt_unit: dict[str, Any],
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    prompt_input_structure = load_prompt_input_json_data_structure(config)
+    prompt_instructions_profile, instructions_profile_lines = load_prompt_instructions_profile(config)
+    json_prompt_input = build_compact_prompt_input(
+        prompt_unit=prompt_unit,
+        structure=prompt_input_structure,
+    )
+    json_prompt_input_text = json.dumps(json_prompt_input, indent=2, sort_keys=True)
     parent_group_id = prompt_unit["parent_group_id"]
     prompt_unit_id = prompt_unit["prompt_unit_id"]
-    content = (
-        "You modify compact network traffic prompt units to reduce Snort 3 detection.\n"
-        "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
-        "Do not return full packets. Return only patches/deltas.\n"
-        "Do not modify context packets or any field outside an editable region.\n"
-        "The editable identity is the canonical TCP region. The legacy field packet_id is a compatibility alias for canonical_region_id.\n"
-        "For every patch, operation must be copied exactly from that region's allowed_operations.\n"
-        "Each patch object modifies exactly one editable region. Use multiple patch objects to modify multiple regions.\n"
-        "If no change is needed, return patches as an empty list.\n"
-        "replace_region patches require the fields: packet_id, canonical_region_id, region_id, region_type, operation, replacement_format, replacement.\n"
-        "replace_byte_range patches require the fields: packet_id, canonical_region_id, region_id, region_type, operation, "
-        "offset_from_region_start_bytes, length_bytes, replacement_format, replacement.\n"
-        "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 for the first byte of that region, not start_offset_bytes from the original payload. offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes.\n"
-        "Return this JSON object:\n"
+    output_skeleton = (
         "{\n"
         f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",\n'
         f'  "parent_group_id": "{parent_group_id}",\n'
         f'  "prompt_unit_id": "{prompt_unit_id}",\n'
         '  "patches": []\n'
-        "}\n"
-        "Compact prompt unit:\n"
-        f"{prompt_input_text}"
+        "}"
     )
-    return [{"role": "user", "content": content}]
-
-
-#This function builds the old full-JSON prompt text under its explicit historical name.
-def build_full_prompting_messages(prompt_unit: dict[str, Any]) -> list[dict[str, str]]:
-    prompt_input = {"traffic": prompt_unit.get("packets", [])}
-    input_json_text = json.dumps(prompt_input, indent=2, sort_keys=True)
     content = (
-        "Modify the compact traffic JSON to reduce Snort 3 detection.\n"
-        "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
-        "Return the same top-level JSON structure as the input object.\n"
-        "Input JSON:\n"
-        f"{input_json_text}"
+        "\n".join(instructions_profile_lines)
+        + "\n"
+        "Return this JSON object:\n"
+        f"{output_skeleton}\n"
+        "Compact prompt unit:\n"
+        f"{json_prompt_input_text}"
     )
-    return [{"role": "user", "content": content}]
+    prompt_template_metadata = {
+        "prompt_input_json_data_profile": prompt_input_structure.get("profile"),
+        "prompt_input_json_data_profile_definition": prompt_input_structure,
+        "prompt_instructions_profile": prompt_instructions_profile,
+        "region_container_name": prompt_input_structure.get("region_container_name", "canonical_regions"),
+    }
+    return [{"role": "user", "content": content}], prompt_template_metadata
 
 
 #This function dispatches prompt construction based on llm.prompt_version.
 def build_messages_by_prompt_version(
     *,
+    config: dict[str, Any],
     prompt_version: str,
     prompt_unit: dict[str, Any],
-) -> list[dict[str, str]]:
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
     if prompt_version in {COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION}:
-        return build_compact_patch_messages(prompt_unit)
-    if prompt_version == FULL_PROMPT_VERSION:
-        return build_full_prompting_messages(prompt_unit)
+        return build_compact_patch_messages(config=config, prompt_unit=prompt_unit)
     raise ValueError(
         f"The selected prompt version ({prompt_version!r}) is not supported.\n"
         f"The supported prompt versions are: {SUPPORTED_PROMPT_VERSIONS!r}."
@@ -329,11 +446,12 @@ def build_prompt_package(
     prompt_unit: dict[str, Any],
 ) -> dict[str, Any]:
     editable_region_index = build_editable_region_index(prompt_unit)
-    messages = build_messages_by_prompt_version(
+    messages, prompt_template_metadata = build_messages_by_prompt_version(
+        config=config,
         prompt_version=prompt_version,
         prompt_unit=prompt_unit,
     )
-    prompt_contract = "patch_output" if prompt_version in {COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION} else "full_json_legacy"
+    prompt_contract = "patch_output"
 
     return {
         "schema_version": PROMPT_PACKAGE_SCHEMA_VERSION,
@@ -355,7 +473,6 @@ def build_prompt_package(
             "patches_type": "list",
             "supported_operations": ["replace_region", "replace_byte_range"],
             "replace_byte_range_required_keys": [
-                "packet_id",
                 "canonical_region_id",
                 "region_id",
                 "region_type",
@@ -391,7 +508,10 @@ def build_prompt_package(
             "output_contract": prompt_contract,
             "return_full_packets": False,
             "allow_empty_patches": True,
+            "prompt_input_json_data_profile": prompt_template_metadata["prompt_input_json_data_profile"],
+            "prompt_instructions_profile": prompt_template_metadata["prompt_instructions_profile"],
         },
+        "prompt_template": prompt_template_metadata,
         "messages": messages,
     }
 
@@ -421,6 +541,7 @@ def build_prompt_manifest(
     total_source_prompt_units: int,
 ) -> dict[str, Any]:
     source_metadata = source_manifest.get("metadata", {})
+    llm_config = config.get("llm", {})
     return {
         "metadata": {
             "schema_version": PROMPT_MANIFEST_SCHEMA_VERSION,
@@ -428,6 +549,14 @@ def build_prompt_manifest(
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "prompt_version": prompt_version,
+            "prompt_input_json_data_profile": llm_config.get(
+                "prompt_input_json_data_profile",
+                DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE,
+            ),
+            "prompt_instructions_profile": llm_config.get(
+                "prompt_instructions_profile",
+                DEFAULT_PROMPT_INSTRUCTIONS_PROFILE,
+            ),
             "source_group_manifest": str(source_manifest_path),
             "source_group_manifest_schema_version": source_metadata.get("schema_version"),
             "source_compact_view_schema_version": source_metadata.get("compact_view_schema_version"),
@@ -503,6 +632,8 @@ def run_prompt_builder(
                 "source_prompt_unit_file": str(prompt_unit_path),
                 "prompt_version": prompt_version,
                 "prompt_contract": prompt_package["prompt_contract"],
+                "prompt_input_json_data_profile": prompt_package["prompt_template"]["prompt_input_json_data_profile"],
+                "prompt_instructions_profile": prompt_package["prompt_template"]["prompt_instructions_profile"],
                 "editable_region_count": len(prompt_package["input_traceability"]["editable_regions"]),
                 "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
             }
