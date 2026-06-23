@@ -1,4 +1,88 @@
-The file run_step16_17_gpu_vm.sh must be transferred to the host where the inference is run before being executed.
+RISE H100 local execution launcher for Steps 16/17.
 
-The command to carry out the execution might be found in: 
-"C:\Users\dorna\OneDrive\Documentos\03_Academico\02_KTH_TCYSM\02_Asignaturas\TFM\30_Implementation\31_Code\20_Commands\02_LLM_inference\01_LLM_inference_remote_execution_GPU.txt"
+The active script is:
+
+```text
+run_step16_17_gpu_vm.sh
+```
+
+It is designed for the new RISE container/host workflow and does not use
+Google Cloud, GCS, SSH, Docker, or bucket transfers.
+
+Default persistent layout for the new RISE container:
+
+```text
+/tf/thesis_Santos/
+  01_InputFiles/<experiment_id>/05_groups/<grouping_label>/
+  02_OutputFiles/<experiment_id>/06_prompts/<grouping_label>/<run_id>/
+  02_OutputFiles/<experiment_id>/07_llm_outputs/<grouping_label>/<model>/<run_id>/
+  02_OutputFiles/<experiment_id>/logs/<run_id>/
+  03_Models/
+  04_Steps/
+    Step16/build_prompts.py
+    Step17/run_llm_batch.py
+    Step17/run_llm_batch_vllm.py
+    Step17/summarize_llm_runtime.py
+    Step17/test_run_llm_batch.py
+    common/
+    setups/
+```
+
+The script can be configured through environment variables such as:
+
+```text
+CLOUD_ROOT
+EXPERIMENT_ID
+GROUPING_LABEL
+RUN_ID
+CONFIG_PATH
+GROUP_DIR
+MODEL_DIR
+MODEL_PATH
+HF_MODEL_ID
+BATCH_SIZE
+LIMIT_PROMPTS_S16
+LIMIT_PROMPTS_S17
+STEP17_BACKEND
+SKIP_STEP16
+SKIP_STEP17
+```
+
+Recommended first RISE smoke:
+
+```bash
+chmod +x /tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+
+CLOUD_ROOT="/tf/thesis_Santos" \
+EXPERIMENT_ID="exp_cicids2017_thursday_baseline_002" \
+GROUPING_LABEL="fixed_packet_count_size_006" \
+RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_fixed006_500prompts_batch190" \
+CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_002.json" \
+STEP17_BACKEND="vllm" \
+BATCH_SIZE="190" \
+LIMIT_PROMPTS_S17="500" \
+/tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+```
+
+Runtime note:
+
+```text
+The H100 path should use STEP17_BACKEND=vllm, which calls
+Step17/run_llm_batch_vllm.py. This is the renamed active vLLM adapter from the
+former Google Cloud path. It keeps the Step 17 validation/output logic from
+run_llm_batch.py but loads Hugging Face model directories or ids with vLLM.
+```
+
+For a Step 16-only validation:
+
+```bash
+SKIP_STEP17=1 LIMIT_PROMPTS_S16=100 /tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+```
+
+For a Step 17-only run over an existing prompt directory:
+
+```bash
+SKIP_STEP16=1 \
+PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<experiment_id>/06_prompts/<grouping_label>/<run_id>" \
+/tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+```
