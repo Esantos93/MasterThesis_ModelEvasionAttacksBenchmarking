@@ -219,6 +219,47 @@ class CanonicalStep15Tests(unittest.TestCase):
         canonical_region_id = editable_unit["editable_canonical_region_ids"][0]
         self.assertEqual([canonical_region_id], prompt_package["input_traceability"]["editable_packet_ids"])
 
+    def test_oversized_payload_window_is_split_until_each_editable_unit_fits_budget(self) -> None:
+        payload = bytes(index % 251 for index in range(1200))
+        records = [
+            tcp_record(
+                1,
+                1000,
+                payload,
+                candidate_flow_ids=["flow_a", "flow_b"],
+                mapping_status="ambiguous_duplicate_overlapping",
+            )
+        ]
+        source = packet_json_v3(records, include_flow_context=True)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(root, "flow_based")
+            active_config["llm"]["payload_window_left_context_bytes"] = 128
+            active_config["llm"]["payload_window_editable_center_bytes"] = 1024
+            active_config["llm"]["payload_window_right_context_bytes"] = 128
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(0, manifest["metadata"]["over_budget_summary"]["over_budget_editable_count"])
+        payload_window_units = [unit for unit in units if unit["unit_type"] == "payload_window"]
+        self.assertGreater(len(payload_window_units), 2)
+        self.assertTrue(
+            all(
+                unit["estimated_input_tokens"] <= manifest["metadata"]["input_token_budget"]
+                for unit in payload_window_units
+            )
+        )
+        editable_intervals = sorted(
+            (
+                region["start_offset_bytes"],
+                region["end_offset_bytes"],
+            )
+            for unit in payload_window_units
+            for compact_region in unit["packets"]
+            for region in compact_region["editable_regions"]
+        )
+        self.assertEqual([(0, 512), (512, 1024), (1024, 1200)], editable_intervals)
+
     def test_step15_rejects_packet_json_v2(self) -> None:
         source = packet_json_v3([tcp_record(1, 1000, b"attack")], include_flow_context=False)
         source["metadata"]["schema_version"] = "packet_json_v2"

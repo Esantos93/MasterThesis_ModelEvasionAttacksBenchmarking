@@ -649,62 +649,84 @@ def payload_fits_small_full(candidate_view: dict[str, Any], payload_length: int,
     return payload_length <= small_payload_limit and estimated_tokens <= small_full_token_limit
 
 
+#This function builds one byte window over a large payload, with context bytes around the editable center.
+def build_payload_window(
+    packet: dict[str, Any],
+    payload: bytes,
+    readability: dict[str, Any],
+    window_index: int,
+    center_start: int,
+    center_end: int,
+    left_context: int,
+    right_context: int,
+) -> dict[str, Any]:
+    canonical_region_id = str(packet.get("canonical_region_id"))
+    is_text = bool(readability["is_text"])
+    window_start = max(0, center_start - left_context)
+    window_end = min(len(payload), center_end + right_context)
+    left_context_bytes = payload[window_start:center_start]
+    center_bytes = payload[center_start:center_end]
+    right_context_bytes = payload[center_end:window_end]
+    if is_text:
+        left_context_value = left_context_bytes.decode("utf-8", errors="replace")
+        center_value = center_bytes.decode("utf-8", errors="replace")
+        right_context_value = right_context_bytes.decode("utf-8", errors="replace")
+        replacement_format = "text"
+    else:
+        left_context_value = left_context_bytes.hex()
+        center_value = center_bytes.hex()
+        right_context_value = right_context_bytes.hex()
+        replacement_format = "hex"
+    region_id = f"payload_window_{window_index:04d}_center"
+    return {
+        "canonical_region_id": canonical_region_id,
+        "window_id": f"{canonical_region_id}_window_{window_index:04d}",
+        "window_index": window_index,
+        "payload_view": {
+            "mode": "payload_window",
+            "representation": replacement_format,
+            "payload_length_bytes": len(payload),
+            "window_offset": window_start,
+            "window_length": window_end - window_start,
+            "center_offset": center_start,
+            "center_length": center_end - center_start,
+            "left_context_bytes": center_start - window_start,
+            "right_context_bytes": window_end - center_end,
+            "left_context_value": left_context_value,
+            "editable_center_value_in_region": True,
+            "right_context_value": right_context_value,
+        },
+        "editable_region": build_region(
+            packet=packet,
+            region_id=region_id,
+            region_type="payload_byte_range",
+            offset=center_start,
+            length=center_end - center_start,
+            replacement_format=replacement_format,
+            value=center_value,
+        ),
+    }
+
+
 #This function creates fixed-size byte windows that cover every byte of a large payload exactly once in the editable center.
 def build_payload_windows(packet: dict[str, Any], payload: bytes, readability: dict[str, Any], token_config: dict[str, Any]) -> list[dict[str, Any]]:
     left_context = int(token_config["payload_window_left_context_bytes"])
     center_size = int(token_config["payload_window_editable_center_bytes"])
     right_context = int(token_config["payload_window_right_context_bytes"])
     windows = []
-    canonical_region_id = str(packet.get("canonical_region_id"))
-    text = readability["decoded_text"]
-    is_text = bool(readability["is_text"])
     for window_index, center_start in enumerate(range(0, len(payload), center_size), start=1):
         center_end = min(center_start + center_size, len(payload))
-        window_start = max(0, center_start - left_context)
-        window_end = min(len(payload), center_end + right_context)
-        left_context_bytes = payload[window_start:center_start]
-        center_bytes = payload[center_start:center_end]
-        right_context_bytes = payload[center_end:window_end]
-        if is_text:
-            left_context_value = left_context_bytes.decode("utf-8", errors="replace")
-            center_value = center_bytes.decode("utf-8", errors="replace")
-            right_context_value = right_context_bytes.decode("utf-8", errors="replace")
-            replacement_format = "text"
-        else:
-            left_context_value = left_context_bytes.hex()
-            center_value = center_bytes.hex()
-            right_context_value = right_context_bytes.hex()
-            replacement_format = "hex"
-        region_id = f"payload_window_{window_index:04d}_center"
         windows.append(
-            {
-                "canonical_region_id": canonical_region_id,
-                "window_id": f"{canonical_region_id}_window_{window_index:04d}",
-                "window_index": window_index,
-                "payload_view": {
-                    "mode": "payload_window",
-                    "representation": replacement_format,
-                    "payload_length_bytes": len(payload),
-                    "window_offset": window_start,
-                    "window_length": window_end - window_start,
-                    "center_offset": center_start,
-                    "center_length": center_end - center_start,
-                    "left_context_bytes": center_start - window_start,
-                    "right_context_bytes": window_end - center_end,
-                    "left_context_value": left_context_value,
-                    "editable_center_value_in_region": True,
-                    "right_context_value": right_context_value,
-                },
-                "editable_region": build_region(
-                    packet=packet,
-                    region_id=region_id,
-                    region_type="payload_byte_range",
-                    offset=center_start,
-                    length=center_end - center_start,
-                    replacement_format=replacement_format,
-                    value=center_value,
-                ),
-            }
+            build_payload_window(
+                packet=packet,
+                payload=payload,
+                readability=readability,
+                window_index=window_index,
+                center_start=center_start,
+                center_end=center_end,
+                left_context=left_context,
+                right_context=right_context,
+            )
         )
     return windows
 
@@ -1046,6 +1068,128 @@ def payload_window_context_indexes(
     return range(start_index, end_index)
 
 
+#This function builds one payload-window prompt unit for a selected editable byte window.
+def build_payload_window_prompt_unit(
+    *,
+    experiment_id: str,
+    source_packet_json: Path,
+    source_packet_json_schema_version: str,
+    group_metadata: dict[str, Any],
+    parent_group_id: str,
+    prompt_unit_index: int,
+    source_index: int,
+    records: list[dict[str, Any]],
+    payload_plans: list[dict[str, Any]],
+    payload_window: dict[str, Any],
+    grouping_policy: str,
+    flow_payload_slide_window_overlap_units: int,
+    token_config: dict[str, Any],
+    input_token_budget: int,
+) -> dict[str, Any]:
+    window_packet_plan = {
+        "payload_view": payload_window["payload_view"],
+        "editable_regions": [payload_window["editable_region"]],
+    }
+    window_packets = []
+    for context_index in payload_window_context_indexes(
+        source_index=source_index,
+        record_count=len(records),
+        grouping_policy=grouping_policy,
+        overlap_units=flow_payload_slide_window_overlap_units,
+    ):
+        context_record = records[context_index]
+        context_plan = payload_plans[context_index]
+        if context_index == source_index:
+            window_packets.append(build_compact_packet(context_record, window_packet_plan, editable=True))
+        else:
+            summary_plan = {"payload_view": context_plan["payload_view"], "editable_regions": []}
+            window_packets.append(build_compact_packet(context_record, summary_plan, editable=False))
+    return build_prompt_unit(
+        experiment_id=experiment_id,
+        source_packet_json=source_packet_json,
+        source_packet_json_schema_version=source_packet_json_schema_version,
+        group_metadata=group_metadata,
+        prompt_unit_id=f"{parent_group_id}_window_{prompt_unit_index:04d}",
+        unit_type="payload_window",
+        packets=window_packets,
+        token_config=token_config,
+        input_token_budget=input_token_budget,
+        context_truncation=None,
+    )
+
+
+#This function splits one oversized payload window into smaller editable byte ranges until each unit fits if possible.
+def build_budgeted_payload_window_prompt_units(
+    *,
+    experiment_id: str,
+    source_packet_json: Path,
+    source_packet_json_schema_version: str,
+    group_metadata: dict[str, Any],
+    parent_group_id: str,
+    next_prompt_unit_index: int,
+    source_index: int,
+    records: list[dict[str, Any]],
+    payload_plans: list[dict[str, Any]],
+    payload_window: dict[str, Any],
+    grouping_policy: str,
+    flow_payload_slide_window_overlap_units: int,
+    token_config: dict[str, Any],
+    input_token_budget: int,
+) -> tuple[list[dict[str, Any]], int]:
+    record = records[source_index]
+    payload = payload_hex_to_bytes(record)
+    readability = text_readability_report(payload)
+    left_context = int(token_config["payload_window_left_context_bytes"])
+    right_context = int(token_config["payload_window_right_context_bytes"])
+    center_start = int(payload_window["payload_view"]["center_offset"])
+    center_end = center_start + int(payload_window["payload_view"]["center_length"])
+    pending_ranges = [(center_start, center_end)]
+    prompt_units = []
+    prompt_unit_index = next_prompt_unit_index
+
+    while pending_ranges:
+        candidate_start, candidate_end = pending_ranges.pop()
+        candidate_window = build_payload_window(
+            packet=record,
+            payload=payload,
+            readability=readability,
+            window_index=prompt_unit_index,
+            center_start=candidate_start,
+            center_end=candidate_end,
+            left_context=left_context,
+            right_context=right_context,
+        )
+        candidate_unit = build_payload_window_prompt_unit(
+            experiment_id=experiment_id,
+            source_packet_json=source_packet_json,
+            source_packet_json_schema_version=source_packet_json_schema_version,
+            group_metadata=group_metadata,
+            parent_group_id=parent_group_id,
+            prompt_unit_index=prompt_unit_index,
+            source_index=source_index,
+            records=records,
+            payload_plans=payload_plans,
+            payload_window=candidate_window,
+            grouping_policy=grouping_policy,
+            flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
+            token_config=token_config,
+            input_token_budget=input_token_budget,
+        )
+        if candidate_unit["estimated_input_tokens"] <= input_token_budget or candidate_end - candidate_start <= 1:
+            if candidate_unit["estimated_input_tokens"] > input_token_budget:
+                mark_over_budget_prompt_unit(candidate_unit, candidate_unit["prompt_unit_id"])
+                refresh_prompt_unit_counts(candidate_unit, token_config)
+            prompt_units.append(candidate_unit)
+            prompt_unit_index += 1
+            continue
+
+        midpoint = candidate_start + max(1, (candidate_end - candidate_start) // 2)
+        pending_ranges.append((midpoint, candidate_end))
+        pending_ranges.append((candidate_start, midpoint))
+
+    return prompt_units, prompt_unit_index
+
+
 #This function creates base prompt units from compact packets, splitting large flows into packet windows when needed.
 def build_base_prompt_units(
     *,
@@ -1298,39 +1442,24 @@ def build_prompt_units_for_group(
     window_counter = 0
     for record_index, (record, payload_plan) in enumerate(zip(records, payload_plans), start=1):
         for payload_window in payload_plan["payload_windows"]:
-            window_counter += 1
-            window_packet_plan = {
-                "payload_view": payload_window["payload_view"],
-                "editable_regions": [payload_window["editable_region"]],
-            }
-            window_packets = []
-            for context_index in payload_window_context_indexes(
+            new_prompt_units, next_window_counter = build_budgeted_payload_window_prompt_units(
+                experiment_id=experiment_id,
+                source_packet_json=source_packet_json,
+                source_packet_json_schema_version=source_packet_json_schema_version,
+                group_metadata=group_metadata,
+                parent_group_id=parent_group_id,
+                next_prompt_unit_index=window_counter + 1,
                 source_index=record_index - 1,
-                record_count=len(records),
+                records=records,
+                payload_plans=payload_plans,
+                payload_window=payload_window,
                 grouping_policy=grouping_policy,
-                overlap_units=flow_payload_slide_window_overlap_units,
-            ):
-                context_record = records[context_index]
-                context_plan = payload_plans[context_index]
-                if context_index == record_index - 1:
-                    window_packets.append(build_compact_packet(context_record, window_packet_plan, editable=True))
-                else:
-                    summary_plan = {"payload_view": context_plan["payload_view"], "editable_regions": []}
-                    window_packets.append(build_compact_packet(context_record, summary_plan, editable=False))
-            prompt_units.append(
-                build_prompt_unit(
-                    experiment_id=experiment_id,
-                    source_packet_json=source_packet_json,
-                    source_packet_json_schema_version=source_packet_json_schema_version,
-                    group_metadata=group_metadata,
-                    prompt_unit_id=f"{parent_group_id}_window_{window_counter:04d}",
-                    unit_type="payload_window",
-                    packets=window_packets,
-                    token_config=token_config,
-                    input_token_budget=input_token_budget,
-                    context_truncation=None,
-                )
+                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
+                token_config=token_config,
+                input_token_budget=input_token_budget,
             )
+            prompt_units.extend(new_prompt_units)
+            window_counter = next_window_counter - 1
         if heartbeat:
             heartbeat(
                 f"building_parent_group={parent_group_id}, "
