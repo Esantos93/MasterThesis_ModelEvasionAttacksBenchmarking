@@ -199,9 +199,11 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
             if key in region_keys:
                 raise ValueError(f"Duplicate editable region {key!r} in prompt unit {prompt_unit['prompt_unit_id']}")
             region_keys.add(key)
+            canonical_region_id = region.get("canonical_region_id") or packet.get("canonical_region_id") or packet_id_text
             regions.append(
                 {
                     "packet_id": packet_id_text,
+                    "canonical_region_id": canonical_region_id,
                     "region_id": region_id,
                     "region_type": region_type,
                     "format": region.get("format"),
@@ -209,6 +211,13 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
                     "end_offset_bytes": region.get("end_offset_bytes"),
                     "length_bytes": region.get("length_bytes"),
                     "allowed_operations": region.get("allowed_operations", []),
+                    "coordinate_space": region.get("coordinate_space"),
+                    "tcp_connection_id": region.get("tcp_connection_id") or packet.get("tcp_connection_id"),
+                    "tcp_stream_id": region.get("tcp_stream_id") or packet.get("tcp_stream_id"),
+                    "canonical_stream_start": region.get("canonical_stream_start"),
+                    "canonical_stream_end": region.get("canonical_stream_end"),
+                    "source_packet_ids": packet.get("source_packet_ids", []),
+                    "representative_packet_id": packet.get("representative_packet_id"),
                 }
             )
 
@@ -216,6 +225,13 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         "packet_ids": sorted(packets_by_id),
         "editable_packet_ids": [str(packet_id) for packet_id in prompt_unit.get("editable_packet_ids", [])],
         "context_packet_ids": [str(packet_id) for packet_id in prompt_unit.get("context_packet_ids", [])],
+        "canonical_region_ids": [str(region_id) for region_id in prompt_unit.get("canonical_region_ids", [])],
+        "editable_canonical_region_ids": [
+            str(region_id) for region_id in prompt_unit.get("editable_canonical_region_ids", [])
+        ],
+        "context_canonical_region_ids": [
+            str(region_id) for region_id in prompt_unit.get("context_canonical_region_ids", [])
+        ],
         "regions": regions,
     }
 
@@ -233,6 +249,9 @@ def build_compact_prompt_input(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         "packet_ids": prompt_unit.get("packet_ids", []),
         "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
         "context_packet_ids": prompt_unit.get("context_packet_ids", []),
+        "canonical_region_ids": prompt_unit.get("canonical_region_ids", []),
+        "editable_canonical_region_ids": prompt_unit.get("editable_canonical_region_ids", []),
+        "context_canonical_region_ids": prompt_unit.get("context_canonical_region_ids", []),
         "packets": prompt_unit.get("packets", []),
         "context_truncation": prompt_unit.get("context_truncation"),
     }
@@ -249,11 +268,12 @@ def build_compact_patch_messages(prompt_unit: dict[str, Any]) -> list[dict[str, 
         "Return valid JSON only. Do not include Markdown, comments, or explanations.\n"
         "Do not return full packets. Return only patches/deltas.\n"
         "Do not modify context packets or any field outside an editable region.\n"
+        "The editable identity is the canonical TCP region. The legacy field packet_id is a compatibility alias for canonical_region_id.\n"
         "For every patch, operation must be copied exactly from that region's allowed_operations.\n"
         "Each patch object modifies exactly one editable region. Use multiple patch objects to modify multiple regions.\n"
         "If no change is needed, return patches as an empty list.\n"
-        "replace_region patches require the fields: packet_id, region_id, region_type, operation, replacement_format, replacement.\n"
-        "replace_byte_range patches require the fields: packet_id, region_id, region_type, operation, "
+        "replace_region patches require the fields: packet_id, canonical_region_id, region_id, region_type, operation, replacement_format, replacement.\n"
+        "replace_byte_range patches require the fields: packet_id, canonical_region_id, region_id, region_type, operation, "
         "offset_from_region_start_bytes, length_bytes, replacement_format, replacement.\n"
         "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 for the first byte of that region, not start_offset_bytes from the original payload. offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes.\n"
         "Return this JSON object:\n"
@@ -336,6 +356,7 @@ def build_prompt_package(
             "supported_operations": ["replace_region", "replace_byte_range"],
             "replace_byte_range_required_keys": [
                 "packet_id",
+                "canonical_region_id",
                 "region_id",
                 "region_type",
                 "operation",
@@ -357,6 +378,9 @@ def build_prompt_package(
             "packet_ids": editable_region_index["packet_ids"],
             "editable_packet_ids": editable_region_index["editable_packet_ids"],
             "context_packet_ids": editable_region_index["context_packet_ids"],
+            "canonical_region_ids": editable_region_index["canonical_region_ids"],
+            "editable_canonical_region_ids": editable_region_index["editable_canonical_region_ids"],
+            "context_canonical_region_ids": editable_region_index["context_canonical_region_ids"],
             "editable_regions": editable_region_index["regions"],
         },
         "token_budget": prompt_unit.get("token_budget", {}),
