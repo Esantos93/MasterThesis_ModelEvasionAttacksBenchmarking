@@ -579,6 +579,29 @@ def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[s
     return lookup
 
 
+def normalize_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    packet_id = patch.get("packet_id")
+    canonical_region_id = patch.get("canonical_region_id")
+    if packet_id is None and canonical_region_id is None:
+        return None, {"accepted": False, "reason": "patch_missing_packet_or_canonical_region"}
+
+    if packet_id is None:
+        packet_id = canonical_region_id
+        patch["packet_id"] = packet_id
+    elif canonical_region_id is None:
+        canonical_region_id = packet_id
+        patch["canonical_region_id"] = canonical_region_id
+    elif str(packet_id) != str(canonical_region_id):
+        return None, {
+            "accepted": False,
+            "reason": "packet_id_canonical_region_id_mismatch",
+            "packet_id": str(packet_id),
+            "canonical_region_id": str(canonical_region_id),
+        }
+
+    return str(packet_id), None
+
+
 def get_field_with_aliases(obj: dict[str, Any], canonical_name: str) -> Any:
     for field_name in FIELD_ALIASES.get(canonical_name, [canonical_name]):
         if field_name in obj:
@@ -671,11 +694,13 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
         if not isinstance(patch, dict):
             return {"accepted": False, "reason": "patch_not_object", "patch_index": patch_index}
 
-        packet_id = patch.get("packet_id")
         region_id = patch.get("region_id")
-        if packet_id is None or not isinstance(region_id, str):
+        packet_id_text, identity_error = normalize_patch_target_identity(patch)
+        if identity_error:
+            identity_error["patch_index"] = patch_index
+            return identity_error
+        if packet_id_text is None or not isinstance(region_id, str):
             return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
-        packet_id_text = str(packet_id)
 
         if packet_id_text not in editable_packet_ids:
             return {
@@ -693,6 +718,17 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "patch_index": patch_index,
                 "packet_id": packet_id_text,
                 "region_id": region_id,
+            }
+        region_canonical_region_id = region.get("canonical_region_id")
+        if region_canonical_region_id is not None and str(patch.get("canonical_region_id")) != str(region_canonical_region_id):
+            return {
+                "accepted": False,
+                "reason": "patch_canonical_region_id_mismatch",
+                "patch_index": patch_index,
+                "packet_id": packet_id_text,
+                "region_id": region_id,
+                "expected_canonical_region_id": str(region_canonical_region_id),
+                "actual_canonical_region_id": str(patch.get("canonical_region_id")),
             }
 
         operation = get_field_with_aliases(patch, "operation")
