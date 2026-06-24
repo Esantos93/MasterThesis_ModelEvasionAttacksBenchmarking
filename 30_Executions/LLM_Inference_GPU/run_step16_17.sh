@@ -23,7 +23,7 @@ CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
 VLLM_VENV="${VLLM_VENV:-${CLOUD_ROOT}/.venv-vllm}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_002}"
 GROUPING_LABEL="${GROUPING_LABEL:-fixed_packet_count_size_006}"
-RUN_ID="${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_step16_17_smoke}"
+RUN_ID="${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_step16_17_smoke}"
 
 CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_002.json}"
 GROUP_DIR="${GROUP_DIR:-${CLOUD_ROOT}/01_InputFiles/${EXPERIMENT_ID}/05_groups/${GROUPING_LABEL}}"
