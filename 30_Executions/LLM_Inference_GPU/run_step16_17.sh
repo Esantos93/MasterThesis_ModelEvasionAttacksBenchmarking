@@ -61,6 +61,23 @@ if [[ "${STEP17_BACKEND}" == "vllm" && "${SKIP_STEP17}" != "1" ]]; then
   fi
   # shellcheck disable=SC1091
   source "${VLLM_VENV}/bin/activate"
+
+  mapfile -t vllm_nvidia_lib_dirs < <(
+    find "${VLLM_VENV}/lib" -type d -path '*/site-packages/nvidia/*/lib' 2>/dev/null | sort
+  )
+  if [[ ${#vllm_nvidia_lib_dirs[@]} -gt 0 ]]; then
+    vllm_nvidia_library_path="$(IFS=:; printf '%s' "${vllm_nvidia_lib_dirs[*]}")"
+    export LD_LIBRARY_PATH="${vllm_nvidia_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+
+  mapfile -t vllm_nvidia_include_dirs < <(
+    find "${VLLM_VENV}/lib" -type d -path '*/site-packages/nvidia/curand/include' 2>/dev/null | sort
+  )
+  if [[ ${#vllm_nvidia_include_dirs[@]} -gt 0 ]]; then
+    vllm_nvidia_include_path="$(IFS=:; printf '%s' "${vllm_nvidia_include_dirs[*]}")"
+    export CPATH="${vllm_nvidia_include_path}${CPATH:+:${CPATH}}"
+    export CPLUS_INCLUDE_PATH="${vllm_nvidia_include_path}${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
+  fi
 fi
 
 STEP16_DIR="${CLOUD_ROOT}/04_Steps/Step16"
@@ -162,12 +179,12 @@ require_dir "${MODEL_DIR}"
 if [[ "${SKIP_STEP17}" != "1" ]]; then
   if [[ "${STEP17_BACKEND}" == "vllm" ]]; then
     python3 - <<'PY'
-import importlib.util
-import sys
+import torch
+from vllm import LLM
 
-if importlib.util.find_spec("vllm") is None:
-    sys.exit("Required Python package not found: vllm")
-print("vllm import check: OK")
+if not torch.cuda.is_available():
+    raise SystemExit("PyTorch cannot access CUDA.")
+print(f"vLLM runtime import check: OK; GPU={torch.cuda.get_device_name(0)}")
 PY
   else
     python3 - <<'PY'
