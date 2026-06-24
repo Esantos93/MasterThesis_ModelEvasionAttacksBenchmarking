@@ -170,7 +170,7 @@ def resolve_selected_prompt_paths(args: argparse.Namespace, paths: dict[str, Pat
 
 #This function normalises a model name so it is safe to use as a folder name.
 def safe_model_name(model_path: Path) -> str:
-    name = model_path.stem
+    name = model_path.name if model_path.is_dir() or not model_path.suffix else model_path.stem
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
     return name.strip("_") or "model"
 
