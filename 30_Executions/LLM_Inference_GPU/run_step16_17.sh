@@ -28,6 +28,7 @@ RUN_ID="${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_step16_17_smoke}"
 CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_002.json}"
 GROUP_DIR="${GROUP_DIR:-${CLOUD_ROOT}/01_InputFiles/${EXPERIMENT_ID}/05_groups/${GROUPING_LABEL}}"
 PROMPT_DIR="${PROMPT_DIR:-${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}/06_prompts/${GROUPING_LABEL}/${RUN_ID}}"
+PROMPT_MANIFEST="${PROMPT_MANIFEST:-${PROMPT_DIR}/prompt_manifest.json}"
 STEP17_OUTPUT_ROOT="${STEP17_OUTPUT_ROOT:-${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}/07_llm_outputs/${GROUPING_LABEL}}"
 MODEL_DIR="${MODEL_DIR:-${CLOUD_ROOT}/03_Models}"
 HF_MODEL_ID="${HF_MODEL_ID:-}"
@@ -266,6 +267,7 @@ echo "Run ID: ${RUN_ID}"
 echo "Config: ${CONFIG_PATH}"
 echo "Group dir: ${GROUP_DIR}"
 echo "Prompt dir: ${PROMPT_DIR}"
+echo "Prompt manifest: ${PROMPT_MANIFEST}"
 echo "Step 17 output root: ${STEP17_OUTPUT_ROOT}"
 echo "Model dir: ${MODEL_DIR}"
 echo "HF model id override: ${HF_MODEL_ID:-<none>}"
@@ -303,7 +305,7 @@ else
   echo "Skipping Step 16 because SKIP_STEP16=1."
 fi
 
-require_file "${PROMPT_DIR}/prompt_manifest.json"
+require_file "${PROMPT_MANIFEST}"
 
 if [[ "${SKIP_STEP17}" != "1" ]]; then
   current_stage="step17"
@@ -318,7 +320,7 @@ if [[ "${SKIP_STEP17}" != "1" ]]; then
     --progress-every "${PROGRESS_EVERY}"
     --heartbeat-seconds "${HEARTBEAT_SECONDS}"
     --llm-batch-size "${BATCH_SIZE}"
-    --prompt-manifest "${PROMPT_DIR}/prompt_manifest.json"
+    --prompt-manifest "${PROMPT_MANIFEST}"
     --prompt-dir "${PROMPT_DIR}"
     --output-root "${STEP17_OUTPUT_ROOT}"
     --run-id "${RUN_ID}"

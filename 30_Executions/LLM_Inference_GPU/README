@@ -6,6 +6,9 @@ The active scripts are:
 run_step16_17.sh
 compression_step_16.sh
 compression_step_17.sh
+calibrate_step17_batch_sizes.sh
+compare_step17_batch_calibration.py
+build_prompt_manifest_sample.py
 ```
 
 It is designed for the new RISE container/host workflow and does not use
@@ -40,6 +43,8 @@ GROUPING_LABEL
 RUN_ID
 CONFIG_PATH
 GROUP_DIR
+PROMPT_DIR
+PROMPT_MANIFEST
 MODEL_DIR
 MODEL_PATH
 HF_MODEL_ID
@@ -53,6 +58,27 @@ COMPRESS_STEP16
 COMPRESS_STEP17
 STEP16_ARCHIVE
 STEP17_ARCHIVE
+```
+
+Wide Step 17 batch calibration on one fixed 1,500-prompt sample:
+
+```bash
+chmod +x /tf/thesis_Santos/04_Steps/calibrate_step17_batch_sizes.sh
+
+PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_002/06_prompts/fixed_packet_count_size_006/<prompt_run_id>" \
+CALIBRATION_LABEL="fixed006_wide_1500" \
+BATCH_SIZES="16 32 64 96 128 160 188 224 256 320" \
+LIMIT_PROMPTS_S17=1500 \
+/tf/thesis_Santos/04_Steps/calibrate_step17_batch_sizes.sh
+```
+
+The calibration first builds one deterministic, evenly spaced 1,500-prompt
+sample from the complete manifest. It then runs Step 17 sequentially, disables
+archive creation, samples `nvidia-smi` once per second, and rewrites a
+comparison CSV and Markdown file after every completed candidate under:
+
+```text
+02_OutputFiles/batch_calibration/<calibration_label>/
 ```
 
 For vLLM runs, the launcher automatically activates:
