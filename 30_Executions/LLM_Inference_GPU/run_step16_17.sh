@@ -99,7 +99,29 @@ mkdir -p "${LOG_DIR}"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 started_at="$(date --iso-8601=seconds)"
+started_epoch="$(date +%s)"
+finished_at=""
+duration_seconds=""
+duration_human=""
 current_stage="preflight"
+
+format_duration() {
+  local total_seconds="$1"
+  local days=$((total_seconds / 86400))
+  local hours=$(((total_seconds % 86400) / 3600))
+  local minutes=$(((total_seconds % 3600) / 60))
+  local seconds=$((total_seconds % 60))
+
+  if ((days > 0)); then
+    printf '%dd %02dh %02dm %02ds' "${days}" "${hours}" "${minutes}" "${seconds}"
+  elif ((hours > 0)); then
+    printf '%dh %02dm %02ds' "${hours}" "${minutes}" "${seconds}"
+  elif ((minutes > 0)); then
+    printf '%dm %02ds' "${minutes}" "${seconds}"
+  else
+    printf '%ds' "${seconds}"
+  fi
+}
 
 write_status() {
   local status="$1"
@@ -108,6 +130,11 @@ write_status() {
     printf 'stage=%s\n' "${current_stage}"
     printf 'started_at=%s\n' "${started_at}"
     printf 'updated_at=%s\n' "$(date --iso-8601=seconds)"
+    if [[ -n "${finished_at}" ]]; then
+      printf 'finished_at=%s\n' "${finished_at}"
+      printf 'duration_seconds=%s\n' "${duration_seconds}"
+      printf 'duration_human=%s\n' "${duration_human}"
+    fi
     printf 'experiment_id=%s\n' "${EXPERIMENT_ID}"
     printf 'grouping_label=%s\n' "${GROUPING_LABEL}"
     printf 'run_id=%s\n' "${RUN_ID}"
@@ -119,13 +146,21 @@ write_status() {
 
 on_exit() {
   local exit_code=$?
+  local finished_epoch
+
+  finished_at="$(date --iso-8601=seconds)"
+  finished_epoch="$(date +%s)"
+  duration_seconds=$((finished_epoch - started_epoch))
+  duration_human="$(format_duration "${duration_seconds}")"
+
   if [[ ${exit_code} -eq 0 ]]; then
     write_status "completed"
-    echo "Run completed successfully at $(date --iso-8601=seconds)."
+    echo "Run completed successfully at ${finished_at}."
   else
     write_status "failed"
-    echo "Run failed in stage '${current_stage}' with exit code ${exit_code} at $(date --iso-8601=seconds)."
+    echo "Run failed in stage '${current_stage}' with exit code ${exit_code} at ${finished_at}."
   fi
+  echo "Run duration: ${duration_human} (${duration_seconds} seconds)."
   exit "${exit_code}"
 }
 trap on_exit EXIT

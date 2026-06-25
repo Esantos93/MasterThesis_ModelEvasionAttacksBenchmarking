@@ -96,6 +96,10 @@ Only a step that actually ran is compressed. Set `COMPRESS_STEP16=0` or
 `COMPRESS_STEP17=0` to disable either archive. `STEP16_ARCHIVE` and
 `STEP17_ARCHIVE` override the archive paths.
 
+At exit, both successful and failed runs record their finish time and complete
+launcher duration. The terminal log ends with `Run duration`, while
+`status.txt` includes `finished_at`, `duration_seconds`, and `duration_human`.
+
 Runtime note:
 
 ```text
