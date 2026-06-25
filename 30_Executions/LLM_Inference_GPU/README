@@ -104,7 +104,7 @@ GROUPING_LABEL="fixed_packet_count_size_006" \
 RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_fixed006_500prompts_batch190" \
 CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_002.json" \
 STEP17_BACKEND="vllm" \
-BATCH_SIZE="190" \
+BATCH_SIZE="168" \
 LIMIT_PROMPTS_S17="500" \
 /tf/thesis_Santos/04_Steps/run_step16_17.sh
 ```
