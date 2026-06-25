@@ -218,6 +218,7 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "generation_batch_index": llama_response_metadata.get("batch_index"),
         "generation_batch_size": llama_response_metadata.get("batch_size"),
         "generation_batch_limit": llama_response_metadata.get("batch_limit"),
+        "generation_batch_runtime_seconds": llama_response_metadata.get("batch_runtime_seconds"),
         **counts,
     }
     row["seconds_per_packet"] = safe_rate(runtime_seconds, row["packet_count"])
@@ -281,7 +282,7 @@ def runtime_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 # This function summarizes unique Step 17 generation batches recorded across per-prompt metadata.
 def generation_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    batches: dict[tuple[str, int], dict[str, int]] = {}
+    batches: dict[tuple[str, int], dict[str, Any]] = {}
     for row in rows:
         batch_index = as_int(row.get("generation_batch_index"), default=0)
         batch_size = as_int(row.get("generation_batch_size"), default=0)
@@ -289,14 +290,63 @@ def generation_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if batch_index <= 0 or batch_size <= 0:
             continue
         key = (str(row.get("model_name") or "unknown"), batch_index)
+        started_at = parse_datetime(row.get("started_at_utc"))
+        finished_at = parse_datetime(row.get("finished_at_utc"))
+        explicit_runtime = as_float(row.get("generation_batch_runtime_seconds"), default=0.0)
         current = batches.get(key)
-        batch_record = {"batch_index": batch_index, "batch_size": batch_size, "batch_limit": batch_limit}
-        if current is not None and current != batch_record:
-            raise ValueError(f"Inconsistent generation batch metadata for {key}: {current} != {batch_record}")
-        batches[key] = batch_record
+        if current is None:
+            current = {
+                "batch_index": batch_index,
+                "batch_size": batch_size,
+                "batch_limit": batch_limit,
+                "first_started_at": started_at,
+                "last_finished_at": finished_at,
+                "explicit_runtime_seconds": explicit_runtime or None,
+            }
+            batches[key] = current
+        elif current["batch_size"] != batch_size or current["batch_limit"] != batch_limit:
+            raise ValueError(f"Inconsistent generation batch metadata for {key}.")
+        else:
+            if started_at is not None and (
+                current["first_started_at"] is None or started_at < current["first_started_at"]
+            ):
+                current["first_started_at"] = started_at
+            if finished_at is not None and (
+                current["last_finished_at"] is None or finished_at > current["last_finished_at"]
+            ):
+                current["last_finished_at"] = finished_at
+            if explicit_runtime > 0:
+                current["explicit_runtime_seconds"] = explicit_runtime
 
-    ordered_batches = [batches[key] for key in sorted(batches)]
+    ordered_batches = []
+    for key in sorted(batches):
+        batch = batches[key]
+        observed_runtime = None
+        if batch["first_started_at"] is not None and batch["last_finished_at"] is not None:
+            observed_runtime = max(
+                0.0,
+                (batch["last_finished_at"] - batch["first_started_at"]).total_seconds(),
+            )
+        runtime_seconds = batch["explicit_runtime_seconds"] or observed_runtime
+        ordered_batches.append(
+            {
+                "batch_index": batch["batch_index"],
+                "batch_size": batch["batch_size"],
+                "batch_limit": batch["batch_limit"],
+                "runtime_seconds": runtime_seconds,
+                "runtime_source": (
+                    "explicit_generation_runtime"
+                    if batch["explicit_runtime_seconds"] is not None
+                    else "metadata_timestamp_span"
+                ),
+            }
+        )
     batch_sizes = [float(batch["batch_size"]) for batch in ordered_batches]
+    batch_runtimes = [
+        float(batch["runtime_seconds"])
+        for batch in ordered_batches
+        if isinstance(batch.get("runtime_seconds"), (int, float))
+    ]
     configured_limits = sorted({batch["batch_limit"] for batch in ordered_batches if batch["batch_limit"] > 0})
     size_distribution = Counter(batch["batch_size"] for batch in ordered_batches)
     return {
@@ -309,6 +359,7 @@ def generation_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "batch_size_distribution": {str(size): count for size, count in sorted(size_distribution.items())},
         "batch_size_stats": summarize_numbers(batch_sizes),
+        "batch_runtime_seconds": summarize_numbers(batch_runtimes),
         "batches": ordered_batches,
     }
 
@@ -331,6 +382,8 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
     status_counts = summary["counts"]["by_status"]
     failure_counts = summary["counts"]["by_failure_reason"]
     generation_batches = summary["generation_batches"]
+    all_wall_clock = as_float(runtime_total_all.get("observed_metadata_wall_clock_seconds"))
+    llm_wall_clock = as_float(runtime_total_llm.get("observed_metadata_wall_clock_seconds"))
 
     lines = [
         "# LLM Runtime Summary",
@@ -374,6 +427,10 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             f"- Mean batch size: `{fmt(generation_batches['batch_size_stats']['avg'])}`",
             f"- Median batch size: `{fmt(generation_batches['batch_size_stats']['median'])}`",
             f"- Maximum batch size: `{fmt(generation_batches['batch_size_stats']['max'])}`",
+            f"- Total generation-batch seconds: `{fmt(generation_batches['batch_runtime_seconds']['sum'])}`",
+            f"- Mean batch runtime seconds: `{fmt(generation_batches['batch_runtime_seconds']['avg'])}`",
+            f"- Median batch runtime seconds: `{fmt(generation_batches['batch_runtime_seconds']['median'])}`",
+            f"- P95 batch runtime seconds: `{fmt(generation_batches['batch_runtime_seconds']['p95'])}`",
             "",
             "| Actual batch size | Batch count |",
             "|---:|---:|",
@@ -390,12 +447,11 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             "",
             "## Runtime Totals",
             "",
-            "| Scope | Prompts | Prompt runtime sum seconds | Observed metadata wall-clock seconds | First start UTC | Last finish UTC |",
-            "|---|---:|---:|---:|---|---|",
+            "| Scope | Prompts | Observed metadata wall-clock seconds | First start UTC | Last finish UTC |",
+            "|---|---:|---:|---|---|",
             (
                 "| all metadata | "
                 f"{runtime_total_all['prompt_count']} | "
-                f"{fmt(runtime_total_all['prompt_runtime_sum_seconds'])} | "
                 f"{fmt(runtime_total_all['observed_metadata_wall_clock_seconds'])} | "
                 f"{fmt(runtime_total_all['first_started_at_utc'])} | "
                 f"{fmt(runtime_total_all['last_finished_at_utc'])} |"
@@ -403,20 +459,18 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             (
                 "| LLM attempted | "
                 f"{runtime_total_llm['prompt_count']} | "
-                f"{fmt(runtime_total_llm['prompt_runtime_sum_seconds'])} | "
                 f"{fmt(runtime_total_llm['observed_metadata_wall_clock_seconds'])} | "
                 f"{fmt(runtime_total_llm['first_started_at_utc'])} | "
                 f"{fmt(runtime_total_llm['last_finished_at_utc'])} |"
             ),
             "",
-            "## Aggregate Runtime",
+            "## Per-Item Batch-Cycle Duration",
             "",
-            "| Scope | Prompts | Total seconds | Avg seconds/prompt | Median seconds/prompt | P95 seconds/prompt |",
-            "|---|---:|---:|---:|---:|---:|",
+            "| Scope | Prompts | Avg cycle seconds | Median cycle seconds | P95 cycle seconds |",
+            "|---|---:|---:|---:|---:|",
             (
                 "| all metadata | "
                 f"{aggregate_all['prompt_count']} | "
-                f"{fmt(aggregate_all['runtime_seconds']['sum'])} | "
                 f"{fmt(aggregate_all['seconds_per_prompt'])} | "
                 f"{fmt(aggregate_all['runtime_seconds']['median'])} | "
                 f"{fmt(aggregate_all['runtime_seconds']['p95'])} |"
@@ -424,39 +478,38 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             (
                 "| LLM attempted | "
                 f"{aggregate_llm['prompt_count']} | "
-                f"{fmt(aggregate_llm['runtime_seconds']['sum'])} | "
                 f"{fmt(aggregate_llm['seconds_per_prompt'])} | "
                 f"{fmt(aggregate_llm['runtime_seconds']['median'])} | "
                 f"{fmt(aggregate_llm['runtime_seconds']['p95'])} |"
             ),
             "",
-            "## Normalized Runtime",
+            "## Wall-Clock Throughput",
             "",
-            "| Scope | sec/packet | sec/editable packet | sec/editable region | sec/payload window | tokens/prompt | tokens/packet |",
-            "|---|---:|---:|---:|---:|---:|---:|",
+            "| Scope | prompts/s | sec/prompt | sec/packet | sec/editable region | tokens/prompt |",
+            "|---|---:|---:|---:|---:|---:|",
             (
                 "| all metadata | "
-                f"{fmt(aggregate_all['seconds_per_packet'])} | "
-                f"{fmt(aggregate_all['seconds_per_editable_packet'])} | "
-                f"{fmt(aggregate_all['seconds_per_editable_region'])} | "
-                f"{fmt(aggregate_all['seconds_per_payload_window'])} | "
-                f"{fmt(aggregate_all['tokens_per_prompt'])} | "
-                f"{fmt(aggregate_all['tokens_per_packet'])} |"
+                f"{fmt(safe_rate(aggregate_all['prompt_count'], all_wall_clock))} | "
+                f"{fmt(safe_rate(all_wall_clock, aggregate_all['prompt_count']))} | "
+                f"{fmt(safe_rate(all_wall_clock, aggregate_all['total_packet_instances']))} | "
+                f"{fmt(safe_rate(all_wall_clock, aggregate_all['total_editable_region_instances']))} | "
+                f"{fmt(aggregate_all['tokens_per_prompt'])} |"
             ),
             (
                 "| LLM attempted | "
-                f"{fmt(aggregate_llm['seconds_per_packet'])} | "
-                f"{fmt(aggregate_llm['seconds_per_editable_packet'])} | "
-                f"{fmt(aggregate_llm['seconds_per_editable_region'])} | "
-                f"{fmt(aggregate_llm['seconds_per_payload_window'])} | "
-                f"{fmt(aggregate_llm['tokens_per_prompt'])} | "
-                f"{fmt(aggregate_llm['tokens_per_packet'])} |"
+                f"{fmt(safe_rate(aggregate_llm['prompt_count'], llm_wall_clock))} | "
+                f"{fmt(safe_rate(llm_wall_clock, aggregate_llm['prompt_count']))} | "
+                f"{fmt(safe_rate(llm_wall_clock, aggregate_llm['total_packet_instances']))} | "
+                f"{fmt(safe_rate(llm_wall_clock, aggregate_llm['total_editable_region_instances']))} | "
+                f"{fmt(aggregate_llm['tokens_per_prompt'])} |"
             ),
             "",
             "## Notes",
             "",
             "- `all metadata` includes auto-empty prompt units resolved without model inference.",
             "- `LLM attempted` excludes `auto_empty_no_editable_regions` so it better reflects actual model runtime.",
+            "- Per-item cycle durations overlap within a generation batch and must not be summed as serial runtime.",
+            "- Generation-batch runtimes use the explicit runner measurement when available; older metadata falls back to each batch timestamp span.",
             "- Runtime totals from metadata usually exclude model load/compile time before the first prompt; the orchestrator terminal log preserves the full Step 17 printed runtime when available.",
             "- Packet, editable-packet, editable-region and payload-window rates use prompt package traceability when available.",
         ]
@@ -501,6 +554,7 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "generation_batch_index",
         "generation_batch_size",
         "generation_batch_limit",
+        "generation_batch_runtime_seconds",
     ]
     with path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=fieldnames, extrasaction="ignore")

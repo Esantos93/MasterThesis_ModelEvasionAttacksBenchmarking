@@ -1170,6 +1170,7 @@ def write_generated_prompt_outputs(
     batch_index: int,
     batch_size: int,
     batch_limit: int,
+    batch_runtime_seconds: float,
 ) -> dict[str, Any]:
     context = build_prompt_output_context(
         prompt_package=prompt_package,
@@ -1236,6 +1237,7 @@ def write_generated_prompt_outputs(
         "batch_index": batch_index,
         "batch_size": batch_size,
         "batch_limit": batch_limit,
+        "batch_runtime_seconds": batch_runtime_seconds,
         "stream_visible_packet_ids": count_visible_packet_ids(raw_text, context["expected_packet_ids"]),
         "stream_expected_packet_ids": len(context["expected_packet_ids"]),
     }
@@ -1272,6 +1274,7 @@ def run_prompt_generation_batch(
 ) -> list[dict[str, Any]]:
     messages_batch = [item["prompt_package"]["messages"] for item in batch_items]
     generation_params_batch = [item["prompt_generation_params"] for item in batch_items]
+    batch_started = time.perf_counter()
     if hasattr(llm, "create_chat_completions_batch"):
         raw_texts = llm.create_chat_completions_batch(
             messages_batch=messages_batch,
@@ -1288,6 +1291,7 @@ def run_prompt_generation_batch(
                 stream=True,
             )
             raw_texts.append("".join(extract_stream_chunk_text(chunk) for chunk in response_chunks))
+    batch_runtime_seconds = time.perf_counter() - batch_started
 
     metadata_rows = []
     batch_size = len(batch_items)
@@ -1307,6 +1311,7 @@ def run_prompt_generation_batch(
                 batch_index=batch_index,
                 batch_size=batch_size,
                 batch_limit=batch_limit,
+                batch_runtime_seconds=batch_runtime_seconds,
             )
         )
     return metadata_rows
