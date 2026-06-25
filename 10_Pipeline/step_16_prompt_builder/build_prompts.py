@@ -628,7 +628,7 @@ def run_prompt_builder(
                 "parent_group_id": prompt_package["parent_group_id"],
                 "prompt_unit_id": prompt_package["prompt_unit_id"],
                 "group_id": prompt_package["group_id"],
-                "prompt_file": str(prompt_path),
+                "prompt_file": prompt_path.name,
                 "source_prompt_unit_file": str(prompt_unit_path),
                 "prompt_version": prompt_version,
                 "prompt_contract": prompt_package["prompt_contract"],
