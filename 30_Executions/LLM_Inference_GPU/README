@@ -1,9 +1,11 @@
 RISE H100 local execution launcher for Steps 16/17.
 
-The active script is:
+The active scripts are:
 
 ```text
-run_step16_17_gpu_vm.sh
+run_step16_17.sh
+compression_step_16.sh
+compression_step_17.sh
 ```
 
 It is designed for the new RISE container/host workflow and does not use
@@ -47,6 +49,10 @@ LIMIT_PROMPTS_S17
 STEP17_BACKEND
 SKIP_STEP16
 SKIP_STEP17
+COMPRESS_STEP16
+COMPRESS_STEP17
+STEP16_ARCHIVE
+STEP17_ARCHIVE
 ```
 
 For vLLM runs, the launcher automatically activates:
@@ -61,7 +67,10 @@ Step 16-only runs with `SKIP_STEP17=1` do not require this environment.
 Recommended first RISE smoke:
 
 ```bash
-chmod +x /tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+chmod +x \
+  /tf/thesis_Santos/04_Steps/run_step16_17.sh \
+  /tf/thesis_Santos/04_Steps/compression_step_16.sh \
+  /tf/thesis_Santos/04_Steps/compression_step_17.sh
 
 CLOUD_ROOT="/tf/thesis_Santos" \
 EXPERIMENT_ID="exp_cicids2017_thursday_baseline_002" \
@@ -71,8 +80,21 @@ CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_002.json" \
 STEP17_BACKEND="vllm" \
 BATCH_SIZE="190" \
 LIMIT_PROMPTS_S17="500" \
-/tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+/tf/thesis_Santos/04_Steps/run_step16_17.sh
 ```
+
+By default, outputs produced by the current invocation are compressed after
+Steps 16 and 17 finish successfully. Each archive contains only the current
+run subtree, not previous runs stored under `06_prompts` or `07_llm_outputs`:
+
+```text
+02_OutputFiles/<experiment_id>/step16_prompts_<run_id>.tar.gz
+02_OutputFiles/<experiment_id>/step17_llm_outputs_<run_id>.tar.gz
+```
+
+Only a step that actually ran is compressed. Set `COMPRESS_STEP16=0` or
+`COMPRESS_STEP17=0` to disable either archive. `STEP16_ARCHIVE` and
+`STEP17_ARCHIVE` override the archive paths.
 
 Runtime note:
 
@@ -86,7 +108,7 @@ run_llm_batch.py but loads Hugging Face model directories or ids with vLLM.
 For a Step 16-only validation:
 
 ```bash
-SKIP_STEP17=1 LIMIT_PROMPTS_S16=100 /tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+SKIP_STEP17=1 LIMIT_PROMPTS_S16=100 /tf/thesis_Santos/04_Steps/run_step16_17.sh
 ```
 
 For a Step 17-only run over an existing prompt directory:
@@ -94,5 +116,5 @@ For a Step 17-only run over an existing prompt directory:
 ```bash
 SKIP_STEP16=1 \
 PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<experiment_id>/06_prompts/<grouping_label>/<run_id>" \
-/tf/thesis_Santos/04_Steps/run_step16_17_gpu_vm.sh
+/tf/thesis_Santos/04_Steps/run_step16_17.sh
 ```

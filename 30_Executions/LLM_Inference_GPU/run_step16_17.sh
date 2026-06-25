@@ -52,6 +52,8 @@ SKIP_STEP16="${SKIP_STEP16:-0}"
 SKIP_STEP17="${SKIP_STEP17:-0}"
 SKIP_RUNTIME_SUMMARY="${SKIP_RUNTIME_SUMMARY:-0}"
 ALLOW_EXISTING_RUN="${ALLOW_EXISTING_RUN:-0}"
+COMPRESS_STEP16="${COMPRESS_STEP16:-1}"
+COMPRESS_STEP17="${COMPRESS_STEP17:-1}"
 
 if [[ "${STEP17_BACKEND}" == "vllm" && "${SKIP_STEP17}" != "1" ]]; then
   if [[ ! -f "${VLLM_VENV}/bin/activate" ]]; then
@@ -82,6 +84,12 @@ fi
 
 STEP16_DIR="${CLOUD_ROOT}/04_Steps/Step16"
 STEP17_DIR="${CLOUD_ROOT}/04_Steps/Step17"
+EXECUTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+EXPERIMENT_OUTPUT_DIR="${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}"
+STEP16_COMPRESSION_SCRIPT="${EXECUTION_DIR}/compression_step_16.sh"
+STEP17_COMPRESSION_SCRIPT="${EXECUTION_DIR}/compression_step_17.sh"
+STEP16_ARCHIVE="${STEP16_ARCHIVE:-${EXPERIMENT_OUTPUT_DIR}/step16_prompts_${RUN_ID}.tar.gz}"
+STEP17_ARCHIVE="${STEP17_ARCHIVE:-${EXPERIMENT_OUTPUT_DIR}/step17_llm_outputs_${RUN_ID}.tar.gz}"
 LOG_DIR="${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}/logs/${RUN_ID}"
 LOG_FILE="${LOG_DIR}/step16_17_${RUN_ID}.log"
 STATUS_FILE="${LOG_DIR}/status.txt"
@@ -173,6 +181,12 @@ else
   exit 1
 fi
 require_file "${STEP17_DIR}/summarize_llm_runtime.py"
+if [[ "${SKIP_STEP16}" != "1" && "${COMPRESS_STEP16}" == "1" ]]; then
+  require_file "${STEP16_COMPRESSION_SCRIPT}"
+fi
+if [[ "${SKIP_STEP17}" != "1" && "${COMPRESS_STEP17}" == "1" ]]; then
+  require_file "${STEP17_COMPRESSION_SCRIPT}"
+fi
 require_dir "${GROUP_DIR}"
 require_dir "${MODEL_DIR}"
 
@@ -228,6 +242,10 @@ echo "Step 17 runner: ${STEP17_RUNNER:-<skipped>}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Limit Step 16: ${LIMIT_PROMPTS_S16:-<none>}"
 echo "Limit Step 17: ${LIMIT_PROMPTS_S17:-<none>}"
+echo "Compress Step 16: ${COMPRESS_STEP16}"
+echo "Compress Step 17: ${COMPRESS_STEP17}"
+echo "Step 16 archive: ${STEP16_ARCHIVE}"
+echo "Step 17 archive: ${STEP17_ARCHIVE}"
 echo "Terminal log: ${LOG_FILE}"
 
 if [[ "${SKIP_STEP16}" != "1" ]]; then
@@ -318,6 +336,29 @@ if [[ "${SKIP_STEP17}" != "1" && "${SKIP_RUNTIME_SUMMARY}" != "1" ]]; then
       --run-dir "${model_run_dir}" \
       --prompt-dir "${PROMPT_DIR}"
   done
+fi
+
+if [[ "${SKIP_STEP16}" != "1" && "${COMPRESS_STEP16}" == "1" ]]; then
+  current_stage="compress_step16"
+  write_status "running"
+  bash "${STEP16_COMPRESSION_SCRIPT}" \
+    "${EXPERIMENT_OUTPUT_DIR}" \
+    "${PROMPT_DIR}" \
+    "${STEP16_ARCHIVE}"
+elif [[ "${SKIP_STEP16}" != "1" ]]; then
+  echo "Skipping Step 16 compression because COMPRESS_STEP16=${COMPRESS_STEP16}."
+fi
+
+if [[ "${SKIP_STEP17}" != "1" && "${COMPRESS_STEP17}" == "1" ]]; then
+  current_stage="compress_step17"
+  write_status "running"
+  bash "${STEP17_COMPRESSION_SCRIPT}" \
+    "${EXPERIMENT_OUTPUT_DIR}" \
+    "${GROUPING_LABEL}" \
+    "${RUN_ID}" \
+    "${STEP17_ARCHIVE}"
+elif [[ "${SKIP_STEP17}" != "1" ]]; then
+  echo "Skipping Step 17 compression because COMPRESS_STEP17=${COMPRESS_STEP17}."
 fi
 
 current_stage="complete"
