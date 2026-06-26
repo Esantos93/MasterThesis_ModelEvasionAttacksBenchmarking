@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
 from step_15_grouping.group_packets import build_token_estimation_view, estimate_json_tokens, run_grouping
 from step_16_prompt_builder.build_prompts import build_prompt_package
@@ -38,6 +39,43 @@ def tcp_record(
         "payload_hex": payload.hex(),
         "payload_length_bytes": len(payload),
         "packet_length_bytes": 54 + len(payload),
+        "ethernet_header": {
+            "destination_mac": "00:00:00:00:00:02",
+            "source_mac": "00:00:00:00:00:01",
+            "outer_ether_type": 2048,
+            "ether_type": 2048,
+            "original_header_hex": "00" * 14,
+        },
+        "ipv4_header": {
+            "version": 4,
+            "ihl_words": 5,
+            "tos": 0,
+            "total_length": 40 + len(payload),
+            "identification": packet_number,
+            "flags": {"reserved": False, "dont_fragment": True, "more_fragments": False},
+            "flags_fragment_offset": 16384,
+            "fragment_offset_units": 0,
+            "ttl": 64,
+            "protocol": 6,
+            "checksum": 0,
+            "source_address": "10.0.0.1",
+            "destination_address": "10.0.0.2",
+            "original_header_hex": "00" * 20,
+        },
+        "tcp_header": {
+            "source_port": 12345,
+            "destination_port": 80,
+            "sequence_number": sequence,
+            "acknowledgement_number": 5000,
+            "data_offset_reserved_ns": 80,
+            "flags": {"raw": 0x18},
+            "window": 8192,
+            "checksum": 0,
+            "urgent_pointer": 0,
+            "original_header_hex": "00" * 20,
+        },
+        "canonical_region_ids": [],
+        "canonical_region_mappings": [],
         "flow_context": {
             "assigned_flow_ids": assigned_flow_ids or [],
             "candidate_flow_ids": candidate_flow_ids or [],
@@ -46,21 +84,39 @@ def tcp_record(
     }
 
 
-# This helper wraps canonicalizer output in the packet_json_v3 structure consumed by Step 15.
-def packet_json_v3(records: list[dict], include_flow_context: bool) -> dict:
+# This helper wraps canonicalizer output in the packet_json_v4 structure consumed by Step 15.
+def packet_json_v4(records: list[dict], include_flow_context: bool) -> dict:
     canonical = canonicalize_tcp_records(records)
+    region_ids_by_packet: dict[str, list[str]] = {}
+    mappings_by_packet: dict[str, list[dict]] = {}
+    for representation in canonical["tcp_physical_representations"]:
+        packet_id = str(representation["packet_id"])
+        region_id = str(representation["canonical_region_id"])
+        region_ids_by_packet.setdefault(packet_id, []).append(region_id)
+        mappings_by_packet.setdefault(packet_id, []).append(
+            {
+                "canonical_region_id": region_id,
+                "physical_representation_id": representation["physical_representation_id"],
+            }
+        )
+    for record in records:
+        packet_id = str(record["packet_id"])
+        record["canonical_region_ids"] = region_ids_by_packet.get(packet_id, [])
+        record["canonical_region_mappings"] = mappings_by_packet.get(packet_id, [])
     return {
         "metadata": {
-            "schema_version": "packet_json_v3",
-            "grouping_unit": "canonical_tcp_region",
+            "schema_version": "packet_json_v4",
+            "grouping_unit": "physical_packet",
             "include_flow_context": include_flow_context,
         },
-        "immutable_fields": [
+        "identity_fields": [
             "packet_id",
             "original_packet_number",
             "reduced_packet_index",
             "timestamp_epoch_pcap",
         ],
+        "header_field_definitions": HEADER_FIELD_DEFINITIONS,
+        "derived_header_fact_definitions": {},
         "traffic": records,
         "tcp_connections": canonical["tcp_connections"],
         "tcp_streams": canonical["tcp_streams"],
@@ -75,8 +131,9 @@ def packet_json_v3(records: list[dict], include_flow_context: bool) -> dict:
 def config(output_root: Path, grouping_policy: str, group_size: int | None = None) -> dict:
     pipeline = {
         "grouping_policy": grouping_policy,
-        "grouping_unit": "canonical_tcp_region",
+        "grouping_unit": "physical_packet",
         "experiment_config_label": f"test-{grouping_policy}",
+        "header_editability_policy_path": "step_15_grouping/header_editability_policy_v1.json",
     }
     if group_size is not None:
         pipeline["group_size_packets"] = group_size
@@ -126,13 +183,13 @@ class CanonicalStep15Tests(unittest.TestCase):
         ]
         return manifest, units
 
-    def test_fixed_size_counts_canonical_regions_and_deduplicates_retransmissions(self) -> None:
+    def test_fixed_size_counts_physical_packets_and_deduplicates_payload_retransmissions(self) -> None:
         records = [
             tcp_record(1, 1000, b"attack", assigned_flow_ids=["flow_000001"]),
             tcp_record(2, 1000, b"attack", assigned_flow_ids=["flow_000001"]),
             tcp_record(3, 1006, b"next", assigned_flow_ids=["flow_000001"]),
         ]
-        source = packet_json_v3(records, include_flow_context=False)
+        source = packet_json_v4(records, include_flow_context=False)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -140,13 +197,23 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         self.assertEqual(3, manifest["metadata"]["total_packet_count"])
         self.assertEqual(2, manifest["metadata"]["total_canonical_region_count"])
-        self.assertEqual(1, manifest["metadata"]["parent_group_count"])
-        self.assertEqual(2, manifest["metadata"]["group_size_canonical_regions"])
+        self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        self.assertEqual(2, manifest["metadata"]["group_size_physical_packets"])
+        self.assertIsNone(manifest["metadata"]["group_size_canonical_regions"])
         self.assertEqual(2, manifest["metadata"]["canonical_ownership_summary"]["canonical_region_count"])
         compact_regions = [region for unit in units for region in unit["packets"] if region["editable"]]
         retransmission_region = next(region for region in compact_regions if len(region["source_packet_ids"]) == 2)
         self.assertEqual(["packet_000001", "packet_000002"], retransmission_region["source_packet_ids"])
         self.assertEqual(retransmission_region["canonical_region_id"], retransmission_region["packet_id"])
+        physical_packets = [packet for unit in units for packet in unit.get("physical_packets", [])]
+        editable_header_fields = {
+            item["field"]
+            for packet in physical_packets
+            for item in packet["header_field_classifications"]
+            if item["editable"]
+        }
+        self.assertEqual({"ipv4.tos", "ipv4.ttl", "tcp.window"}, editable_header_fields)
+        self.assertTrue(all(packet["header_editability_policy_id"] == "conservative_header_editability_v1" for packet in physical_packets))
 
     def test_flow_based_groups_canonical_regions_by_shared_flow_context(self) -> None:
         records = [
@@ -160,7 +227,7 @@ class CanonicalStep15Tests(unittest.TestCase):
                 mapping_status="unassigned_time_window_mismatch",
             ),
         ]
-        source = packet_json_v3(records, include_flow_context=True)
+        source = packet_json_v4(records, include_flow_context=True)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -174,11 +241,11 @@ class CanonicalStep15Tests(unittest.TestCase):
             for region_id in unit["editable_canonical_region_ids"]
         }
         self.assertEqual(2, len(editable_ids))
-        self.assertTrue(all(unit["source_packet_json_schema_version"] == "packet_json_v3" for unit in units))
+        self.assertTrue(all(unit["source_packet_json_schema_version"] == "packet_json_v4" for unit in units))
 
     def test_large_canonical_region_windows_cover_bytes_once_and_step16_can_consume_them(self) -> None:
         payload = bytes(index % 251 for index in range(600))
-        source = packet_json_v3([tcp_record(1, 1000, payload)], include_flow_context=False)
+        source = packet_json_v4([tcp_record(1, 1000, payload)], include_flow_context=False)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -230,7 +297,7 @@ class CanonicalStep15Tests(unittest.TestCase):
                 mapping_status="ambiguous_duplicate_overlapping",
             )
         ]
-        source = packet_json_v3(records, include_flow_context=True)
+        source = packet_json_v4(records, include_flow_context=True)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -260,13 +327,13 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
         self.assertEqual([(0, 512), (512, 1024), (1024, 1200)], editable_intervals)
 
-    def test_step15_rejects_packet_json_v2(self) -> None:
-        source = packet_json_v3([tcp_record(1, 1000, b"attack")], include_flow_context=False)
-        source["metadata"]["schema_version"] = "packet_json_v2"
+    def test_step15_rejects_packet_json_v3(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"attack")], include_flow_context=False)
+        source["metadata"]["schema_version"] = "packet_json_v3"
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            with self.assertRaisesRegex(ValueError, "packet_json_v3"):
+            with self.assertRaisesRegex(ValueError, "packet_json_v4"):
                 self.run_step15(source, config(root, "fixed_packet_count", group_size=1), root)
 
 

@@ -25,9 +25,9 @@ from common.terminal_logging import default_step_log_path, terminal_log
 #These are the Step 15 artifact schema names produced by the current code.
 PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v2"
 GROUP_MANIFEST_SCHEMA_VERSION = "group_manifest_v2"
-PAYLOAD_STRATEGY_VERSION = "canonical_tcp_payload_strategy_v1"
-SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v3"
-GROUPING_UNIT = "canonical_tcp_region"
+PAYLOAD_STRATEGY_VERSION = "hybrid_physical_header_canonical_payload_strategy_v1"
+SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
+GROUPING_UNIT = "physical_packet"
 
 #This list records the grouping policies that the current draft knows how to execute.
 #When a future grouping policy is implemented, it should be added here and in group_records_by_policy().
@@ -49,6 +49,7 @@ DEFAULT_TOKEN_BUDGET_CONFIG = {
     "payload_window_right_context_bytes": 128,
 }
 REQUIRED_TOKEN_BUDGET_CONFIG_KEYS = ["expected_output_patch_tokens"]
+HEADER_POLICY_SCHEMA_VERSION = "header_editability_policy_v1"
 
 HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
 TEXT_PRINTABLE = set(string.printable)
@@ -85,6 +86,7 @@ def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         "packet_ids": prompt_unit.get("packet_ids", []),
         "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
         "context_packet_ids": prompt_unit.get("context_packet_ids", []),
+        "physical_packets": prompt_unit.get("physical_packets", []),
         "packets": prompt_unit.get("packets", []),
         "context_truncation": prompt_unit.get("context_truncation"),
     }
@@ -120,7 +122,7 @@ def validate_config(config: dict[str, Any]) -> None:
         require_keys(config["pipeline"], ["flow_payload_slide_window_overlap_units"], "pipeline")
 
 
-#This function validates the canonical packet JSON contract required by the third optimization.
+#This function validates the hybrid packet JSON contract required by the active third optimization.
 def validate_packet_json(packet_json: Any, input_path: Path) -> dict[str, Any]:
     if not isinstance(packet_json, dict):
         raise ValueError(f"Packet JSON root must be an object: {input_path}")
@@ -143,6 +145,9 @@ def validate_packet_json(packet_json: Any, input_path: Path) -> dict[str, Any]:
             f"Step 15 requires source grouping_unit={GROUPING_UNIT!r}; "
             f"found {metadata.get('grouping_unit')!r}: {input_path}"
         )
+    for field in ["header_field_definitions", "derived_header_fact_definitions"]:
+        if not isinstance(packet_json.get(field), dict):
+            raise ValueError(f"Packet JSON must contain a top-level {field!r} object: {input_path}")
     for field in [
         "tcp_connections",
         "tcp_streams",
@@ -155,15 +160,157 @@ def validate_packet_json(packet_json: Any, input_path: Path) -> dict[str, Any]:
             raise ValueError(f"Packet JSON must contain a top-level {field!r} list: {input_path}")
     if packet_json["tcp_canonicalization_conflicts"]:
         raise ValueError(
-            "Step 15 cannot assign editable ownership while packet_json_v3 contains "
+            "Step 15 cannot assign editable ownership while packet_json_v4 contains "
             "TCP canonicalization conflicts."
         )
+    for packet in traffic:
+        if not isinstance(packet, dict):
+            raise ValueError("Packet JSON traffic entries must be objects.")
+        for header_key in ["ethernet_header", "ipv4_header", "tcp_header"]:
+            if header_key not in packet:
+                raise ValueError(f"packet_json_v4 traffic entry lacks {header_key!r}: {packet.get('packet_id')!r}")
     return packet_json
 
 
 #This helper returns one stable ordered list without duplicating values.
 def unique_strings(values: list[Any]) -> list[str]:
     return list(dict.fromkeys(str(value) for value in values))
+
+
+#This function resolves the header editability policy path selected by the active config.
+def resolve_header_policy_path(config: dict[str, Any], config_path: str | Path) -> Path:
+    policy_value = config.get("pipeline", {}).get("header_editability_policy_path")
+    if not policy_value:
+        raise ValueError("Step 15 requires pipeline.header_editability_policy_path for packet_json_v4.")
+    policy_path = Path(str(policy_value)).expanduser()
+    if policy_path.is_absolute():
+        return policy_path
+    config_relative = Path(config_path).expanduser().parent / policy_path
+    if config_relative.exists():
+        return config_relative
+    return PIPELINE_ROOT / policy_path
+
+
+#This function loads the global header editability policy used by Step 15.
+def load_header_editability_policy(config: dict[str, Any], config_path: str | Path) -> dict[str, Any]:
+    policy_path = resolve_header_policy_path(config, config_path)
+    policy = read_json(policy_path)
+    if not isinstance(policy, dict):
+        raise ValueError(f"Header editability policy must be a JSON object: {policy_path}")
+    if policy.get("schema_version") != HEADER_POLICY_SCHEMA_VERSION:
+        raise ValueError(
+            f"Step 15 requires header policy schema {HEADER_POLICY_SCHEMA_VERSION!r}; "
+            f"found {policy.get('schema_version')!r}: {policy_path}"
+        )
+    if not isinstance(policy.get("rules"), list):
+        raise ValueError(f"Header editability policy must contain a rules list: {policy_path}")
+    policy["_policy_path"] = str(policy_path)
+    policy["_rule_lookup"] = header_policy_rule_lookup(policy)
+    return policy
+
+
+#This helper returns a nested value from a structured packet header.
+def nested_header_value(header: dict[str, Any], field_name: str) -> Any:
+    current: Any = header
+    for part in field_name.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+#This function expands the policy rules into a field->rule lookup.
+def header_policy_rule_lookup(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for rule in policy["rules"]:
+        if not isinstance(rule, dict):
+            raise ValueError("Header editability policy rules must be JSON objects.")
+        expanded_fields: list[str] = []
+        if "protocol" in rule and "field" in rule:
+            expanded_fields.append(f"{rule['protocol']}.{rule['field']}")
+        for field in rule.get("fields", []):
+            field_text = str(field)
+            if "." in field_text:
+                expanded_fields.append(field_text)
+            else:
+                for protocol in rule.get("protocols", []):
+                    expanded_fields.append(f"{protocol}.{field_text}")
+                if "protocol" in rule:
+                    expanded_fields.append(f"{rule['protocol']}.{field_text}")
+        for field_key in expanded_fields:
+            if field_key in lookup:
+                raise ValueError(f"Header editability policy defines multiple rules for {field_key!r}.")
+            lookup[field_key] = rule
+    return lookup
+
+
+#This function evaluates the global header policy for one physical packet.
+def classify_packet_headers(
+    *,
+    packet: dict[str, Any],
+    header_field_definitions: dict[str, Any],
+    header_policy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rule_lookup = header_policy.get("_rule_lookup") or header_policy_rule_lookup(header_policy)
+    classifications = []
+    for protocol, field_definitions in header_field_definitions.items():
+        header = packet.get(f"{protocol}_header", {})
+        if not isinstance(header, dict) or not isinstance(field_definitions, dict):
+            continue
+        for field_name, field_definition in field_definitions.items():
+            field_key = f"{protocol}.{field_name}"
+            rule = rule_lookup.get(field_key)
+            classification = str(rule.get("classification")) if rule else str(header_policy["default_classification"])
+            editable = bool(rule.get("editable")) if rule else False
+            constraints = dict(rule.get("constraints", {})) if rule else {}
+            if isinstance(field_definition, dict):
+                constraints.setdefault("encoding", field_definition.get("encoding"))
+                constraints.setdefault("width_bits", field_definition.get("width_bits"))
+            classifications.append(
+                {
+                    "header_region_id": f"{packet['packet_id']}:{field_key}",
+                    "packet_id": packet["packet_id"],
+                    "protocol": protocol,
+                    "field": field_key,
+                    "field_name": field_name,
+                    "classification": classification,
+                    "editable": editable,
+                    "allowed_operations": list(rule.get("allowed_operations", [])) if rule else [],
+                    "constraints": constraints,
+                    "current_value": nested_header_value(header, field_name),
+                    "applied_rule_ids": [str(rule["rule_id"])] if rule else [],
+                    "source_refs": list(rule.get("source_refs", [])) if rule else [],
+                }
+            )
+    return classifications
+
+
+#This function builds the compact physical-packet header context stored by Step 15.
+def build_compact_physical_packet(
+    *,
+    packet: dict[str, Any],
+    header_field_definitions: dict[str, Any],
+    header_policy: dict[str, Any],
+) -> dict[str, Any]:
+    classifications = classify_packet_headers(
+        packet=packet,
+        header_field_definitions=header_field_definitions,
+        header_policy=header_policy,
+    )
+    editable_count = sum(1 for item in classifications if item["editable"])
+    return {
+        "identity_type": "physical_packet",
+        "packet_id": packet["packet_id"],
+        "original_packet_number": packet.get("original_packet_number"),
+        "reduced_packet_index": packet.get("reduced_packet_index"),
+        "timestamp_epoch_pcap": packet.get("timestamp_epoch_pcap"),
+        "tcp_connection_id": packet.get("tcp_connection_id"),
+        "tcp_stream_id": packet.get("tcp_stream_id"),
+        "canonical_region_ids": packet.get("canonical_region_ids", []),
+        "header_editability_policy_id": header_policy["policy_id"],
+        "editable_header_region_count": editable_count,
+        "header_field_classifications": classifications,
+    }
 
 
 #This function resolves packet aliases and flow context for every canonical TCP region.
@@ -317,7 +464,7 @@ def get_flow_payload_slide_window_overlap_units(config: dict[str, Any], grouping
     return overlap_units
 
 
-#This function implements the baseline parent grouping policy over canonical TCP regions.
+#This function implements the baseline parent grouping policy over physical packets.
 def group_fixed_packet_count(records: list[Any], group_size: int) -> list[dict[str, Any]]:
     if group_size <= 0:
         raise ValueError("group_size_packets must be a positive integer.")
@@ -327,8 +474,9 @@ def group_fixed_packet_count(records: list[Any], group_size: int) -> list[dict[s
             {
                 "parent_group_id": f"group_{group_index:06d}",
                 "group_index": group_index,
-                "unit_type": "fixed_canonical_region_group",
-                "records": records[start_index : start_index + group_size],
+                "unit_type": "fixed_physical_packet_group",
+                "physical_packets": records[start_index : start_index + group_size],
+                "records": [],
             }
         )
     return groups
@@ -361,12 +509,12 @@ def flow_group_key(record: dict[str, Any]) -> str:
     return f"unresolved_{mapping_status}"
 
 
-#This function groups canonical regions by CICIDS flow context and orders each group in TCP stream coordinates.
+#This function groups physical packets by CICIDS flow context and orders each group in capture/TCP coordinates.
 def group_flow_based(records: list[Any]) -> list[dict[str, Any]]:
     groups_by_key: dict[str, list[Any]] = {}
     for record in records:
         if not isinstance(record, dict):
-            raise ValueError("flow_based grouping expects every canonical region record to be a JSON object.")
+            raise ValueError("flow_based grouping expects every physical packet record to be a JSON object.")
         key = flow_group_key(record)
         groups_by_key.setdefault(key, []).append(record)
 
@@ -378,10 +526,11 @@ def group_flow_based(records: list[Any]) -> list[dict[str, Any]]:
         ordered_records = sorted(
             groups_by_key[key],
             key=lambda record: (
+                int(record.get("reduced_packet_index") or 0),
                 str(record.get("tcp_connection_id", "")),
                 str(record.get("tcp_stream_id", "")),
                 int(record.get("stream_start") or 0),
-                str(record.get("canonical_region_id", "")),
+                str(record.get("packet_id", "")),
             ),
         )
         groups.append(
@@ -389,7 +538,8 @@ def group_flow_based(records: list[Any]) -> list[dict[str, Any]]:
                 "parent_group_id": parent_group_id,
                 "group_index": group_index,
                 "unit_type": unit_type,
-                "records": ordered_records,
+                "physical_packets": ordered_records,
+                "records": [],
             }
         )
     return groups
@@ -407,6 +557,44 @@ def group_records_by_policy(*, records: list[Any], grouping_policy: str, group_s
         f"The selected grouping policy ({grouping_policy!r}) is not supported.\n"
         f"The supported policies are: {SUPPORTED_GROUPING_POLICIES!r}."
     )
+
+
+#This function maps every physical packet id to its deterministic parent group.
+def build_packet_parent_group_lookup(parent_groups: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    lookup = {}
+    for parent_group in parent_groups:
+        for packet in parent_group.get("physical_packets", []):
+            packet_id = str(packet.get("packet_id", ""))
+            if not packet_id:
+                raise ValueError("Physical packet without packet_id cannot be assigned to a Step 15 parent group.")
+            if packet_id in lookup:
+                raise ValueError(f"Physical packet {packet_id!r} appears in more than one Step 15 parent group.")
+            lookup[packet_id] = parent_group
+    return lookup
+
+
+#This function assigns each canonical payload region to the parent group containing its first physical alias.
+def assign_canonical_records_to_owner_groups(
+    *,
+    canonical_records: list[dict[str, Any]],
+    parent_groups: list[dict[str, Any]],
+) -> None:
+    packet_parent_lookup = build_packet_parent_group_lookup(parent_groups)
+    for canonical_record in canonical_records:
+        source_packet_ids = [str(packet_id) for packet_id in canonical_record.get("source_packet_ids", [])]
+        if not source_packet_ids:
+            raise ValueError(f"Canonical region {canonical_record.get('canonical_region_id')!r} has no physical aliases.")
+        owner_packet_id = source_packet_ids[0]
+        owner_group = packet_parent_lookup.get(owner_packet_id)
+        if owner_group is None:
+            raise ValueError(
+                f"Canonical region {canonical_record.get('canonical_region_id')!r} first alias "
+                f"{owner_packet_id!r} is not present in any physical parent group."
+            )
+        canonical_record["owner_parent_group_id"] = owner_group["parent_group_id"]
+        canonical_record["anchor_group_fragment_id"] = owner_group["parent_group_id"]
+        canonical_record["representative_packet_id"] = owner_packet_id
+        owner_group.setdefault("records", []).append(canonical_record)
 
 
 #This function builds the output subfolder name for the selected Step 15 grouping policy.
@@ -443,10 +631,18 @@ def median_from_sorted(values: list[int]) -> int | float | None:
 
 #This function summarizes parent-group sizes so flow-based experiments can be compared with fixed-size baselines.
 def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[str, Any]:
-    sizes = sorted(len(group["records"]) for group in parent_groups)
+    sizes = sorted(len(group.get("physical_packets", group.get("records", []))) for group in parent_groups)
+    canonical_sizes = sorted(len(group.get("records", [])) for group in parent_groups)
     if not sizes:
         return {
             "group_count": 0,
+            "physical_packet_count_min": None,
+            "physical_packet_count_max": None,
+            "physical_packet_count_mean": None,
+            "physical_packet_count_median": None,
+            "physical_packet_count_mode": None,
+            "physical_packet_count_p95": None,
+            "physical_packet_count_distribution": {},
             "canonical_region_count_min": None,
             "canonical_region_count_max": None,
             "canonical_region_count_mean": None,
@@ -458,17 +654,26 @@ def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[st
         }
 
     distribution = Counter(sizes)
+    canonical_distribution = Counter(canonical_sizes)
     unit_type_counts = Counter(str(group.get("unit_type", "unknown")) for group in parent_groups)
     mode_size, _ = sorted(distribution.items(), key=lambda item: (-item[1], item[0]))[0]
+    canonical_mode_size, _ = sorted(canonical_distribution.items(), key=lambda item: (-item[1], item[0]))[0]
     return {
         "group_count": len(sizes),
-        "canonical_region_count_min": sizes[0],
-        "canonical_region_count_max": sizes[-1],
-        "canonical_region_count_mean": round(sum(sizes) / len(sizes), 4),
-        "canonical_region_count_median": median_from_sorted(sizes),
-        "canonical_region_count_mode": mode_size,
-        "canonical_region_count_p95": percentile_from_sorted(sizes, 0.95),
-        "canonical_region_count_distribution": {str(size): count for size, count in sorted(distribution.items())},
+        "physical_packet_count_min": sizes[0],
+        "physical_packet_count_max": sizes[-1],
+        "physical_packet_count_mean": round(sum(sizes) / len(sizes), 4),
+        "physical_packet_count_median": median_from_sorted(sizes),
+        "physical_packet_count_mode": mode_size,
+        "physical_packet_count_p95": percentile_from_sorted(sizes, 0.95),
+        "physical_packet_count_distribution": {str(size): count for size, count in sorted(distribution.items())},
+        "canonical_region_count_min": canonical_sizes[0],
+        "canonical_region_count_max": canonical_sizes[-1],
+        "canonical_region_count_mean": round(sum(canonical_sizes) / len(canonical_sizes), 4),
+        "canonical_region_count_median": median_from_sorted(canonical_sizes),
+        "canonical_region_count_mode": canonical_mode_size,
+        "canonical_region_count_p95": percentile_from_sorted(canonical_sizes, 0.95),
+        "canonical_region_count_distribution": {str(size): count for size, count in sorted(canonical_distribution.items())},
         "parent_group_unit_type_counts": dict(sorted(unit_type_counts.items())),
     }
 
@@ -797,12 +1002,14 @@ def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], inp
 def build_compact_packet(packet: dict[str, Any], payload_plan: dict[str, Any], editable: bool) -> dict[str, Any]:
     canonical_region_id = str(packet.get("canonical_region_id"))
     compact_packet = {
-        "identity_type": GROUPING_UNIT,
+        "identity_type": "canonical_tcp_region",
         "canonical_region_id": canonical_region_id,
         "packet_id": canonical_region_id,
         "role": "editable" if editable else "context",
         "editable": editable,
         "representative_packet_id": packet.get("representative_packet_id"),
+        "owner_parent_group_id": packet.get("owner_parent_group_id"),
+        "anchor_group_fragment_id": packet.get("anchor_group_fragment_id"),
         "source_packet_ids": packet.get("source_packet_ids", []),
         "physical_representation_ids": packet.get("physical_representation_ids", []),
         "physical_representation_set_ids": packet.get("physical_representation_set_ids", []),
@@ -841,8 +1048,10 @@ def build_group_metadata(
     unit_type: str,
     parent_group: dict[str, Any],
 ) -> dict[str, Any]:
-    first_timestamps = [record.get("first_timestamp_epoch_pcap") for record in records]
-    last_timestamps = [record.get("last_timestamp_epoch_pcap") for record in records]
+    physical_packets = parent_group.get("physical_packets", [])
+    timestamp_records = physical_packets or records
+    first_timestamps = [record.get("timestamp_epoch_pcap", record.get("first_timestamp_epoch_pcap")) for record in timestamp_records]
+    last_timestamps = [record.get("timestamp_epoch_pcap", record.get("last_timestamp_epoch_pcap")) for record in timestamp_records]
     connections = {str(record.get("tcp_connection_id")) for record in records}
     streams = {str(record.get("tcp_stream_id")) for record in records}
     metadata = {
@@ -852,6 +1061,14 @@ def build_group_metadata(
         "grouping_policy": grouping_policy,
         "grouping_unit": GROUPING_UNIT,
         "group_size_packets": group_size_packets,
+        "physical_packet_count": len(physical_packets),
+        "physical_packet_ids": [str(packet.get("packet_id")) for packet in physical_packets],
+        "first_reduced_packet_index": (
+            min(int(packet["reduced_packet_index"]) for packet in physical_packets) if physical_packets else None
+        ),
+        "last_reduced_packet_index": (
+            max(int(packet["reduced_packet_index"]) for packet in physical_packets) if physical_packets else None
+        ),
         "canonical_region_count": len(records),
         "source_packet_alias_count": len({packet_id for record in records for packet_id in record["source_packet_ids"]}),
         "first_timestamp_epoch_pcap": min(first_timestamps) if first_timestamps else None,
@@ -877,6 +1094,7 @@ def build_prompt_unit(
     prompt_unit_id: str,
     unit_type: str,
     packets: list[dict[str, Any]],
+    physical_packets: list[dict[str, Any]] | None = None,
     token_config: dict[str, Any],
     input_token_budget: int,
     context_truncation: dict[str, Any] | None,
@@ -902,6 +1120,7 @@ def build_prompt_unit(
         "packet_ids": [],
         "editable_packet_ids": [],
         "context_packet_ids": [],
+        "physical_packets": physical_packets or [],
         "packets": packets,
         "context_truncation": context_truncation,
     }
@@ -1200,6 +1419,7 @@ def build_base_prompt_units(
     parent_group_id: str,
     unit_type: str,
     base_packets: list[dict[str, Any]],
+    physical_packets: list[dict[str, Any]],
     grouping_policy: str,
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
@@ -1226,6 +1446,7 @@ def build_base_prompt_units(
         "packet_ids": [],
         "editable_packet_ids": [],
         "context_packet_ids": [],
+        "physical_packets": physical_packets,
         "packets": [],
         "context_truncation": None,
     }
@@ -1265,6 +1486,7 @@ def build_base_prompt_units(
             prompt_unit_id=prompt_unit_id,
             unit_type=unit_type if chunk_count == 1 else f"{unit_type}_packet_window",
             packets=chunk["packets"],
+            physical_packets=physical_packets,
             token_config=token_config,
             input_token_budget=input_token_budget,
             context_truncation=None,
@@ -1299,6 +1521,7 @@ def build_base_prompt_units(
                 prompt_unit_id=prompt_unit_id,
                 unit_type=f"{unit_type}_packet_window",
                 packets=candidate_packets,
+                physical_packets=physical_packets,
                 token_config=token_config,
                 input_token_budget=input_token_budget,
                 context_truncation={
@@ -1339,6 +1562,7 @@ def build_base_prompt_units(
                 prompt_unit_id=sub_prompt_unit_id,
                 unit_type=f"{unit_type}_packet_window",
                 packets=fallback_packets,
+                physical_packets=physical_packets,
                 token_config=token_config,
                 input_token_budget=input_token_budget,
                 context_truncation={
@@ -1379,6 +1603,7 @@ def build_base_prompt_units(
                     prompt_unit_id=packet_prompt_unit_id,
                     unit_type=f"{unit_type}_packet_window",
                     packets=[packet],
+                    physical_packets=physical_packets,
                     token_config=token_config,
                     input_token_budget=input_token_budget,
                     context_truncation={
@@ -1407,6 +1632,8 @@ def build_prompt_units_for_group(
     grouping_policy: str,
     group_size_packets: int | None,
     parent_group: dict[str, Any],
+    header_field_definitions: dict[str, Any],
+    header_policy: dict[str, Any],
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
@@ -1421,6 +1648,14 @@ def build_prompt_units_for_group(
                 f"planned_canonical_regions={record_index}/{len(records)}"
             )
     group_metadata = build_group_metadata(parent_group_id, group_index, records, grouping_policy, group_size_packets, unit_type, parent_group)
+    compact_physical_packets = [
+        build_compact_physical_packet(
+            packet=packet,
+            header_field_definitions=header_field_definitions,
+            header_policy=header_policy,
+        )
+        for packet in parent_group.get("physical_packets", [])
+    ]
     base_packets = [
         build_compact_packet(record, payload_plan, editable=bool(payload_plan["editable_regions"]))
         for record, payload_plan in zip(records, payload_plans)
@@ -1433,6 +1668,7 @@ def build_prompt_units_for_group(
         parent_group_id=parent_group_id,
         unit_type=unit_type,
         base_packets=base_packets,
+        physical_packets=compact_physical_packets,
         grouping_policy=grouping_policy,
         flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
@@ -1484,6 +1720,11 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "editable_packet_ids": prompt_unit["editable_packet_ids"],
         "context_packet_ids": prompt_unit["context_packet_ids"],
         "estimated_input_tokens": prompt_unit["estimated_input_tokens"],
+        "physical_packet_count": len(prompt_unit.get("physical_packets", [])),
+        "editable_header_region_count": sum(
+            int(packet.get("editable_header_region_count") or 0)
+            for packet in prompt_unit.get("physical_packets", [])
+        ),
         "payload_window_count": prompt_unit["payload_window_count"],
         "editable_region_count": prompt_unit["editable_region_count"],
         "context_truncation": prompt_unit["context_truncation"],
@@ -1587,6 +1828,7 @@ def build_manifest(
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
+    header_policy: dict[str, Any],
     parent_group_count: int,
     parent_group_stats: dict[str, Any],
     prompt_unit_summaries: list[dict[str, Any]],
@@ -1605,7 +1847,8 @@ def build_manifest(
             "grouping_policy": grouping_policy,
             "grouping_unit": GROUPING_UNIT,
             "group_size_packets": group_size_packets,
-            "group_size_canonical_regions": group_size_packets,
+            "group_size_physical_packets": group_size_packets,
+            "group_size_canonical_regions": None,
             "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
             "parent_group_count": parent_group_count,
             "parent_group_size_statistics": parent_group_stats,
@@ -1614,6 +1857,11 @@ def build_manifest(
             "total_canonical_region_count": len(packet_json["canonical_tcp_regions"]),
             "compact_view_schema_version": PROMPT_UNIT_SCHEMA_VERSION,
             "payload_strategy_version": PAYLOAD_STRATEGY_VERSION,
+            "header_editability_policy": {
+                "schema_version": header_policy["schema_version"],
+                "policy_id": header_policy["policy_id"],
+                "policy_path": header_policy.get("_policy_path"),
+            },
             "token_budget_config": token_config,
             "input_token_budget": input_token_budget,
             "over_budget_summary": build_over_budget_summary(prompt_unit_summaries, input_token_budget),
@@ -1659,27 +1907,29 @@ def run_grouping(
     output_group_dir = output_root_dir / policy_output_subdir(grouping_policy, effective_group_size)
     token_config = get_token_budget_config(config)
     input_token_budget = compute_input_token_budget(token_config)
+    header_policy = load_header_editability_policy(config, config_path)
     flow_payload_slide_window_overlap_units = get_flow_payload_slide_window_overlap_units(config, grouping_policy)
 
     packet_json = validate_packet_json(read_json(input_json_path), input_json_path)
     if grouping_policy == "flow_based" and not packet_json.get("metadata", {}).get("include_flow_context"):
-        raise ValueError("flow_based grouping requires packet_json_v3 generated with flow context enabled.")
+        raise ValueError("flow_based grouping requires packet_json_v4 generated with flow context enabled.")
     traffic = packet_json["traffic"]
-    canonical_records = build_canonical_region_records(packet_json)
-    if grouping_policy == "fixed_packet_count":
-        canonical_records.sort(
-            key=lambda record: (
-                int(record["first_reduced_packet_index"]),
-                str(record["tcp_stream_id"]),
-                int(record["stream_start"]),
-                str(record["canonical_region_id"]),
-            )
-        )
+    ordered_traffic = sorted(traffic, key=lambda packet: int(packet["reduced_packet_index"]))
     parent_groups = group_records_by_policy(
-        records=canonical_records,
+        records=ordered_traffic,
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
     )
+    canonical_records = build_canonical_region_records(packet_json)
+    canonical_records.sort(
+        key=lambda record: (
+            int(record["first_reduced_packet_index"]),
+            str(record["tcp_stream_id"]),
+            int(record["stream_start"]),
+            str(record["canonical_region_id"]),
+        )
+    )
+    assign_canonical_records_to_owner_groups(canonical_records=canonical_records, parent_groups=parent_groups)
     parent_group_stats = parent_group_size_statistics(parent_groups)
     start_time = time.monotonic()
     last_heartbeat_time = [start_time]
@@ -1718,7 +1968,8 @@ def run_grouping(
         heartbeat(
             f"processing_parent_group={parent_group['parent_group_id']}, "
             f"parent_group_index={processed_parent_groups}/{len(parent_groups)}, "
-            f"parent_group_canonical_regions={len(records)}, "
+            f"parent_group_physical_packets={len(parent_group.get('physical_packets', []))}, "
+            f"owned_canonical_regions={len(records)}, "
             f"prompt_units_written={len(prompt_unit_summaries)}"
         )
         prompt_units = build_prompt_units_for_group(
@@ -1732,6 +1983,8 @@ def run_grouping(
             grouping_policy=grouping_policy,
             group_size_packets=effective_group_size,
             parent_group=parent_group,
+            header_field_definitions=packet_json["header_field_definitions"],
+            header_policy=header_policy,
             flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
             token_config=token_config,
             input_token_budget=input_token_budget,
@@ -1760,6 +2013,7 @@ def run_grouping(
         flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
         input_token_budget=input_token_budget,
+        header_policy=header_policy,
         parent_group_count=len(parent_groups),
         parent_group_stats=parent_group_stats,
         prompt_unit_summaries=prompt_unit_summaries,
@@ -1807,7 +2061,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--group-size-packets",
         type=int,
-        help="Override pipeline.group_size_packets; under packet_json_v3 this counts canonical TCP regions.",
+        help="Override pipeline.group_size_packets; under packet_json_v4 this counts physical packets.",
     )
     parser.add_argument("--heartbeat-seconds", type=int, default=30, help="Print progress heartbeat every N seconds. Use 0 to disable.")
     parser.add_argument("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_15_grouping/<experiment_config_label>/step_15_grouping_<timestamp>.log.")

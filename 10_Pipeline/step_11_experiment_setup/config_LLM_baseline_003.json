@@ -56,6 +56,7 @@
     "grouping_policy": "fixed_packet_count",
     "grouping_unit": "physical_packet",
     "group_size_packets": 6,
+    "header_editability_policy_path": "step_15_grouping/header_editability_policy_v1.json",
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0
