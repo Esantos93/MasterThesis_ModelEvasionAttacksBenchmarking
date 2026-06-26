@@ -23,8 +23,10 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 
 #These are the Step 15 artifact schema names produced by the current code.
-PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v2"
-GROUP_MANIFEST_SCHEMA_VERSION = "group_manifest_v2"
+MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
+MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
+HEADERS_FULL_CLASSIFICATION_MANIFEST_SCHEMA_VERSION = "headers_full_classification_manifest_v1"
+HEADERS_FULL_CLASSIFICATION_RECORD_SCHEMA_VERSION = "headers_full_classification_record_v1"
 PAYLOAD_STRATEGY_VERSION = "hybrid_physical_header_canonical_payload_strategy_v1"
 SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
 GROUPING_UNIT = "physical_packet"
@@ -79,7 +81,7 @@ def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         "schema_version": prompt_unit["schema_version"],
         "experiment_id": prompt_unit.get("experiment_id"),
         "parent_group_id": prompt_unit["parent_group_id"],
-        "prompt_unit_id": prompt_unit["prompt_unit_id"],
+        "modification_unit_id": prompt_unit["modification_unit_id"],
         "unit_type": prompt_unit.get("unit_type"),
         "group_metadata": prompt_unit.get("group_metadata", {}),
         "token_budget": prompt_unit.get("token_budget", {}),
@@ -325,6 +327,73 @@ def build_compact_physical_packet(
         "editable_header_region_count": editable_count,
         "header_classification_summary": dict(sorted(classification_summary.items())),
         "header_field_classifications": editable_classifications,
+    }
+
+
+#This function writes the complete contextual header classification artifact outside the LLM-facing prompt units.
+def write_header_classification_artifacts(
+    *,
+    output_dir: Path,
+    input_json_path: Path,
+    packet_json: dict[str, Any],
+    ordered_packets: list[dict[str, Any]],
+    header_policy: dict[str, Any],
+) -> dict[str, Any]:
+    jsonl_path = output_dir / "headers_full_classification_v1.jsonl"
+    manifest_path = output_dir / "headers_full_classification_manifest_v1.json"
+    classification_counts: Counter[str] = Counter()
+    editable_region_count = 0
+    packet_count = 0
+
+    with jsonl_path.open("w", encoding="utf-8", newline="\n") as output_file:
+        for packet in ordered_packets:
+            classifications = classify_packet_headers(
+                packet=packet,
+                header_field_definitions=packet_json["header_field_definitions"],
+                header_policy=header_policy,
+            )
+            classification_counts.update(str(item["classification"]) for item in classifications)
+            editable_region_count += sum(1 for item in classifications if item["editable"])
+            packet_count += 1
+            record = {
+                "schema_version": HEADERS_FULL_CLASSIFICATION_RECORD_SCHEMA_VERSION,
+                "packet_id": packet["packet_id"],
+                "original_packet_number": packet.get("original_packet_number"),
+                "reduced_packet_index": packet.get("reduced_packet_index"),
+                "timestamp_epoch_pcap": packet.get("timestamp_epoch_pcap"),
+                "tcp_connection_id": packet.get("tcp_connection_id"),
+                "tcp_stream_id": packet.get("tcp_stream_id"),
+                "canonical_region_ids": packet.get("canonical_region_ids", []),
+                "header_editability_policy_id": header_policy["policy_id"],
+                "header_field_classifications": classifications,
+            }
+            output_file.write(json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            output_file.write("\n")
+
+    manifest = {
+        "metadata": {
+            "schema_version": HEADERS_FULL_CLASSIFICATION_MANIFEST_SCHEMA_VERSION,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source_packet_json": str(input_json_path),
+            "source_packet_json_schema_version": packet_json.get("metadata", {}).get("schema_version"),
+            "headers_full_classification_jsonl": str(jsonl_path),
+            "header_editability_policy": {
+                "schema_version": header_policy["schema_version"],
+                "policy_id": header_policy["policy_id"],
+                "policy_path": header_policy.get("_policy_path"),
+            },
+            "packet_count": packet_count,
+            "classification_counts": dict(sorted(classification_counts.items())),
+            "editable_header_region_count": editable_region_count,
+        }
+    }
+    write_json(manifest_path, manifest)
+    return {
+        "manifest_path": str(manifest_path),
+        "jsonl_path": str(jsonl_path),
+        "packet_count": packet_count,
+        "classification_counts": dict(sorted(classification_counts.items())),
+        "editable_header_region_count": editable_region_count,
     }
 
 
@@ -1115,10 +1184,10 @@ def build_prompt_unit(
     context_truncation: dict[str, Any] | None,
 ) -> dict[str, Any]:
     prompt_unit = {
-        "schema_version": PROMPT_UNIT_SCHEMA_VERSION,
+        "schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
         "experiment_id": experiment_id,
         "parent_group_id": group_metadata["parent_group_id"],
-        "prompt_unit_id": prompt_unit_id,
+        "modification_unit_id": prompt_unit_id,
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
@@ -1208,21 +1277,21 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
     )
 
 
-#This function marks prompt units that still exceed the soft Step 15 budget after all local splitting options.
-def mark_over_budget_prompt_unit(prompt_unit: dict[str, Any], source_prompt_unit_id: str) -> None:
+#This function marks modification units that still exceed the soft Step 15 budget after all local splitting options.
+def mark_over_budget_prompt_unit(prompt_unit: dict[str, Any], source_modification_unit_id: str) -> None:
     if int(prompt_unit.get("editable_region_count", 0)) == 0:
         prompt_unit["context_truncation"] = {
             "applied": True,
-            "reason": "context_only_prompt_unit_exceeds_input_token_budget",
+            "reason": "context_only_modification_unit_exceeds_input_token_budget",
             "policy": "not_llm_routable_no_editable_regions",
-            "source_prompt_unit_id": source_prompt_unit_id,
+            "source_modification_unit_id": source_modification_unit_id,
         }
         return
     prompt_unit["context_truncation"] = {
         "applied": True,
         "reason": "single_editable_canonical_region_exceeds_input_token_budget",
         "policy": "no_smaller_step15_canonical_region_unit_available",
-        "source_prompt_unit_id": source_prompt_unit_id,
+        "source_modification_unit_id": source_modification_unit_id,
     }
 
 
@@ -1411,7 +1480,7 @@ def build_budgeted_payload_window_prompt_units(
         )
         if candidate_unit["estimated_input_tokens"] <= input_token_budget or candidate_end - candidate_start <= 1:
             if candidate_unit["estimated_input_tokens"] > input_token_budget:
-                mark_over_budget_prompt_unit(candidate_unit, candidate_unit["prompt_unit_id"])
+                mark_over_budget_prompt_unit(candidate_unit, candidate_unit["modification_unit_id"])
                 refresh_prompt_unit_counts(candidate_unit, token_config)
             prompt_units.append(candidate_unit)
             prompt_unit_index += 1
@@ -1441,10 +1510,10 @@ def build_base_prompt_units(
     input_token_budget: int,
 ) -> list[dict[str, Any]]:
     prompt_unit_context = {
-        "schema_version": PROMPT_UNIT_SCHEMA_VERSION,
+        "schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
         "experiment_id": experiment_id,
         "parent_group_id": group_metadata["parent_group_id"],
-        "prompt_unit_id": parent_group_id,
+        "modification_unit_id": parent_group_id,
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
@@ -1543,7 +1612,7 @@ def build_base_prompt_units(
                     "applied": True,
                     "reason": "final_flow_packet_window_exceeded_budget",
                     "policy": "split_core_packets_without_overlap",
-                    "source_prompt_unit_id": prompt_unit_id,
+                    "source_modification_unit_id": prompt_unit_id,
                 },
             )
             if current_fallback_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
@@ -1584,7 +1653,7 @@ def build_base_prompt_units(
                     "applied": True,
                     "reason": "final_flow_packet_window_exceeded_budget",
                     "policy": "split_core_packets_without_overlap",
-                    "source_prompt_unit_id": prompt_unit_id,
+                    "source_modification_unit_id": prompt_unit_id,
                 },
             )
             if sub_prompt_unit["estimated_input_tokens"] <= input_token_budget:
@@ -1625,7 +1694,7 @@ def build_base_prompt_units(
                         "applied": True,
                         "reason": "final_flow_packet_window_exceeded_budget",
                         "policy": "single_packet_fallback_after_subwindow_overrun",
-                        "source_prompt_unit_id": sub_prompt_unit_id,
+                        "source_modification_unit_id": sub_prompt_unit_id,
                     },
                 )
                 if packet_prompt_unit["estimated_input_tokens"] > input_token_budget:
@@ -1725,9 +1794,9 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
     group_metadata = prompt_unit.get("group_metadata", {})
     summary = {
         "parent_group_id": prompt_unit["parent_group_id"],
-        "prompt_unit_id": prompt_unit["prompt_unit_id"],
+        "modification_unit_id": prompt_unit["modification_unit_id"],
         "unit_type": prompt_unit["unit_type"],
-        "prompt_unit_file": str(prompt_unit_path),
+        "modification_unit_file": str(prompt_unit_path),
         "canonical_region_ids": prompt_unit["canonical_region_ids"],
         "editable_canonical_region_ids": prompt_unit["editable_canonical_region_ids"],
         "context_canonical_region_ids": prompt_unit["context_canonical_region_ids"],
@@ -1743,7 +1812,7 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "payload_window_count": prompt_unit["payload_window_count"],
         "editable_region_count": prompt_unit["editable_region_count"],
         "context_truncation": prompt_unit["context_truncation"],
-        "prompt_unit_file_size_bytes_pretty": prompt_unit_path.stat().st_size,
+        "modification_unit_file_size_bytes_pretty": prompt_unit_path.stat().st_size,
     }
     for key in ["packet_mapping_status_counts", "flow_packet_window"]:
         if key in group_metadata:
@@ -1791,7 +1860,7 @@ def validate_prompt_unit_ownership(
         canonical_region_id = str(compact_region.get("canonical_region_id", ""))
         if canonical_region_id not in canonical_lengths:
             raise ValueError(
-                f"Prompt unit {prompt_unit['prompt_unit_id']!r} references unknown canonical region "
+                f"Modification unit {prompt_unit['modification_unit_id']!r} references unknown canonical region "
                 f"{canonical_region_id!r}."
             )
         if str(compact_region.get("packet_id")) != canonical_region_id:
@@ -1810,7 +1879,7 @@ def validate_prompt_unit_ownership(
             if any(start < previous_end and previous_start < end for previous_start, previous_end, _ in existing):
                 raise ValueError(
                     f"Canonical region {canonical_region_id!r} has overlapping editable ownership "
-                    f"in prompt unit {prompt_unit['prompt_unit_id']!r}."
+                    f"in modification unit {prompt_unit['modification_unit_id']!r}."
                 )
             existing.append((start, end, str(editable_region.get("region_id", ""))))
 
@@ -1831,7 +1900,7 @@ def build_canonical_ownership_summary(
     }
 
 
-#This function builds the top-level group_manifest.json artifact for compact prompt units.
+#This function builds the top-level compact modification-units manifest artifact.
 def build_manifest(
     *,
     config: dict[str, Any],
@@ -1849,10 +1918,11 @@ def build_manifest(
     prompt_unit_summaries: list[dict[str, Any]],
     payload_mode_counts: Counter[str],
     canonical_ownership_summary: dict[str, Any],
+    header_classification_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "metadata": {
-            "schema_version": GROUP_MANIFEST_SCHEMA_VERSION,
+            "schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
@@ -1867,15 +1937,22 @@ def build_manifest(
             "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
             "parent_group_count": parent_group_count,
             "parent_group_size_statistics": parent_group_stats,
-            "prompt_unit_count": len(prompt_unit_summaries),
+            "modification_unit_count": len(prompt_unit_summaries),
             "total_packet_count": len(packet_json["traffic"]),
             "total_canonical_region_count": len(packet_json["canonical_tcp_regions"]),
-            "compact_view_schema_version": PROMPT_UNIT_SCHEMA_VERSION,
+            "compact_view_schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
             "payload_strategy_version": PAYLOAD_STRATEGY_VERSION,
             "header_editability_policy": {
                 "schema_version": header_policy["schema_version"],
                 "policy_id": header_policy["policy_id"],
                 "policy_path": header_policy.get("_policy_path"),
+            },
+            "headers_full_classification_manifest": header_classification_artifacts["manifest_path"],
+            "headers_full_classification_jsonl": header_classification_artifacts["jsonl_path"],
+            "header_classification_summary": {
+                "packet_count": header_classification_artifacts["packet_count"],
+                "classification_counts": header_classification_artifacts["classification_counts"],
+                "editable_header_region_count": header_classification_artifacts["editable_header_region_count"],
             },
             "token_budget_config": token_config,
             "input_token_budget": input_token_budget,
@@ -1884,14 +1961,14 @@ def build_manifest(
             "canonical_ownership_summary": canonical_ownership_summary,
             "immutable_fields": packet_json.get("immutable_fields", []),
         },
-        "prompt_units": prompt_unit_summaries,
+        "compact_modification_units": prompt_unit_summaries,
     }
 
 
 #This function removes every previous Step 15 JSON artifact from the selected policy directory.
 def clear_previous_output_files(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    for path in output_dir.glob("*.json"):
+    for path in list(output_dir.glob("*.json")) + list(output_dir.glob("*.jsonl")):
         path.unlink()
 
 
@@ -1968,6 +2045,19 @@ def run_grouping(
     )
 
     clear_previous_output_files(output_group_dir)
+    heartbeat("writing_header_classification_artifacts=started", force=True)
+    header_classification_artifacts = write_header_classification_artifacts(
+        output_dir=output_group_dir,
+        input_json_path=input_json_path,
+        packet_json=packet_json,
+        ordered_packets=ordered_traffic,
+        header_policy=header_policy,
+    )
+    heartbeat(
+        f"writing_header_classification_artifacts=completed, "
+        f"classified_packets={header_classification_artifacts['packet_count']}",
+        force=True,
+    )
     prompt_unit_summaries = []
     payload_mode_counts: Counter[str] = Counter()
     canonical_lengths = {
@@ -1985,7 +2075,7 @@ def run_grouping(
             f"parent_group_index={processed_parent_groups}/{len(parent_groups)}, "
             f"parent_group_physical_packets={len(parent_group.get('physical_packets', []))}, "
             f"owned_canonical_regions={len(records)}, "
-            f"prompt_units_written={len(prompt_unit_summaries)}"
+            f"modification_units_written={len(prompt_unit_summaries)}"
         )
         prompt_units = build_prompt_units_for_group(
             experiment_id=experiment_id,
@@ -2009,12 +2099,12 @@ def run_grouping(
             validate_prompt_unit_ownership(prompt_unit, canonical_lengths, editable_intervals)
             for packet in prompt_unit["packets"]:
                 payload_mode_counts[str(packet.get("payload_view", {}).get("mode", "unknown"))] += 1
-            prompt_unit_path = output_group_dir / f"{prompt_unit['prompt_unit_id']}.json"
+            prompt_unit_path = output_group_dir / f"{prompt_unit['modification_unit_id']}.json"
             write_json(prompt_unit_path, prompt_unit)
             prompt_unit_summaries.append(summarize_prompt_unit(prompt_unit, prompt_unit_path))
         heartbeat(
             f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
-            f"prompt_units_written={len(prompt_unit_summaries)}"
+            f"modification_units_written={len(prompt_unit_summaries)}"
         )
 
     canonical_ownership_summary = build_canonical_ownership_summary(canonical_lengths, editable_intervals)
@@ -2034,15 +2124,18 @@ def run_grouping(
         prompt_unit_summaries=prompt_unit_summaries,
         payload_mode_counts=payload_mode_counts,
         canonical_ownership_summary=canonical_ownership_summary,
+        header_classification_artifacts=header_classification_artifacts,
     )
-    manifest_path = output_group_dir / "group_manifest.json"
+    manifest_path = output_group_dir / "compact_modification_units_manifest_v1.json"
     write_json(manifest_path, manifest)
 
     return {
         "manifest_path": str(manifest_path),
+        "headers_full_classification_manifest": header_classification_artifacts["manifest_path"],
+        "headers_full_classification_jsonl": header_classification_artifacts["jsonl_path"],
         "output_dir": str(output_group_dir),
         "parent_group_count": len(parent_groups),
-        "prompt_unit_count": len(prompt_unit_summaries),
+        "modification_unit_count": len(prompt_unit_summaries),
         "packet_count": len(traffic),
         "canonical_region_count": len(canonical_records),
         "group_size_packets": effective_group_size,
@@ -2104,7 +2197,7 @@ def main() -> None:
         print(f"Source packets: {result['packet_count']}")
         print(f"Canonical TCP regions grouped: {result['canonical_region_count']}")
         print(f"Parent group count: {result['parent_group_count']}")
-        print(f"Prompt unit count: {result['prompt_unit_count']}")
+        print(f"Modification unit count: {result['modification_unit_count']}")
         print(f"Configured group size (canonical regions): {result['group_size_packets']}")
         print(f"Flow payload slide window overlap units: {result['flow_payload_slide_window_overlap_units']}")
         print(f"Parent group size statistics: {result['parent_group_size_statistics']}")

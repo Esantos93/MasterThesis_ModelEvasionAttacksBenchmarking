@@ -8,7 +8,6 @@ from pathlib import Path
 from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
 from step_15_grouping.group_packets import build_token_estimation_view, estimate_json_tokens, run_grouping
-from step_16_prompt_builder.build_prompts import build_prompt_package
 
 
 # This helper creates the minimum packet record needed by the real Step 14 TCP canonicalizer.
@@ -163,7 +162,7 @@ def config(output_root: Path, grouping_policy: str, group_size: int | None = Non
 
 
 class CanonicalStep15Tests(unittest.TestCase):
-    # This helper executes Step 15 and returns its manifest plus generated prompt-unit objects.
+    # This helper executes Step 15 and returns its manifest plus generated compact modification units.
     def run_step15(self, packet_json: dict, active_config: dict, root: Path) -> tuple[dict, list[dict]]:
         input_path = root / "selected_packet_records.json"
         config_path = root / "config.json"
@@ -177,9 +176,10 @@ class CanonicalStep15Tests(unittest.TestCase):
             heartbeat_seconds=0,
         )
         manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+        unit_entries = manifest["compact_modification_units"]
         units = [
-            json.loads(Path(entry["prompt_unit_file"]).read_text(encoding="utf-8"))
-            for entry in manifest["prompt_units"]
+            json.loads(Path(entry["modification_unit_file"]).read_text(encoding="utf-8"))
+            for entry in unit_entries
         ]
         return manifest, units
 
@@ -194,7 +194,19 @@ class CanonicalStep15Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             manifest, units = self.run_step15(source, config(root, "fixed_packet_count", group_size=2), root)
+            header_manifest = json.loads(
+                Path(manifest["metadata"]["headers_full_classification_manifest"]).read_text(encoding="utf-8")
+            )
+            with Path(manifest["metadata"]["headers_full_classification_jsonl"]).open(encoding="utf-8") as jsonl_file:
+                first_header_record = json.loads(jsonl_file.readline())
 
+        self.assertEqual("compact_modification_units_manifest_v1", manifest["metadata"]["schema_version"])
+        self.assertEqual("compact_modification_unit_v1", manifest["metadata"]["compact_view_schema_version"])
+        self.assertEqual(len(manifest["compact_modification_units"]), manifest["metadata"]["modification_unit_count"])
+        self.assertNotIn("prompt_units", manifest)
+        self.assertNotIn("prompt_unit_count", manifest["metadata"])
+        self.assertTrue(all(unit["schema_version"] == "compact_modification_unit_v1" for unit in units))
+        self.assertTrue(all("prompt_unit_id" not in unit for unit in units))
         self.assertEqual(3, manifest["metadata"]["total_packet_count"])
         self.assertEqual(2, manifest["metadata"]["total_canonical_region_count"])
         self.assertEqual(2, manifest["metadata"]["parent_group_count"])
@@ -216,6 +228,12 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertTrue(all(len(packet["header_field_classifications"]) == 3 for packet in physical_packets))
         self.assertTrue(all("immutable_field" in packet["header_classification_summary"] for packet in physical_packets))
         self.assertTrue(all(packet["header_editability_policy_id"] == "conservative_header_editability_v1" for packet in physical_packets))
+        self.assertEqual("headers_full_classification_manifest_v1", header_manifest["metadata"]["schema_version"])
+        self.assertEqual(3, header_manifest["metadata"]["packet_count"])
+        self.assertEqual(9, header_manifest["metadata"]["classification_counts"]["llm_editable_headers_region"])
+        self.assertEqual(18, header_manifest["metadata"]["classification_counts"]["pipeline_controlled_field"])
+        self.assertEqual("headers_full_classification_record_v1", first_header_record["schema_version"])
+        self.assertGreater(len(first_header_record["header_field_classifications"]), 3)
 
     def test_flow_based_groups_canonical_regions_by_shared_flow_context(self) -> None:
         records = [
@@ -245,7 +263,7 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertEqual(2, len(editable_ids))
         self.assertTrue(all(unit["source_packet_json_schema_version"] == "packet_json_v4" for unit in units))
 
-    def test_large_canonical_region_windows_cover_bytes_once_and_step16_can_consume_them(self) -> None:
+    def test_large_canonical_region_windows_cover_bytes_once(self) -> None:
         payload = bytes(index % 251 for index in range(600))
         source = packet_json_v4([tcp_record(1, 1000, payload)], include_flow_context=False)
 
@@ -278,15 +296,6 @@ class CanonicalStep15Tests(unittest.TestCase):
             editable_unit["estimated_input_tokens"],
             estimate_json_tokens(build_token_estimation_view(editable_unit), 3.0),
         )
-        prompt_package = build_prompt_package(
-            config=active_config,
-            prompt_version="compact_patch_prompting_v2",
-            prompt_unit_entry={},
-            prompt_unit_path=Path("synthetic_prompt_unit.json"),
-            prompt_unit=editable_unit,
-        )
-        canonical_region_id = editable_unit["editable_canonical_region_ids"][0]
-        self.assertEqual([canonical_region_id], prompt_package["input_traceability"]["editable_packet_ids"])
 
     def test_oversized_payload_window_is_split_until_each_editable_unit_fits_budget(self) -> None:
         payload = bytes(index % 251 for index in range(1200))
