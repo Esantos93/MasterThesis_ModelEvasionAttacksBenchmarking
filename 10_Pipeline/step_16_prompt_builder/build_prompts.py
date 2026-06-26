@@ -16,10 +16,11 @@ from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 
 
-#These are the schema names produced by the compact patch-based Step 16 contract.
-PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
-PROMPT_MANIFEST_SCHEMA_VERSION = "prompt_manifest_v2"
-SOURCE_PROMPT_UNIT_SCHEMA_VERSION = "compact_prompt_unit_v2"
+#These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contract.
+PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
+PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
+SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
+SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 
 #This is the historical compact patch policy name and the active compact patch policy name.
@@ -101,7 +102,7 @@ def read_json(path: str | Path) -> Any:
 
 
 #This function builds the default cloud-side input and output paths for Step 16.
-#The VM sends compact prompt units to 01_InputFiles, and Step 16 writes prompts to 02_OutputFiles.
+#The VM sends compact modification units to 01_InputFiles, and Step 16 writes prompts to 02_OutputFiles.
 def default_cloud_paths(config: dict[str, Any], cloud_root: str | Path) -> dict[str, Path]:
     experiment_id = config["experiment"]["experiment_id"]
     root = Path(cloud_root).expanduser()
@@ -148,85 +149,89 @@ def load_prompt_instructions_profile(config: dict[str, Any]) -> tuple[str, list[
     return profile_name, lines
 
 
-#This function validates the basic shape of the Step 15 compact group manifest.
-def validate_group_manifest(group_manifest: Any, manifest_path: Path) -> dict[str, Any]:
-    if not isinstance(group_manifest, dict):
-        raise ValueError(f"Group manifest root must be an object: {manifest_path}")
-    metadata = group_manifest.get("metadata")
+#This function validates the basic shape of the Step 15 compact modification-units manifest.
+def validate_modification_units_manifest(manifest: Any, manifest_path: Path) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise ValueError(f"Compact modification-units manifest root must be an object: {manifest_path}")
+    metadata = manifest.get("metadata")
     if not isinstance(metadata, dict):
-        raise ValueError(f"Group manifest must contain a metadata object: {manifest_path}")
+        raise ValueError(f"Compact modification-units manifest must contain a metadata object: {manifest_path}")
     schema_version = metadata.get("schema_version")
-    if schema_version != "group_manifest_v2":
+    if schema_version != SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION:
         raise ValueError(
-            "Step 16 compact patch prompting requires group_manifest_v2 from Step 15. "
+            f"Step 16 compact patch prompting requires {SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION} from Step 15. "
             f"Found schema_version={schema_version!r} in {manifest_path}"
         )
-    prompt_units = group_manifest.get("prompt_units")
-    if not isinstance(prompt_units, list):
-        raise ValueError(f"Group manifest must contain a prompt_units list: {manifest_path}")
-    return group_manifest
+    modification_units = manifest.get("compact_modification_units")
+    if not isinstance(modification_units, list):
+        raise ValueError(f"Manifest must contain a compact_modification_units list: {manifest_path}")
+    return manifest
 
 
-#This function validates the basic shape of one Step 15 compact prompt unit.
+#This function validates the basic shape of one Step 15 compact modification unit.
 #It intentionally only checks the fields Step 16 needs for prompt construction.
-def validate_prompt_unit(prompt_unit: Any, prompt_unit_path: Path) -> dict[str, Any]:
-    if not isinstance(prompt_unit, dict):
-        raise ValueError(f"Prompt unit root must be an object: {prompt_unit_path}")
-    if prompt_unit.get("schema_version") != SOURCE_PROMPT_UNIT_SCHEMA_VERSION:
+def validate_modification_unit(modification_unit: Any, modification_unit_path: Path) -> dict[str, Any]:
+    if not isinstance(modification_unit, dict):
+        raise ValueError(f"Modification unit root must be an object: {modification_unit_path}")
+    if modification_unit.get("schema_version") != SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
         raise ValueError(
-            f"Prompt unit must use schema_version={SOURCE_PROMPT_UNIT_SCHEMA_VERSION}: {prompt_unit_path}"
+            f"Modification unit must use schema_version={SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION}: {modification_unit_path}"
         )
-    packets = prompt_unit.get("packets")
+    packets = modification_unit.get("packets")
     if not isinstance(packets, list):
-        raise ValueError(f"Prompt unit must contain a packets list: {prompt_unit_path}")
-    if not isinstance(prompt_unit.get("parent_group_id"), str):
-        raise ValueError(f"Prompt unit must contain parent_group_id: {prompt_unit_path}")
-    if not isinstance(prompt_unit.get("prompt_unit_id"), str):
-        raise ValueError(f"Prompt unit must contain prompt_unit_id: {prompt_unit_path}")
-    return prompt_unit
+        raise ValueError(f"Modification unit must contain a packets list: {modification_unit_path}")
+    if not isinstance(modification_unit.get("parent_group_id"), str):
+        raise ValueError(f"Modification unit must contain parent_group_id: {modification_unit_path}")
+    if not isinstance(modification_unit.get("modification_unit_id"), str):
+        raise ValueError(f"Modification unit must contain modification_unit_id: {modification_unit_path}")
+    return modification_unit
 
 
-#This function selects prompt units either by prefix limit or by explicit prompt_unit_id values.
-def select_prompt_unit_entries(
-    prompt_unit_entries: list[Any],
+#This function selects modification units either by prefix limit or by explicit modification_unit_id values.
+def select_modification_unit_entries(
+    modification_unit_entries: list[Any],
     *,
     limit_prompts_s16: int | None,
-    prompt_unit_ids: list[str] | None,
+    modification_unit_ids: list[str] | None,
 ) -> list[Any]:
-    if limit_prompts_s16 is not None and prompt_unit_ids:
-        raise ValueError("Use either --limit-prompts-s16 or --prompt-unit-id, not both.")
+    if limit_prompts_s16 is not None and modification_unit_ids:
+        raise ValueError("Use either --limit-prompts-s16 or --modification-unit-id, not both.")
     if limit_prompts_s16 is not None:
-        return prompt_unit_entries[:limit_prompts_s16]
-    if not prompt_unit_ids:
-        return prompt_unit_entries
+        return modification_unit_entries[:limit_prompts_s16]
+    if not modification_unit_ids:
+        return modification_unit_entries
 
-    requested_ids = [prompt_unit_id.strip() for prompt_unit_id in prompt_unit_ids if prompt_unit_id.strip()]
+    requested_ids = [unit_id.strip() for unit_id in modification_unit_ids if unit_id.strip()]
     if len(requested_ids) != len(set(requested_ids)):
-        raise ValueError("--prompt-unit-id values must not contain duplicates.")
+        raise ValueError("--modification-unit-id values must not contain duplicates.")
     requested_set = set(requested_ids)
     selected_entries = [
-        prompt_unit_entry
-        for prompt_unit_entry in prompt_unit_entries
-        if isinstance(prompt_unit_entry, dict) and prompt_unit_entry.get("prompt_unit_id") in requested_set
+        modification_unit_entry
+        for modification_unit_entry in modification_unit_entries
+        if isinstance(modification_unit_entry, dict)
+        and modification_unit_entry.get("modification_unit_id") in requested_set
     ]
     found_ids = {
-        str(prompt_unit_entry.get("prompt_unit_id"))
-        for prompt_unit_entry in selected_entries
-        if isinstance(prompt_unit_entry, dict)
+        str(modification_unit_entry.get("modification_unit_id"))
+        for modification_unit_entry in selected_entries
+        if isinstance(modification_unit_entry, dict)
     }
-    missing_ids = [prompt_unit_id for prompt_unit_id in requested_ids if prompt_unit_id not in found_ids]
+    missing_ids = [unit_id for unit_id in requested_ids if unit_id not in found_ids]
     if missing_ids:
         joined_ids = ", ".join(missing_ids)
-        raise ValueError(f"Requested prompt_unit_id values were not found in group_manifest.json: {joined_ids}")
+        raise ValueError(
+            "Requested modification_unit_id values were not found in "
+            f"compact_modification_units_manifest_v1.json: {joined_ids}"
+        )
     return selected_entries
 
 
-#This function resolves a compact prompt unit file path from a Step 15 manifest entry.
+#This function resolves a compact modification unit file path from a Step 15 manifest entry.
 #Manifest paths may point to another machine, so the current input directory is used as a filename fallback.
-def resolve_prompt_unit_file_path(prompt_unit_entry: dict[str, Any], input_dir: Path) -> Path:
-    prompt_unit_file = prompt_unit_entry.get("prompt_unit_file")
-    if isinstance(prompt_unit_file, str) and prompt_unit_file:
-        manifest_path = Path(prompt_unit_file).expanduser()
+def resolve_modification_unit_file_path(modification_unit_entry: dict[str, Any], input_dir: Path) -> Path:
+    modification_unit_file = modification_unit_entry.get("modification_unit_file")
+    if isinstance(modification_unit_file, str) and modification_unit_file:
+        manifest_path = Path(modification_unit_file).expanduser()
         try:
             if manifest_path.exists():
                 return manifest_path
@@ -237,13 +242,13 @@ def resolve_prompt_unit_file_path(prompt_unit_entry: dict[str, Any], input_dir: 
         if fallback_path.exists():
             return fallback_path
 
-    prompt_unit_id = prompt_unit_entry.get("prompt_unit_id")
-    if isinstance(prompt_unit_id, str) and prompt_unit_id:
-        fallback_path = input_dir / f"{prompt_unit_id}.json"
+    modification_unit_id = modification_unit_entry.get("modification_unit_id")
+    if isinstance(modification_unit_id, str) and modification_unit_id:
+        fallback_path = input_dir / f"{modification_unit_id}.json"
         if fallback_path.exists():
             return fallback_path
 
-    raise FileNotFoundError(f"Could not resolve prompt unit file for manifest entry: {prompt_unit_entry}")
+    raise FileNotFoundError(f"Could not resolve modification unit file for manifest entry: {modification_unit_entry}")
 
 
 #This function builds the index of regions that the LLM is allowed to patch.
@@ -381,6 +386,14 @@ def build_compact_prompt_input(
     return prompt_input
 
 
+#This function converts the Step 15 source identity into the Step 16 prompt identity.
+def prepare_prompt_source_unit(modification_unit: dict[str, Any]) -> dict[str, Any]:
+    prompt_source_unit = dict(modification_unit)
+    modification_unit_id = prompt_source_unit["modification_unit_id"]
+    prompt_source_unit["prompt_unit_id"] = modification_unit_id
+    return prompt_source_unit
+
+
 #This function builds the compact patch prompt text.
 def build_compact_patch_messages(
     *,
@@ -436,13 +449,13 @@ def build_messages_by_prompt_version(
     )
 
 
-#This function builds one prompt package file from one Step 15 compact prompt unit.
-def build_prompt_package(
+#This function builds one Step 16 prompt unit file from one Step 15 compact modification unit.
+def build_prompt_unit(
     *,
     config: dict[str, Any],
     prompt_version: str,
-    prompt_unit_entry: dict[str, Any],
-    prompt_unit_path: Path,
+    modification_unit_entry: dict[str, Any],
+    modification_unit_path: Path,
     prompt_unit: dict[str, Any],
 ) -> dict[str, Any]:
     editable_region_index = build_editable_region_index(prompt_unit)
@@ -454,15 +467,15 @@ def build_prompt_package(
     prompt_contract = "patch_output"
 
     return {
-        "schema_version": PROMPT_PACKAGE_SCHEMA_VERSION,
+        "schema_version": PROMPT_UNIT_SCHEMA_VERSION,
         "experiment_id": config["experiment"]["experiment_id"],
         "parent_group_id": prompt_unit["parent_group_id"],
         "prompt_unit_id": prompt_unit["prompt_unit_id"],
         "group_id": prompt_unit["prompt_unit_id"],
         "prompt_version": prompt_version,
         "prompt_contract": prompt_contract,
-        "source_prompt_unit_file": str(prompt_unit_path),
-        "source_prompt_unit_schema_version": prompt_unit.get("schema_version"),
+        "source_modification_unit_file": str(modification_unit_path),
+        "source_modification_unit_schema_version": prompt_unit.get("schema_version"),
         "source_packet_json": prompt_unit.get("source_packet_json"),
         "source_packet_json_schema_version": prompt_unit.get("source_packet_json_schema_version"),
         "payload_strategy_version": prompt_unit.get("payload_strategy_version"),
@@ -517,7 +530,7 @@ def build_prompt_package(
 
 
 #This function removes previous Step 16 prompt files from the output directory.
-#It avoids mixing stale prompt packages with a newly generated prompt manifest.
+#It avoids mixing stale prompt units with a newly generated prompt manifest.
 def clear_previous_output_files(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for path in output_dir.glob("*.prompt.json"):
@@ -525,11 +538,14 @@ def clear_previous_output_files(output_dir: Path) -> None:
     manifest_path = output_dir / "prompt_manifest.json"
     if manifest_path.exists():
         manifest_path.unlink()
+    manifest_path = output_dir / "prompt_units_manifest_v1.json"
+    if manifest_path.exists():
+        manifest_path.unlink()
 
 
-#This function builds the top-level prompt manifest artifact.
-#The manifest gives Step 17 a single ordered list of prompt package files to run.
-def build_prompt_manifest(
+#This function builds the top-level prompt-units manifest artifact.
+#The manifest gives Step 17 a single ordered list of prompt-unit files to run.
+def build_prompt_units_manifest(
     *,
     config: dict[str, Any],
     prompt_version: str,
@@ -538,13 +554,13 @@ def build_prompt_manifest(
     output_dir: Path,
     source_manifest: dict[str, Any],
     prompt_summaries: list[dict[str, Any]],
-    total_source_prompt_units: int,
+    total_source_modification_units: int,
 ) -> dict[str, Any]:
     source_metadata = source_manifest.get("metadata", {})
     llm_config = config.get("llm", {})
     return {
         "metadata": {
-            "schema_version": PROMPT_MANIFEST_SCHEMA_VERSION,
+            "schema_version": PROMPT_UNITS_MANIFEST_SCHEMA_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
@@ -557,20 +573,20 @@ def build_prompt_manifest(
                 "prompt_instructions_profile",
                 DEFAULT_PROMPT_INSTRUCTIONS_PROFILE,
             ),
-            "source_group_manifest": str(source_manifest_path),
-            "source_group_manifest_schema_version": source_metadata.get("schema_version"),
+            "source_compact_modification_units_manifest": str(source_manifest_path),
+            "source_compact_modification_units_manifest_schema_version": source_metadata.get("schema_version"),
             "source_compact_view_schema_version": source_metadata.get("compact_view_schema_version"),
             "input_dir": str(input_dir),
             "output_dir": str(output_dir),
-            "total_source_prompt_units": total_source_prompt_units,
+            "total_source_modification_units": total_source_modification_units,
             "total_prompt_count": len(prompt_summaries),
         },
-        "prompts": prompt_summaries,
+        "prompt_units": prompt_summaries,
     }
 
 
 #This function orchestrates Step 16.
-#It reads Step 15 compact prompt units, builds one prompt package per unit, and writes a prompt manifest for Step 17.
+#It reads Step 15 compact modification units, builds one prompt unit per source unit, and writes a prompt manifest for Step 17.
 def run_prompt_builder(
     *,
     config_path: str | Path,
@@ -578,7 +594,7 @@ def run_prompt_builder(
     output_dir: str | Path | None,
     cloud_root: str | Path,
     limit_prompts_s16: int | None,
-    prompt_unit_ids: list[str] | None,
+    modification_unit_ids: list[str] | None,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
@@ -597,65 +613,66 @@ def run_prompt_builder(
     paths = default_cloud_paths(config, cloud_root)
     input_group_dir = Path(input_dir).expanduser() if input_dir else paths["input_dir"]
     output_prompt_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
-    manifest_path = input_group_dir / "group_manifest.json"
+    manifest_path = input_group_dir / "compact_modification_units_manifest_v1.json"
 
-    group_manifest = validate_group_manifest(read_json(manifest_path), manifest_path)
-    prompt_unit_entries = group_manifest["prompt_units"]
-    selected_entries = select_prompt_unit_entries(
-        prompt_unit_entries,
+    modification_units_manifest = validate_modification_units_manifest(read_json(manifest_path), manifest_path)
+    modification_unit_entries = modification_units_manifest["compact_modification_units"]
+    selected_entries = select_modification_unit_entries(
+        modification_unit_entries,
         limit_prompts_s16=limit_prompts_s16,
-        prompt_unit_ids=prompt_unit_ids,
+        modification_unit_ids=modification_unit_ids,
     )
 
     clear_previous_output_files(output_prompt_dir)
     prompt_summaries = []
-    for prompt_unit_entry in selected_entries:
-        if not isinstance(prompt_unit_entry, dict):
-            raise ValueError("Every prompt unit manifest entry must be an object.")
-        prompt_unit_path = resolve_prompt_unit_file_path(prompt_unit_entry, input_group_dir)
-        prompt_unit = validate_prompt_unit(read_json(prompt_unit_path), prompt_unit_path)
-        prompt_package = build_prompt_package(
+    for modification_unit_entry in selected_entries:
+        if not isinstance(modification_unit_entry, dict):
+            raise ValueError("Every modification unit manifest entry must be an object.")
+        modification_unit_path = resolve_modification_unit_file_path(modification_unit_entry, input_group_dir)
+        modification_unit = validate_modification_unit(read_json(modification_unit_path), modification_unit_path)
+        prompt_source_unit = prepare_prompt_source_unit(modification_unit)
+        prompt_unit = build_prompt_unit(
             config=config,
             prompt_version=prompt_version,
-            prompt_unit_entry=prompt_unit_entry,
-            prompt_unit_path=prompt_unit_path,
-            prompt_unit=prompt_unit,
+            modification_unit_entry=modification_unit_entry,
+            modification_unit_path=modification_unit_path,
+            prompt_unit=prompt_source_unit,
         )
-        prompt_path = output_prompt_dir / f"{prompt_package['prompt_unit_id']}.prompt.json"
-        write_json(prompt_path, prompt_package)
+        prompt_path = output_prompt_dir / f"{prompt_unit['prompt_unit_id']}.prompt.json"
+        write_json(prompt_path, prompt_unit)
         prompt_summaries.append(
             {
-                "parent_group_id": prompt_package["parent_group_id"],
-                "prompt_unit_id": prompt_package["prompt_unit_id"],
-                "group_id": prompt_package["group_id"],
+                "parent_group_id": prompt_unit["parent_group_id"],
+                "prompt_unit_id": prompt_unit["prompt_unit_id"],
+                "group_id": prompt_unit["group_id"],
                 "prompt_file": prompt_path.name,
-                "source_prompt_unit_file": str(prompt_unit_path),
+                "source_modification_unit_file": str(modification_unit_path),
                 "prompt_version": prompt_version,
-                "prompt_contract": prompt_package["prompt_contract"],
-                "prompt_input_json_data_profile": prompt_package["prompt_template"]["prompt_input_json_data_profile"],
-                "prompt_instructions_profile": prompt_package["prompt_template"]["prompt_instructions_profile"],
-                "editable_region_count": len(prompt_package["input_traceability"]["editable_regions"]),
-                "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
+                "prompt_contract": prompt_unit["prompt_contract"],
+                "prompt_input_json_data_profile": prompt_unit["prompt_template"]["prompt_input_json_data_profile"],
+                "prompt_instructions_profile": prompt_unit["prompt_template"]["prompt_instructions_profile"],
+                "editable_region_count": len(prompt_unit["input_traceability"]["editable_regions"]),
+                "estimated_input_tokens": prompt_unit.get("estimated_input_tokens"),
             }
         )
 
-    prompt_manifest = build_prompt_manifest(
+    prompt_manifest = build_prompt_units_manifest(
         config=config,
         prompt_version=prompt_version,
         source_manifest_path=manifest_path,
         input_dir=input_group_dir,
         output_dir=output_prompt_dir,
-        source_manifest=group_manifest,
+        source_manifest=modification_units_manifest,
         prompt_summaries=prompt_summaries,
-        total_source_prompt_units=len(prompt_unit_entries),
+        total_source_modification_units=len(modification_unit_entries),
     )
-    prompt_manifest_path = output_prompt_dir / "prompt_manifest.json"
+    prompt_manifest_path = output_prompt_dir / "prompt_units_manifest_v1.json"
     write_json(prompt_manifest_path, prompt_manifest)
 
     return {
         "prompt_manifest_path": str(prompt_manifest_path),
         "prompt_count": len(prompt_summaries),
-        "source_group_count": len(prompt_unit_entries),
+        "source_modification_unit_count": len(modification_unit_entries),
         "prompt_version": prompt_version,
         "configured_prompt_version": configured_prompt_version,
         "input_dir": str(input_group_dir),
@@ -665,20 +682,26 @@ def run_prompt_builder(
 
 #This function defines the command-line arguments accepted by Step 16.
 def parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build LLM prompt packages from Step 15 compact prompt units.")
+    parser = argparse.ArgumentParser(description="Build LLM prompt units from Step 15 compact modification units.")
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
-    parser.add_argument("--input-dir", help="Directory containing Step 15 compact prompt units and group_manifest.json.")
+    parser.add_argument(
+        "--input-dir",
+        help="Directory containing Step 15 compact modification units and compact_modification_units_manifest_v1.json.",
+    )
     parser.add_argument("--output-dir", help="Directory where Step 16 prompt files will be written.")
     parser.add_argument(
         "--cloud-root",
         default=str(DEFAULT_CLOUD_ROOT),
         help="RISE cloud root used for default input and output paths.",
     )
-    parser.add_argument("--limit-prompts-s16", type=int, help="Build prompts only for the first N Step 15 prompt units.")
+    parser.add_argument("--limit-prompts-s16", type=int, help="Build prompts only for the first N Step 15 modification units.")
     parser.add_argument(
-        "--prompt-unit-id",
+        "--modification-unit-id",
         action="append",
-        help="Build prompts only for this Step 15 prompt_unit_id. Can be repeated. Mutually exclusive with --limit-prompts-s16.",
+        help=(
+            "Build prompts only for this Step 15 modification_unit_id. Can be repeated. "
+            "Mutually exclusive with --limit-prompts-s16."
+        ),
     )
     return parser.parse_args()
 
@@ -692,10 +715,10 @@ def main() -> None:
         output_dir=args.output_dir,
         cloud_root=args.cloud_root,
         limit_prompts_s16=args.limit_prompts_s16,
-        prompt_unit_ids=args.prompt_unit_id,
+        modification_unit_ids=args.modification_unit_id,
     )
-    print(f"Prompt packages written: {result['prompt_count']}")
-    print(f"Source prompt units available: {result['source_group_count']}")
+    print(f"Prompt units written: {result['prompt_count']}")
+    print(f"Source modification units available: {result['source_modification_unit_count']}")
     print(f"Prompt version: {result['prompt_version']}")
     print(f"Prompt manifest written to: {result['prompt_manifest_path']}")
 
