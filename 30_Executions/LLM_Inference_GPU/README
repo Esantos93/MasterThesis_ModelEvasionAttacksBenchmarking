@@ -65,17 +65,20 @@ Wide Step 17 batch calibration on one fixed 1,500-prompt sample:
 ```bash
 chmod +x /tf/thesis_Santos/04_Steps/calibrate_step17_batch_sizes.sh
 
-PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_002/06_prompts/fixed_packet_count_size_006/<prompt_run_id>" \
-CALIBRATION_LABEL="fixed006_wide_1500" \
+PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_003/06_prompts/fixed_packet_count_size_006/<prompt_run_id>" \
+CALIBRATION_LABEL="baseline003_fixed006_hybrid_wide_1500" \
 BATCH_SIZES="16 32 64 96 128 160 188 224 256 320" \
 LIMIT_PROMPTS_S17=1500 \
+SAMPLE_METHOD="editable_count_stratified" \
 /tf/thesis_Santos/04_Steps/calibrate_step17_batch_sizes.sh
 ```
 
-The calibration first builds one deterministic, evenly spaced 1,500-prompt
-sample from the complete manifest. It then runs Step 17 sequentially, disables
-archive creation, samples `nvidia-smi` once per second, and rewrites a
-comparison CSV and Markdown file after every completed candidate under:
+The calibration first builds one deterministic 1,500-prompt sample from the
+complete manifest. For Baseline-003 the default sampler is
+`editable_count_stratified`, so header-only, payload-only and mixed prompt
+classes are represented. It then runs Step 17 sequentially, disables archive
+creation, samples `nvidia-smi` once per second, and rewrites a comparison CSV
+and Markdown file after every completed candidate under:
 
 ```text
 02_OutputFiles/batch_calibration/<calibration_label>/
@@ -99,13 +102,30 @@ chmod +x \
   /tf/thesis_Santos/04_Steps/compression_step_17.sh
 
 CLOUD_ROOT="/tf/thesis_Santos" \
-EXPERIMENT_ID="exp_cicids2017_thursday_baseline_002" \
+EXPERIMENT_ID="exp_cicids2017_thursday_baseline_003" \
 GROUPING_LABEL="fixed_packet_count_size_006" \
-RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_fixed006_500prompts_batch190" \
-CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_002.json" \
+RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_baseline003_fixed006_hybrid_500prompts_batch168" \
+CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_003.json" \
 STEP17_BACKEND="vllm" \
 BATCH_SIZE="168" \
 LIMIT_PROMPTS_S17="500" \
+/tf/thesis_Santos/04_Steps/run_step16_17.sh
+```
+
+For the first Baseline-003 hybrid validation, run a smaller Step 17-only smoke
+first if the full prompt population has already been uploaded/generated:
+
+```bash
+CLOUD_ROOT="/tf/thesis_Santos" \
+EXPERIMENT_ID="exp_cicids2017_thursday_baseline_003" \
+GROUPING_LABEL="fixed_packet_count_size_006" \
+RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_baseline003_fixed006_hybrid_smoke_100" \
+CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_003.json" \
+PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_003/06_prompts/fixed_packet_count_size_006/<prompt_run_id>" \
+SKIP_STEP16=1 \
+STEP17_BACKEND="vllm" \
+BATCH_SIZE="168" \
+LIMIT_PROMPTS_S17="100" \
 /tf/thesis_Santos/04_Steps/run_step16_17.sh
 ```
 

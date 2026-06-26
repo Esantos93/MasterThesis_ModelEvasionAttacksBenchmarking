@@ -21,14 +21,14 @@ set -Eeuo pipefail
 
 CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
 VLLM_VENV="${VLLM_VENV:-${CLOUD_ROOT}/.venv-vllm}"
-EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_002}"
+EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_003}"
 GROUPING_LABEL="${GROUPING_LABEL:-fixed_packet_count_size_006}"
 RUN_ID="${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_step16_17_smoke}"
 
-CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_002.json}"
+CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_003.json}"
 GROUP_DIR="${GROUP_DIR:-${CLOUD_ROOT}/01_InputFiles/${EXPERIMENT_ID}/05_groups/${GROUPING_LABEL}}"
 PROMPT_DIR="${PROMPT_DIR:-${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}/06_prompts/${GROUPING_LABEL}/${RUN_ID}}"
-PROMPT_MANIFEST="${PROMPT_MANIFEST:-${PROMPT_DIR}/prompt_manifest.json}"
+PROMPT_MANIFEST="${PROMPT_MANIFEST:-${PROMPT_DIR}/prompt_units_manifest_v1.json}"
 STEP17_OUTPUT_ROOT="${STEP17_OUTPUT_ROOT:-${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}/07_llm_outputs/${GROUPING_LABEL}}"
 MODEL_DIR="${MODEL_DIR:-${CLOUD_ROOT}/03_Models}"
 HF_MODEL_ID="${HF_MODEL_ID:-}"
@@ -306,6 +306,34 @@ else
 fi
 
 require_file "${PROMPT_MANIFEST}"
+
+python3 - "${PROMPT_MANIFEST}" <<'PY'
+import collections
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+metadata = manifest.get("metadata") or {}
+prompt_units = manifest.get("prompt_units")
+if not isinstance(prompt_units, list):
+    raise SystemExit(f"Prompt manifest has no prompt_units list: {manifest_path}")
+editable_counts = collections.Counter(
+    unit.get("editable_region_count")
+    for unit in prompt_units
+    if isinstance(unit, dict)
+)
+print("=== Prompt manifest preflight ===")
+print(f"Manifest: {manifest_path}")
+print(f"Schema: {metadata.get('schema_version')}")
+print(f"Prompt units: {len(prompt_units)}")
+print(f"Total prompt count metadata: {metadata.get('total_prompt_count')}")
+print(f"Source modification units metadata: {metadata.get('total_source_modification_units')}")
+print(f"Editable-region count distribution: {dict(sorted(editable_counts.items(), key=lambda item: str(item[0])))}")
+print(f"Prompt input profile: {metadata.get('prompt_input_json_data_profile')}")
+print(f"Prompt instructions profile: {metadata.get('prompt_instructions_profile')}")
+PY
 
 if [[ "${SKIP_STEP17}" != "1" ]]; then
   current_stage="step17"
