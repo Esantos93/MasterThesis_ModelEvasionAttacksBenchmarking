@@ -2,15 +2,16 @@
 set -Eeuo pipefail
 
 CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
-EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_002}"
+EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_003}"
 GROUPING_LABEL="${GROUPING_LABEL:-fixed_packet_count_size_006}"
-CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_002.json}"
+CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_003.json}"
 MODEL_PATH="${MODEL_PATH:-${CLOUD_ROOT}/03_Models/Llama-3.1-8B-Instruct}"
 PROMPT_DIR="${PROMPT_DIR:-}"
-CALIBRATION_LABEL="${CALIBRATION_LABEL:-fixed006_wide_1500}"
+CALIBRATION_LABEL="${CALIBRATION_LABEL:-baseline003_fixed006_hybrid_wide_1500}"
 CALIBRATION_ROOT="${CALIBRATION_ROOT:-${CLOUD_ROOT}/02_OutputFiles/batch_calibration/${CALIBRATION_LABEL}}"
 LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-1500}"
 BATCH_SIZES="${BATCH_SIZES:-16 32 64 96 128 160 188 224 256 320}"
+SAMPLE_METHOD="${SAMPLE_METHOD:-editable_count_stratified}"
 RUNNER="${RUNNER:-${CLOUD_ROOT}/04_Steps/run_step16_17.sh}"
 COMPARATOR="${COMPARATOR:-${CLOUD_ROOT}/04_Steps/compare_step17_batch_calibration.py}"
 SAMPLE_BUILDER="${SAMPLE_BUILDER:-${CLOUD_ROOT}/04_Steps/build_prompt_manifest_sample.py}"
@@ -38,7 +39,7 @@ for required_path in \
   "${COMPARATOR}" \
   "${SAMPLE_BUILDER}" \
   "${CONFIG_PATH}" \
-  "${PROMPT_DIR}/prompt_manifest.json" \
+  "${PROMPT_DIR}/prompt_units_manifest_v1.json" \
   "${MODEL_PATH}"; do
   if [[ ! -e "${required_path}" ]]; then
     echo "Required path not found: ${required_path}"
@@ -47,11 +48,12 @@ for required_path in \
 done
 
 mkdir -p "${CALIBRATION_ROOT}"
-sample_manifest="${CALIBRATION_ROOT}/prompt_manifest_sample_${LIMIT_PROMPTS_S17}.json"
+sample_manifest="${CALIBRATION_ROOT}/prompt_units_manifest_sample_${LIMIT_PROMPTS_S17}.json"
 python3 "${SAMPLE_BUILDER}" \
-  --input-manifest "${PROMPT_DIR}/prompt_manifest.json" \
+  --input-manifest "${PROMPT_DIR}/prompt_units_manifest_v1.json" \
   --output-manifest "${sample_manifest}" \
-  --sample-size "${LIMIT_PROMPTS_S17}"
+  --sample-size "${LIMIT_PROMPTS_S17}" \
+  --sample-method "${SAMPLE_METHOD}"
 
 campaign_started_at="$(date -u +%Y%m%d_%H%M%S)"
 campaign_log="${CALIBRATION_ROOT}/calibration_${campaign_started_at}.log"
@@ -60,6 +62,7 @@ exec > >(tee -a "${campaign_log}") 2>&1
 echo "Calibration root: ${CALIBRATION_ROOT}"
 echo "Prompt directory: ${PROMPT_DIR}"
 echo "Prompt limit: ${LIMIT_PROMPTS_S17}"
+echo "Sample method: ${SAMPLE_METHOD}"
 echo "Batch sizes: ${BATCH_SIZES}"
 echo "Model: ${MODEL_PATH}"
 
