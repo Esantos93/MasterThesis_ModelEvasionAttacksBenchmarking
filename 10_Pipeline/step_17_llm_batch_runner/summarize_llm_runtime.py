@@ -109,7 +109,7 @@ def summarize_numbers(values: list[float]) -> dict[str, Any]:
     }
 
 
-# This function resolves a prompt package path from metadata and optional local prompt directories.
+# This function resolves a prompt unit path from metadata and optional local prompt directories.
 def resolve_prompt_package_path(metadata: dict[str, Any], prompt_dirs: list[Path]) -> Path | None:
     prompt_file = metadata.get("prompt_file")
     if isinstance(prompt_file, str) and prompt_file:
@@ -130,7 +130,7 @@ def resolve_prompt_package_path(metadata: dict[str, Any], prompt_dirs: list[Path
     return None
 
 
-# This function extracts prompt complexity counts from a Step 16 prompt package.
+# This function extracts prompt complexity counts from a Step 16 prompt unit.
 def prompt_package_counts(prompt_package: dict[str, Any]) -> dict[str, int]:
     traceability = prompt_package.get("input_traceability", {})
     if not isinstance(traceability, dict):
@@ -163,7 +163,7 @@ def prompt_package_counts(prompt_package: dict[str, Any]) -> dict[str, int]:
     }
 
 
-# This function builds one per-prompt metrics row from metadata and the matching prompt package when available.
+# This function builds one per-prompt metrics row from metadata and the matching prompt unit when available.
 def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs: list[Path]) -> dict[str, Any]:
     prompt_package_path = resolve_prompt_package_path(metadata, prompt_dirs)
     counts = {
@@ -205,7 +205,7 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "prompt_unit_id": metadata.get("prompt_unit_id"),
         "prompt_version": metadata.get("prompt_version"),
         "prompt_contract": metadata.get("prompt_contract"),
-        "source_prompt_unit_schema_version": metadata.get("source_prompt_unit_schema_version"),
+        "source_modification_unit_schema_version": metadata.get("source_modification_unit_schema_version"),
         "status": metadata.get("status"),
         "failure_reason": metadata.get("failure_reason"),
         "validation_reason": validation_reason,
@@ -511,7 +511,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             "- Per-item cycle durations overlap within a generation batch and must not be summed as serial runtime.",
             "- Generation-batch runtimes use the explicit runner measurement when available; older metadata falls back to each batch timestamp span.",
             "- Runtime totals from metadata usually exclude model load/compile time before the first prompt; the orchestrator terminal log preserves the full Step 17 printed runtime when available.",
-            "- Packet, editable-packet, editable-region and payload-window rates use prompt package traceability when available.",
+            "- Packet, editable-packet, editable-region and payload-window rates use prompt unit traceability when available.",
         ]
     )
     return "\n".join(lines)
@@ -530,7 +530,7 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "prompt_unit_id",
         "prompt_version",
         "prompt_contract",
-        "source_prompt_unit_schema_version",
+        "source_modification_unit_schema_version",
         "status",
         "failure_reason",
         "validation_reason",
@@ -594,7 +594,7 @@ def parse_args() -> argparse.Namespace:
         "--prompt-dir",
         action="append",
         default=[],
-        help="Optional Step 16 prompt package directory. Can be passed multiple times.",
+        help="Optional Step 16 prompt unit directory. Can be passed multiple times.",
     )
     parser.add_argument(
         "--output-prefix",

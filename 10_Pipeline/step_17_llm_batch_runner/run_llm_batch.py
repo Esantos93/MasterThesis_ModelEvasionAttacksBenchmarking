@@ -27,7 +27,8 @@ DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 MODEL_OUTPUT_SUBDIRS = ["raw", "parsed", "metadata", "failures"]
 
 #These are the Step 16/17 schema names for the compact patch-based contract.
-PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
+PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
+PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
 FIELD_ALIASES = {
@@ -62,7 +63,7 @@ def default_cloud_paths(config: dict[str, Any], cloud_root: str | Path) -> dict[
     experiment_id = config["experiment"]["experiment_id"]
     root = Path(cloud_root).expanduser()
     return {
-        "prompt_manifest": root / "02_OutputFiles" / experiment_id / "06_prompts" / "prompt_manifest.json",
+        "prompt_manifest": root / "02_OutputFiles" / experiment_id / "06_prompts" / "prompt_units_manifest_v1.json",
         "prompt_dir": root / "02_OutputFiles" / experiment_id / "06_prompts",
         "output_root": root / "02_OutputFiles" / experiment_id / "07_llm_outputs",
         "model_dir": root / "03_Models",
@@ -76,19 +77,24 @@ def validate_prompt_manifest(prompt_manifest: Any, manifest_path: Path) -> dict[
     metadata = prompt_manifest.get("metadata")
     if not isinstance(metadata, dict):
         raise ValueError(f"Prompt manifest must contain a metadata object: {manifest_path}")
-    prompts = prompt_manifest.get("prompts")
-    if not isinstance(prompts, list):
-        raise ValueError(f"Prompt manifest must contain a prompts list: {manifest_path}")
+    schema_version = metadata.get("schema_version")
+    if schema_version != PROMPT_UNITS_MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"Prompt manifest must use schema_version={PROMPT_UNITS_MANIFEST_SCHEMA_VERSION}: {manifest_path}"
+        )
+    prompt_units = prompt_manifest.get("prompt_units")
+    if not isinstance(prompt_units, list):
+        raise ValueError(f"Prompt manifest must contain a prompt_units list: {manifest_path}")
     return prompt_manifest
 
 
-#This function validates the basic shape of one Step 16 prompt package.
+#This function validates the basic shape of one Step 16 prompt unit.
 def validate_prompt_package(prompt_package: Any, prompt_path: Path) -> dict[str, Any]:
     if not isinstance(prompt_package, dict):
-        raise ValueError(f"Prompt package root must be an object: {prompt_path}")
-    if prompt_package.get("schema_version") != PROMPT_PACKAGE_SCHEMA_VERSION:
+        raise ValueError(f"Prompt unit root must be an object: {prompt_path}")
+    if prompt_package.get("schema_version") != PROMPT_UNIT_SCHEMA_VERSION:
         raise ValueError(
-            f"Prompt package must use schema_version={PROMPT_PACKAGE_SCHEMA_VERSION}: {prompt_path}"
+            f"Prompt unit must use schema_version={PROMPT_UNIT_SCHEMA_VERSION}: {prompt_path}"
         )
     if prompt_package.get("prompt_contract") != PATCH_PROMPT_CONTRACT:
         raise ValueError(
@@ -96,16 +102,16 @@ def validate_prompt_package(prompt_package: Any, prompt_path: Path) -> dict[str,
         )
     messages = prompt_package.get("messages")
     if not isinstance(messages, list) or not messages:
-        raise ValueError(f"Prompt package must contain a non-empty messages list: {prompt_path}")
+        raise ValueError(f"Prompt unit must contain a non-empty messages list: {prompt_path}")
     traceability = prompt_package.get("input_traceability")
     if not isinstance(traceability, dict):
-        raise ValueError(f"Prompt package must contain input_traceability object: {prompt_path}")
+        raise ValueError(f"Prompt unit must contain input_traceability object: {prompt_path}")
     if not isinstance(traceability.get("editable_regions"), list):
-        raise ValueError(f"Prompt package input_traceability must contain editable_regions list: {prompt_path}")
+        raise ValueError(f"Prompt unit input_traceability must contain editable_regions list: {prompt_path}")
     return prompt_package
 
 
-#This function resolves a prompt package path from a prompt manifest entry.
+#This function resolves a prompt unit path from a prompt manifest entry.
 #If a manifest path was generated on another machine, the local prompt directory is used as a filename fallback.
 def resolve_prompt_file_path(prompt_entry: dict[str, Any], prompt_dir: Path) -> Path:
     prompt_file = prompt_entry.get("prompt_file")
@@ -134,7 +140,7 @@ def collect_prompt_paths(
     limit_prompts_s17: int | None,
 ) -> list[Path]:
     prompt_manifest = validate_prompt_manifest(read_json(prompt_manifest_path), prompt_manifest_path)
-    prompt_entries = prompt_manifest["prompts"]
+    prompt_entries = prompt_manifest["prompt_units"]
     selected_entries = prompt_entries[:limit_prompts_s17] if limit_prompts_s17 is not None else prompt_entries
 
     prompt_paths = []
@@ -372,7 +378,7 @@ OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT = {
     1: 768,
     2: 1024,
 }
-OUTPUT_BUDGET_FOR_THREE_OR_MORE_EDITABLE_REGIONS = 1280
+OUTPUT_BUDGET_FOR_THREE_OR_MORE_EDITABLE_REGIONS = 1536
 
 
 def get_editable_region_count(prompt_package: dict[str, Any]) -> int:
@@ -579,7 +585,7 @@ def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[s
     return lookup
 
 
-def normalize_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+def normalize_payload_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
     packet_id = patch.get("packet_id")
     canonical_region_id = patch.get("canonical_region_id")
     if packet_id is None and canonical_region_id is None:
@@ -599,6 +605,21 @@ def normalize_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, 
             "canonical_region_id": str(canonical_region_id),
         }
 
+    return str(packet_id), None
+
+
+def normalize_header_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    packet_id = patch.get("packet_id")
+    canonical_region_id = patch.get("canonical_region_id")
+    if packet_id is None:
+        return None, {"accepted": False, "reason": "header_patch_missing_packet_id"}
+    if canonical_region_id is not None and str(canonical_region_id) != str(packet_id):
+        return None, {
+            "accepted": False,
+            "reason": "header_patch_unexpected_canonical_region_id",
+            "packet_id": str(packet_id),
+            "canonical_region_id": str(canonical_region_id),
+        }
     return str(packet_id), None
 
 
@@ -655,6 +676,50 @@ def validate_replacement_format(
     return None
 
 
+def validate_uint_replacement(
+    *,
+    patch: dict[str, Any],
+    region: dict[str, Any],
+    patch_index: int,
+) -> dict[str, Any] | None:
+    if patch.get("replacement_format") != "uint":
+        return {
+            "accepted": False,
+            "reason": "invalid_uint_replacement_format",
+            "patch_index": patch_index,
+            "replacement_format": patch.get("replacement_format"),
+        }
+    replacement = patch.get("replacement")
+    if isinstance(replacement, bool) or not isinstance(replacement, int):
+        return {
+            "accepted": False,
+            "reason": "replacement_uint_not_integer",
+            "patch_index": patch_index,
+        }
+    constraints = region.get("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+    min_value = constraints.get("min")
+    max_value = constraints.get("max")
+    if isinstance(min_value, int) and replacement < min_value:
+        return {
+            "accepted": False,
+            "reason": "replacement_uint_below_min",
+            "patch_index": patch_index,
+            "replacement": replacement,
+            "min": min_value,
+        }
+    if isinstance(max_value, int) and replacement > max_value:
+        return {
+            "accepted": False,
+            "reason": "replacement_uint_above_max",
+            "patch_index": patch_index,
+            "replacement": replacement,
+            "max": max_value,
+        }
+    return None
+
+
 #This function validates the patch_output_v1 contract using the Step 16 editable-region index.
 def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed_output, dict):
@@ -695,13 +760,13 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
             return {"accepted": False, "reason": "patch_not_object", "patch_index": patch_index}
 
         region_id = patch.get("region_id")
-        packet_id_text, identity_error = normalize_patch_target_identity(patch)
-        if identity_error:
-            identity_error["patch_index"] = patch_index
-            return identity_error
-        if packet_id_text is None or not isinstance(region_id, str):
+        if not isinstance(region_id, str):
             return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
 
+        raw_packet_id = patch.get("packet_id") or patch.get("canonical_region_id")
+        if raw_packet_id is None:
+            return {"accepted": False, "reason": "patch_missing_packet_or_canonical_region", "patch_index": patch_index}
+        packet_id_text = str(raw_packet_id)
         if packet_id_text not in editable_packet_ids:
             return {
                 "accepted": False,
@@ -719,8 +784,19 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "packet_id": packet_id_text,
                 "region_id": region_id,
             }
+        region_identity_type = region.get("identity_type", "canonical_payload_region")
+        if region_identity_type == "physical_header_region":
+            packet_id_text, identity_error = normalize_header_patch_target_identity(patch)
+        else:
+            packet_id_text, identity_error = normalize_payload_patch_target_identity(patch)
+        if identity_error:
+            identity_error["patch_index"] = patch_index
+            return identity_error
+        if packet_id_text is None:
+            return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
+
         region_canonical_region_id = region.get("canonical_region_id")
-        if region_canonical_region_id is not None and str(patch.get("canonical_region_id")) != str(region_canonical_region_id):
+        if region_identity_type != "physical_header_region" and region_canonical_region_id is not None and str(patch.get("canonical_region_id")) != str(region_canonical_region_id):
             return {
                 "accepted": False,
                 "reason": "patch_canonical_region_id_mismatch",
@@ -759,6 +835,12 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "expected_region_type": expected_region_type,
                 "actual_region_type": actual_region_type,
             }
+
+        if operation == "replace_uint":
+            replacement_error = validate_uint_replacement(patch=patch, region=region, patch_index=patch_index)
+            if replacement_error:
+                return replacement_error
+            continue
 
         replacement_error = validate_replacement_format(patch=patch, region=region, patch_index=patch_index)
         if replacement_error:
@@ -839,8 +921,8 @@ def build_run_metadata(
         "prompt_version": prompt_package.get("prompt_version"),
         "prompt_contract": prompt_package.get("prompt_contract"),
         "prompt_file": str(prompt_path),
-        "source_prompt_unit_file": prompt_package.get("source_prompt_unit_file"),
-        "source_prompt_unit_schema_version": prompt_package.get("source_prompt_unit_schema_version"),
+        "source_modification_unit_file": prompt_package.get("source_modification_unit_file"),
+        "source_modification_unit_schema_version": prompt_package.get("source_modification_unit_schema_version"),
         "model_name": model_name,
         "model_path": str(model_path),
         "generation_params": generation_params,
@@ -875,7 +957,7 @@ def write_failure_outputs(
 
 
 #This function runs one prompt through one already-loaded model.
-#Each call uses only the messages from the current prompt package, so no previous prompt context is carried forward.
+#Each call uses only the messages from the current prompt unit, so no previous prompt context is carried forward.
 def run_single_prompt(
     *,
     llm: Any,
@@ -967,7 +1049,7 @@ def run_single_prompt(
         write_json(metadata_path, metadata)
         return metadata
 
-    if not editable_packet_ids:
+    if editable_region_count == 0:
         parsed_output = {
             "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
             "parent_group_id": prompt_package.get("parent_group_id"),
@@ -1415,7 +1497,7 @@ def run_model_batch(
             editable_packet_ids = prompt_package["input_traceability"].get("editable_packet_ids", [])
             editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
             editable_region_count = get_editable_region_count(prompt_package)
-            if editable_region_count == 0 or not editable_packet_ids:
+            if editable_region_count == 0:
                 metadata = run_single_prompt(
                     llm=llm,
                     prompt_path=prompt_path,
@@ -1568,10 +1650,10 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
 
 #This function defines the command-line arguments accepted by Step 17.
 def parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run LLM models over Step 16 compact patch prompt packages.")
+    parser = argparse.ArgumentParser(description="Run LLM models over Step 16 compact patch prompt units.")
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
     parser.add_argument("--prompt-file", help="Path to one Step 16 prompt_unit.prompt.json file.")
-    parser.add_argument("--prompt-manifest", help="Path to Step 16 prompt_manifest.json.")
+    parser.add_argument("--prompt-manifest", help="Path to Step 16 prompt_units_manifest_v1.json.")
     parser.add_argument("--prompt-dir", help="Directory containing Step 16 prompt_unit.prompt.json files.")
     parser.add_argument("--output-root", help="Directory where Step 17 model outputs will be written.")
     parser.add_argument("--cloud-root", default=str(DEFAULT_CLOUD_ROOT), help="RISE cloud root for default paths.")
@@ -1582,7 +1664,7 @@ def parse_cli_args() -> argparse.Namespace:
         action="append",
         help="Run only discovered/selected model paths containing this text. Can be repeated.",
     )
-    parser.add_argument("--limit-prompts-s17", type=int, help="Run only the first N Step 16 prompt packages for smoke tests.")
+    parser.add_argument("--limit-prompts-s17", type=int, help="Run only the first N Step 16 prompt units for smoke tests.")
     parser.add_argument(
         "--progress-every",
         type=int,
