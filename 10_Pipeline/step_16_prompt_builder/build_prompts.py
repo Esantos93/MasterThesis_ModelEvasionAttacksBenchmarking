@@ -66,6 +66,7 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
             "canonical_region_ids",
         ],
         "header_region_fields": [
+            "packet_id",
             "header_region_id",
             "field",
             "classification",
@@ -107,7 +108,8 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
         (
             "replace_uint header patches require the fields: packet_id, region_id, region_type, "
             "operation, replacement_format, replacement. Use region_id equal to header_region_id, "
-            "region_type equal to header_field, replacement_format equal to uint, and replacement as an integer."
+            "region_type equal to header_field, replacement_format equal to uint, and replacement as an integer. "
+            "Do not use canonical_region_id for header patches."
         ),
         (
             "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 "
