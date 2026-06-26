@@ -2198,7 +2198,7 @@ def main() -> None:
         print(f"Canonical TCP regions grouped: {result['canonical_region_count']}")
         print(f"Parent group count: {result['parent_group_count']}")
         print(f"Modification unit count: {result['modification_unit_count']}")
-        print(f"Configured group size (canonical regions): {result['group_size_packets']}")
+        print(f"Configured group size (physical packets): {result['group_size_packets']}")
         print(f"Flow payload slide window overlap units: {result['flow_payload_slide_window_overlap_units']}")
         print(f"Parent group size statistics: {result['parent_group_size_statistics']}")
         print(f"Input token budget: {result['input_token_budget']}")
