@@ -5,10 +5,10 @@ import unittest
 
 from step_14_pcap_to_json.pcap_to_json import (
     build_json_record,
-    extract_physical_packet_facts,
     reject_canonical_conflicts,
     validate_physical_packet_contract,
 )
+from step_14_pcap_to_json.packet_headers_extraction import extract_physical_packet_facts
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
 
 
