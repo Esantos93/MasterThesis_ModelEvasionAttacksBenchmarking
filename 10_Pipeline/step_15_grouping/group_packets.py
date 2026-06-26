@@ -86,7 +86,6 @@ def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         "packet_ids": prompt_unit.get("packet_ids", []),
         "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
         "context_packet_ids": prompt_unit.get("context_packet_ids", []),
-        "physical_packets": prompt_unit.get("physical_packets", []),
         "packets": prompt_unit.get("packets", []),
         "context_truncation": prompt_unit.get("context_truncation"),
     }
@@ -298,6 +297,21 @@ def build_compact_physical_packet(
         header_policy=header_policy,
     )
     editable_count = sum(1 for item in classifications if item["editable"])
+    classification_summary = Counter(str(item["classification"]) for item in classifications)
+    editable_classifications = [
+        {
+            "header_region_id": item["header_region_id"],
+            "field": item["field"],
+            "classification": item["classification"],
+            "editable": item["editable"],
+            "allowed_operations": item["allowed_operations"],
+            "constraints": item["constraints"],
+            "current_value": item["current_value"],
+            "applied_rule_ids": item["applied_rule_ids"],
+        }
+        for item in classifications
+        if item["editable"]
+    ]
     return {
         "identity_type": "physical_packet",
         "packet_id": packet["packet_id"],
@@ -309,7 +323,8 @@ def build_compact_physical_packet(
         "canonical_region_ids": packet.get("canonical_region_ids", []),
         "header_editability_policy_id": header_policy["policy_id"],
         "editable_header_region_count": editable_count,
-        "header_field_classifications": classifications,
+        "header_classification_summary": dict(sorted(classification_summary.items())),
+        "header_field_classifications": editable_classifications,
     }
 
 

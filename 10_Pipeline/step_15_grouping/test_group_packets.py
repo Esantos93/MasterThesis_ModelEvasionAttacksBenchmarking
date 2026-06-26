@@ -213,6 +213,8 @@ class CanonicalStep15Tests(unittest.TestCase):
             if item["editable"]
         }
         self.assertEqual({"ipv4.tos", "ipv4.ttl", "tcp.window"}, editable_header_fields)
+        self.assertTrue(all(len(packet["header_field_classifications"]) == 3 for packet in physical_packets))
+        self.assertTrue(all("immutable_field" in packet["header_classification_summary"] for packet in physical_packets))
         self.assertTrue(all(packet["header_editability_policy_id"] == "conservative_header_editability_v1" for packet in physical_packets))
 
     def test_flow_based_groups_canonical_regions_by_shared_flow_context(self) -> None:
