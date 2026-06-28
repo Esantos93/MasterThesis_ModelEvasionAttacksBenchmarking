@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import run_llm_batch
+import run_llm_batch_vllm
 
 
+#This function builds a minimal payload-only prompt package for validation tests.
 def build_prompt_package() -> dict:
     return {
         "schema_version": "prompt_unit_v1",
@@ -37,6 +41,28 @@ def build_prompt_package() -> dict:
     }
 
 
+#This function builds a payload prompt package with a configurable editable byte length.
+def build_payload_prompt_package(length_bytes: int) -> dict:
+    package = build_prompt_package()
+    region = package["input_traceability"]["editable_regions"][0]
+    region["end_offset_bytes"] = length_bytes
+    region["length_bytes"] = length_bytes
+    return package
+
+
+#This function builds a mixed payload/header prompt package for output-budget tests.
+def build_mixed_prompt_package(payload_length_bytes: int) -> dict:
+    package = build_payload_prompt_package(payload_length_bytes)
+    header_region = build_header_prompt_package()["input_traceability"]["editable_regions"][0]
+    package["prompt_unit_id"] = "unit_mixed_001"
+    package["input_traceability"]["editable_regions"].append(header_region)
+    package["input_traceability"]["physical_packet_ids"] = ["packet_000001"]
+    package["input_traceability"]["editable_packet_ids"].append("packet_000001")
+    package["input_traceability"]["editable_header_packet_ids"] = ["packet_000001"]
+    return package
+
+
+#This function builds a minimal header-only prompt package for validation tests.
 def build_header_prompt_package() -> dict:
     return {
         "schema_version": "prompt_unit_v1",
@@ -72,6 +98,7 @@ def build_header_prompt_package() -> dict:
     }
 
 
+#This test case covers Step 17 patch-output validation against prompt traceability.
 class CanonicalRegionPatchValidationTest(unittest.TestCase):
     def test_canonical_region_id_is_accepted_as_explicit_patch_identity(self) -> None:
         parsed_output = {
@@ -144,6 +171,140 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
 
         self.assertTrue(result["accepted"])
 
+    def test_header_replace_uint_patch_can_infer_packet_id_from_region_id(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_context_only",
+                    "region_id": "packet_000001:ipv4.ttl",
+                    "region_type": "header_field",
+                    "operation": "replace_uint",
+                    "replacement_format": "uint",
+                    "replacement": 128,
+                }
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["patches"][0]["packet_id"], "packet_000001")
+        self.assertNotIn("canonical_region_id", parsed_output["patches"][0])
+
+    def test_header_replace_uint_patch_accepts_field_name_as_region_type_alias(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [
+                {
+                    "packet_id": "packet_000001",
+                    "region_id": "packet_000001:ipv4.ttl",
+                    "region_type": "ipv4.ttl",
+                    "operation": "replace_uint",
+                    "replacement_format": "uint",
+                    "replacement": 128,
+                }
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["patches"][0]["region_type"], "header_field")
+
+    def test_compact_header_edits_are_expanded_and_accepted(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [],
+            "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(
+            parsed_output["patches"],
+            [
+                {
+                    "packet_id": "packet_000001",
+                    "region_id": "packet_000001:ipv4.ttl",
+                    "region_type": "header_field",
+                    "operation": "replace_uint",
+                    "replacement_format": "uint",
+                    "replacement": 128,
+                }
+            ],
+        )
+
+    def test_compact_header_edits_are_accepted_without_patches_key(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(len(parsed_output["patches"]), 1)
+        self.assertEqual(parsed_output["patches"][0]["region_id"], "packet_000001:ipv4.ttl")
+
+    def test_compact_header_edits_reject_unknown_region(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [],
+            "header_edits": [["packet_999999", "ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_references_unknown_or_non_editable_region")
+
+    def test_compact_header_edits_v1_shape_is_rejected(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [],
+            "header_edits": [["packet_000001:ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_invalid_shape")
+
+    def test_compact_header_edits_drop_duplicate_compact_patch_drafts(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [
+                {
+                    "packet_id": "packet_000001",
+                    "field": "ipv4.ttl",
+                    "replacement_uint": 128,
+                }
+            ],
+            "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(len(parsed_output["patches"]), 1)
+        self.assertEqual(parsed_output["patches"][0]["region_id"], "packet_000001:ipv4.ttl")
+
     def test_header_replace_uint_patch_rejects_out_of_range_value(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
@@ -165,6 +326,84 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
 
         self.assertFalse(result["accepted"])
         self.assertEqual(result["reason"], "replacement_uint_below_min")
+
+
+#This test case covers the hybrid output-token budget policy.
+class OutputBudgetPolicyTest(unittest.TestCase):
+    def test_header_only_budget_is_not_based_on_header_region_count(self) -> None:
+        prompt_package = build_header_prompt_package()
+        regions = prompt_package["input_traceability"]["editable_regions"]
+        regions.extend(
+            {
+                "identity_type": "physical_header_region",
+                "packet_id": "packet_000001",
+                "region_id": f"packet_000001:header_{index}",
+                "region_type": "header_field",
+                "field": f"header_{index}",
+                "format": "uint",
+                "allowed_operations": ["replace_uint"],
+                "constraints": {"min": 0, "max": 255},
+                "current_value": 1,
+            }
+            for index in range(17)
+        )
+
+        desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
+            prompt_package=prompt_package,
+            legacy_output_token_cap=1536,
+        )
+
+        self.assertEqual(desired_tokens, 1536)
+        self.assertEqual(policy["prompt_class"], "header_only")
+        self.assertEqual(policy["header_editable_region_count"], 18)
+        self.assertEqual(policy["payload_editable_region_count"], 0)
+
+    def test_payload_involved_budget_uses_payload_editable_bytes(self) -> None:
+        prompt_package = build_payload_prompt_package(length_bytes=512)
+
+        desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
+            prompt_package=prompt_package,
+            legacy_output_token_cap=1536,
+        )
+
+        self.assertEqual(desired_tokens, 1280)
+        self.assertEqual(policy["prompt_class"], "payload_involved")
+        self.assertEqual(policy["payload_editable_bytes"], 512)
+        self.assertEqual(policy["budget_tier"], "payload_bytes_le_512")
+
+    def test_mixed_header_payload_budget_uses_header_floor(self) -> None:
+        prompt_package = build_mixed_prompt_package(payload_length_bytes=64)
+
+        desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
+            prompt_package=prompt_package,
+            legacy_output_token_cap=1536,
+        )
+
+        self.assertEqual(desired_tokens, 1536)
+        self.assertEqual(policy["prompt_class"], "payload_involved")
+        self.assertEqual(policy["payload_editable_bytes"], 64)
+        self.assertEqual(policy["header_editable_region_count"], 1)
+        self.assertEqual(policy["budget_tier"], "payload_bytes_le_64_mixed_header_floor")
+
+
+#This test case covers vLLM model-discovery behavior.
+class VllmModelDiscoveryTest(unittest.TestCase):
+    def test_vllm_model_discovery_ignores_hidden_checkpoint_directories(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            model_root = Path(temp_dir)
+            checkpoint_dir = model_root / ".ipynb_checkpoints"
+            checkpoint_dir.mkdir()
+            valid_model_dir = model_root / "Llama-3.1-8B-Instruct"
+            valid_model_dir.mkdir()
+            (valid_model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+            selected = run_llm_batch_vllm.collect_vllm_model_paths(
+                model_dir=model_root,
+                explicit_model_paths=None,
+                model_filters=None,
+            )
+
+        self.assertEqual(selected, [valid_model_dir])
 
 
 if __name__ == "__main__":

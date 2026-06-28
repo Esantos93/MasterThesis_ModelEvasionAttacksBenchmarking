@@ -373,14 +373,18 @@ def measure_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
     return len(tokens)
 
 
-OUTPUT_BUDGET_POLICY_NAME = "editable_region_tiered_v1"
-OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT = {
-    1: 768,
-    2: 1024,
-}
-OUTPUT_BUDGET_FOR_THREE_OR_MORE_EDITABLE_REGIONS = 1536
+OUTPUT_BUDGET_POLICY_NAME = "hybrid_output_token_budget_v1"
+HEADER_ONLY_OUTPUT_BUDGET = 1536
+MIXED_HEADER_OUTPUT_BUDGET_FLOOR = 1536
+PAYLOAD_OUTPUT_BUDGET_BY_EDITABLE_BYTES = [
+    (64, 768),
+    (256, 1024),
+    (512, 1280),
+]
+PAYLOAD_OUTPUT_BUDGET_ABOVE_MAX_BYTES = 1536
 
 
+#This function counts editable regions declared by a Step 16 prompt unit.
 def get_editable_region_count(prompt_package: dict[str, Any]) -> int:
     traceability = prompt_package.get("input_traceability", {})
     editable_regions = traceability.get("editable_regions", [])
@@ -389,26 +393,77 @@ def get_editable_region_count(prompt_package: dict[str, Any]) -> int:
     return 0
 
 
+#This function summarizes editable payload/header regions for dynamic output-token budgeting.
+def summarize_editable_regions_for_output_budget(prompt_package: dict[str, Any]) -> dict[str, Any]:
+    traceability = prompt_package.get("input_traceability", {})
+    editable_regions = traceability.get("editable_regions", [])
+    summary = {
+        "editable_region_count": 0,
+        "payload_editable_region_count": 0,
+        "header_editable_region_count": 0,
+        "payload_editable_bytes": 0,
+        "prompt_class": "no_editable_regions",
+    }
+    if not isinstance(editable_regions, list):
+        return summary
+
+    for editable_region in editable_regions:
+        if not isinstance(editable_region, dict):
+            continue
+        summary["editable_region_count"] += 1
+        if editable_region.get("identity_type") == "physical_header_region":
+            summary["header_editable_region_count"] += 1
+            continue
+        summary["payload_editable_region_count"] += 1
+        length_bytes = editable_region.get("length_bytes")
+        if isinstance(length_bytes, int) and length_bytes > 0:
+            summary["payload_editable_bytes"] += length_bytes
+
+    if summary["payload_editable_region_count"] > 0:
+        summary["prompt_class"] = "payload_involved"
+    elif summary["header_editable_region_count"] > 0:
+        summary["prompt_class"] = "header_only"
+    return summary
+
+
+#This function maps editable payload bytes to the configured output-token tier.
+def estimate_payload_output_budget(payload_editable_bytes: int) -> tuple[int, str]:
+    for max_payload_bytes, output_tokens in PAYLOAD_OUTPUT_BUDGET_BY_EDITABLE_BYTES:
+        if payload_editable_bytes <= max_payload_bytes:
+            return output_tokens, f"payload_bytes_le_{max_payload_bytes}"
+    return PAYLOAD_OUTPUT_BUDGET_ABOVE_MAX_BYTES, "payload_bytes_above_512"
+
+
+#This function estimates the desired output-token budget for one prompt unit.
 def estimate_desired_output_tokens(
     *,
     prompt_package: dict[str, Any],
     legacy_output_token_cap: int,
 ) -> tuple[int, dict[str, Any]]:
-    editable_region_count = get_editable_region_count(prompt_package)
-    if editable_region_count <= 0:
+    region_summary = summarize_editable_regions_for_output_budget(prompt_package)
+    prompt_class = region_summary["prompt_class"]
+    if prompt_class == "no_editable_regions":
         estimated_output_tokens = 0
         budget_tier = "no_editable_regions"
-    elif editable_region_count in OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT:
-        estimated_output_tokens = OUTPUT_BUDGET_BY_EDITABLE_REGION_COUNT[editable_region_count]
-        budget_tier = f"{editable_region_count}_editable_region"
+    elif prompt_class == "header_only":
+        estimated_output_tokens = HEADER_ONLY_OUTPUT_BUDGET
+        budget_tier = "header_only"
     else:
-        estimated_output_tokens = OUTPUT_BUDGET_FOR_THREE_OR_MORE_EDITABLE_REGIONS
-        budget_tier = "3_or_more_editable_regions"
+        estimated_output_tokens, budget_tier = estimate_payload_output_budget(
+            int(region_summary["payload_editable_bytes"])
+        )
+        if region_summary["header_editable_region_count"] > 0 and estimated_output_tokens < MIXED_HEADER_OUTPUT_BUDGET_FLOOR:
+            estimated_output_tokens = MIXED_HEADER_OUTPUT_BUDGET_FLOOR
+            budget_tier = f"{budget_tier}_mixed_header_floor"
 
     desired_output_tokens = min(estimated_output_tokens, legacy_output_token_cap)
     policy_details = {
         "policy": OUTPUT_BUDGET_POLICY_NAME,
-        "editable_region_count": editable_region_count,
+        "editable_region_count": region_summary["editable_region_count"],
+        "payload_editable_region_count": region_summary["payload_editable_region_count"],
+        "header_editable_region_count": region_summary["header_editable_region_count"],
+        "payload_editable_bytes": region_summary["payload_editable_bytes"],
+        "prompt_class": prompt_class,
         "budget_tier": budget_tier,
         "estimated_output_tokens": estimated_output_tokens,
         "legacy_output_token_cap": legacy_output_token_cap,
@@ -465,6 +520,10 @@ def build_prompt_generation_params(
         "legacy_expected_output_patch_tokens": legacy_expected_output_patch_tokens,
         "dynamic_output_budget_policy": output_budget_policy,
         "editable_region_count": output_budget_policy["editable_region_count"],
+        "payload_editable_region_count": output_budget_policy["payload_editable_region_count"],
+        "header_editable_region_count": output_budget_policy["header_editable_region_count"],
+        "payload_editable_bytes": output_budget_policy["payload_editable_bytes"],
+        "prompt_class": output_budget_policy["prompt_class"],
         "context_reserve_tokens": base_generation_params["context_reserve_tokens"],
         "available_context_tokens": available_context_tokens,
         "was_capped_by_context": max_tokens < desired_max_tokens,
@@ -546,6 +605,7 @@ def start_generation_heartbeat(
     if heartbeat_seconds <= 0:
         return stop_event, None
 
+    #This function prints periodic progress while one blocking generation call is running.
     def heartbeat_loop() -> None:
         while not stop_event.wait(heartbeat_seconds):
             packet_text = ""
@@ -585,6 +645,22 @@ def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[s
     return lookup
 
 
+#This function finds a unique editable header region by header region id.
+def find_unique_header_region_by_region_id(
+    editable_lookup: dict[tuple[str, str], dict[str, Any]],
+    region_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    matches = [
+        (packet_id, region)
+        for (packet_id, candidate_region_id), region in editable_lookup.items()
+        if candidate_region_id == region_id and region.get("identity_type") == "physical_header_region"
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+#This function normalizes payload patch identity aliases to the canonical-region contract.
 def normalize_payload_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
     packet_id = patch.get("packet_id")
     canonical_region_id = patch.get("canonical_region_id")
@@ -608,6 +684,7 @@ def normalize_payload_patch_target_identity(patch: dict[str, Any]) -> tuple[str 
     return str(packet_id), None
 
 
+#This function normalizes header patch identity aliases to the physical-packet contract.
 def normalize_header_patch_target_identity(patch: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
     packet_id = patch.get("packet_id")
     canonical_region_id = patch.get("canonical_region_id")
@@ -623,6 +700,7 @@ def normalize_header_patch_target_identity(patch: dict[str, Any]) -> tuple[str |
     return str(packet_id), None
 
 
+#This function reads a canonical field name while accepting known model-output aliases.
 def get_field_with_aliases(obj: dict[str, Any], canonical_name: str) -> Any:
     for field_name in FIELD_ALIASES.get(canonical_name, [canonical_name]):
         if field_name in obj:
@@ -630,11 +708,13 @@ def get_field_with_aliases(obj: dict[str, Any], canonical_name: str) -> Any:
     return None
 
 
+#This function validates whether a string contains even-length hexadecimal bytes.
 def validate_hex_string(value: str) -> bool:
     cleaned = value.strip()
     return len(cleaned) % 2 == 0 and re.fullmatch(r"[0-9A-Fa-f]*", cleaned) is not None
 
 
+#This function validates a replacement value against the target region format.
 def validate_replacement_format(
     *,
     patch: dict[str, Any],
@@ -676,6 +756,7 @@ def validate_replacement_format(
     return None
 
 
+#This function validates integer header replacements against field constraints.
 def validate_uint_replacement(
     *,
     patch: dict[str, Any],
@@ -720,6 +801,83 @@ def validate_uint_replacement(
     return None
 
 
+#This function expands compact header_edits into normal replace_uint patches before validation.
+def expand_compact_header_edits(parsed_output: dict[str, Any], prompt_package: dict[str, Any]) -> dict[str, Any] | None:
+    header_edits = parsed_output.get("header_edits")
+    if header_edits is None:
+        return None
+    if not isinstance(header_edits, list):
+        return {"accepted": False, "reason": "header_edits_not_list"}
+
+    editable_lookup = build_editable_region_lookup(prompt_package)
+    patches = parsed_output.get("patches")
+    if patches is None:
+        patches = []
+        parsed_output["patches"] = patches
+    if not isinstance(patches, list):
+        return {"accepted": False, "reason": "patches_not_list"}
+    parsed_output["patches"] = [
+        patch
+        for patch in patches
+        if not (
+            isinstance(patch, dict)
+            and set(patch) <= {"packet_id", "field", "replacement_uint"}
+            and {"packet_id", "field", "replacement_uint"} <= set(patch)
+        )
+    ]
+    patches = parsed_output["patches"]
+
+    for edit_index, header_edit in enumerate(header_edits, start=1):
+        if not isinstance(header_edit, list) or len(header_edit) != 3:
+            return {
+                "accepted": False,
+                "reason": "header_edit_invalid_shape",
+                "header_edit_index": edit_index,
+            }
+        packet_id, field, replacement = header_edit
+        if not isinstance(packet_id, str):
+            return {
+                "accepted": False,
+                "reason": "header_edit_packet_id_not_string",
+                "header_edit_index": edit_index,
+            }
+        if not isinstance(field, str):
+            return {
+                "accepted": False,
+                "reason": "header_edit_field_not_string",
+                "header_edit_index": edit_index,
+            }
+        packet_id_text = str(packet_id)
+        matching_regions = [
+            region
+            for (lookup_packet_id, _lookup_region_id), region in editable_lookup.items()
+            if lookup_packet_id == packet_id_text
+            and region.get("identity_type") == "physical_header_region"
+            and region.get("field") == field
+        ]
+        if len(matching_regions) != 1:
+            return {
+                "accepted": False,
+                "reason": "header_edit_references_unknown_or_non_editable_region",
+                "header_edit_index": edit_index,
+                "packet_id": packet_id_text,
+                "field": field,
+            }
+        region = matching_regions[0]
+        region_id = str(region["region_id"])
+        patches.append(
+            {
+                "packet_id": packet_id_text,
+                "region_id": region_id,
+                "region_type": "header_field",
+                "operation": "replace_uint",
+                "replacement_format": "uint",
+                "replacement": replacement,
+            }
+        )
+    return None
+
+
 #This function validates the patch_output_v1 contract using the Step 16 editable-region index.
 def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed_output, dict):
@@ -749,6 +907,10 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
             "actual_prompt_unit_id": parsed_output.get("prompt_unit_id"),
         }
 
+    compact_header_edit_error = expand_compact_header_edits(parsed_output, prompt_package)
+    if compact_header_edit_error:
+        return compact_header_edit_error
+
     patches = parsed_output.get("patches")
     if not isinstance(patches, list):
         return {"accepted": False, "reason": "patches_not_list"}
@@ -763,10 +925,23 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
         if not isinstance(region_id, str):
             return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
 
-        raw_packet_id = patch.get("packet_id") or patch.get("canonical_region_id")
+        explicit_packet_id = patch.get("packet_id")
+        raw_packet_id = explicit_packet_id or patch.get("canonical_region_id")
+        region = None
         if raw_packet_id is None:
-            return {"accepted": False, "reason": "patch_missing_packet_or_canonical_region", "patch_index": patch_index}
-        packet_id_text = str(raw_packet_id)
+            inferred_header_region = find_unique_header_region_by_region_id(editable_lookup, region_id)
+            if inferred_header_region is None:
+                return {"accepted": False, "reason": "patch_missing_packet_or_canonical_region", "patch_index": patch_index}
+            packet_id_text, region = inferred_header_region
+            patch["packet_id"] = packet_id_text
+        else:
+            packet_id_text = str(raw_packet_id)
+            if explicit_packet_id is None and packet_id_text not in editable_packet_ids:
+                inferred_header_region = find_unique_header_region_by_region_id(editable_lookup, region_id)
+                if inferred_header_region is not None:
+                    packet_id_text, region = inferred_header_region
+                    patch["packet_id"] = packet_id_text
+                    patch.pop("canonical_region_id", None)
         if packet_id_text not in editable_packet_ids:
             return {
                 "accepted": False,
@@ -775,7 +950,8 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "packet_id": packet_id_text,
             }
 
-        region = editable_lookup.get((packet_id_text, region_id))
+        if region is None:
+            region = editable_lookup.get((packet_id_text, region_id))
         if region is None:
             return {
                 "accepted": False,
@@ -827,6 +1003,13 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
 
         expected_region_type = region.get("region_type")
         actual_region_type = get_field_with_aliases(patch, "region_type")
+        if (
+            region_identity_type == "physical_header_region"
+            and actual_region_type == region.get("field")
+            and expected_region_type == "header_field"
+        ):
+            patch["region_type"] = "header_field"
+            actual_region_type = "header_field"
         if actual_region_type != expected_region_type:
             return {
                 "accepted": False,
@@ -1216,6 +1399,7 @@ def run_single_prompt(
     return metadata
 
 
+#This function builds reusable output paths and prompt identity fields for one generated response.
 def build_prompt_output_context(
     *,
     prompt_package: dict[str, Any],
@@ -1237,6 +1421,7 @@ def build_prompt_output_context(
     }
 
 
+#This function parses, validates, and writes outputs for one generated batch response.
 def write_generated_prompt_outputs(
     *,
     prompt_package: dict[str, Any],
@@ -1343,6 +1528,7 @@ def write_generated_prompt_outputs(
     return metadata
 
 
+#This function sends one batch of prompt messages to the loaded model backend.
 def run_prompt_generation_batch(
     *,
     llm: Any,
@@ -1439,6 +1625,7 @@ def run_model_batch(
     pending_batch: list[dict[str, Any]] = []
     generation_batch_index = 0
 
+    #This function updates per-model status counters from one prompt metadata record.
     def record_metadata(metadata: dict[str, Any]) -> None:
         nonlocal accepted_count
         nonlocal failed_count
@@ -1450,6 +1637,7 @@ def run_model_batch(
         else:
             failed_count += 1
 
+    #This function sends and records the currently accumulated generation batch.
     def flush_pending_batch(prompt_index: int) -> None:
         nonlocal generation_batch_index
         if not pending_batch:

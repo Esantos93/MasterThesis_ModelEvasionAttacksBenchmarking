@@ -24,7 +24,16 @@ VLLM_MAX_MODEL_LEN: int | None = None
 VLLM_TRUST_REMOTE_CODE: bool = False
 
 
+#This function checks whether a local directory looks like a vLLM-loadable model directory.
+def is_local_vllm_model_dir(path: Path) -> bool:
+    return path.is_dir() and not path.name.startswith(".") and (
+        (path / "config.json").is_file() or (path / "params.json").is_file()
+    )
+
+
+#This class adapts vLLM's chat API to the Step 17 llama-cpp-style interface.
 class VllmChatCompletionAdapter:
+    #This method loads one Hugging Face/vLLM model with the configured runtime options.
     def __init__(self, model_id: str, max_model_len: int | None) -> None:
         from vllm import LLM
 
@@ -41,11 +50,13 @@ class VllmChatCompletionAdapter:
         self.model_id = model_id
         self.llm = LLM(**kwargs)
 
+    #This method exposes tokenization in the shape expected by the shared Step 17 code.
     def tokenize(self, text: bytes | str, add_bos: bool = False) -> list[int]:
         tokenizer = self.llm.get_tokenizer()
         decoded_text = text.decode("utf-8") if isinstance(text, bytes) else text
         return tokenizer.encode(decoded_text, add_special_tokens=add_bos)
 
+    #This method runs one chat completion and returns a llama-cpp-compatible response object.
     def create_chat_completion(
         self,
         *,
@@ -68,6 +79,7 @@ class VllmChatCompletionAdapter:
             return {"choices": [{"message": {"content": text}}]}
         return iter([{"choices": [{"delta": {"content": text}}]}])
 
+    #This method runs a batch of chat completions with per-prompt generation parameters.
     def create_chat_completions_batch(
         self,
         *,
@@ -92,6 +104,7 @@ class VllmChatCompletionAdapter:
         return [output.outputs[0].text if output.outputs else "" for output in outputs]
 
 
+#This function selects vLLM model paths or Hugging Face model ids for the current run.
 def collect_vllm_model_paths(
     *,
     model_dir: Path,
@@ -105,7 +118,7 @@ def collect_vllm_model_paths(
     else:
         if not model_dir.exists():
             raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
-        selected = sorted(path for path in model_dir.iterdir() if path.is_dir())
+        selected = sorted(path for path in model_dir.iterdir() if is_local_vllm_model_dir(path))
 
     if model_filters:
         lowered_filters = [model_filter.lower() for model_filter in model_filters]
@@ -119,11 +132,13 @@ def collect_vllm_model_paths(
     return selected
 
 
+#This function loads one selected vLLM model through the adapter.
 def load_vllm_model(model_path: Path, generation_params: dict[str, Any]) -> VllmChatCompletionAdapter:
     max_model_len = VLLM_MAX_MODEL_LEN or int(generation_params["n_ctx"])
     return VllmChatCompletionAdapter(str(model_path), max_model_len=max_model_len)
 
 
+#This function runs a small diagnostic proving vLLM accepts per-request SamplingParams.
 def run_vllm_per_request_sampling_probe(args: argparse.Namespace) -> None:
     from vllm import SamplingParams
 
@@ -164,6 +179,7 @@ def run_vllm_per_request_sampling_probe(args: argparse.Namespace) -> None:
     print("VLLM_PER_REQUEST_SAMPLING_PROBE_OK")
 
 
+#This function parses vLLM-specific arguments and then delegates shared Step 17 arguments to the base parser.
 def parse_google_cloud_args() -> argparse.Namespace:
     extra_parser = argparse.ArgumentParser(add_help=False)
     extra_parser.add_argument("--hf-model-id", action="append", help="Hugging Face model id to load with vLLM. Can be repeated.")
@@ -191,6 +207,7 @@ def parse_google_cloud_args() -> argparse.Namespace:
     return args
 
 
+#This is the command-line entry point for the vLLM-backed Step 17 runner.
 def main() -> None:
     global VLLM_MODEL_IDS
     global VLLM_DTYPE
