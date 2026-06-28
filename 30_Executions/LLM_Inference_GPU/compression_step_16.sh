@@ -42,6 +42,7 @@ case "${prompt_run_dir}/" in
 esac
 
 relative_prompt_dir="${prompt_run_dir#"${experiment_output_dir}/"}"
+export_prompt_dir="$(dirname "${relative_prompt_dir}")"
 mkdir -p "$(dirname "${archive_path}")"
 temporary_archive="${archive_path}.tmp.$$"
 trap 'rm -f "${temporary_archive}"' EXIT
@@ -49,6 +50,7 @@ trap 'rm -f "${temporary_archive}"' EXIT
 echo "Compressing Step 16 output: ${prompt_run_dir}"
 tar -czf "${temporary_archive}" \
   -C "${experiment_output_dir}" \
+  --transform="s#^${relative_prompt_dir}#${export_prompt_dir}#" \
   "${relative_prompt_dir}"
 gzip -t "${temporary_archive}"
 mv -f "${temporary_archive}" "${archive_path}"

@@ -142,6 +142,15 @@ Only a step that actually ran is compressed. Set `COMPRESS_STEP16=0` or
 `COMPRESS_STEP17=0` to disable either archive. `STEP16_ARCHIVE` and
 `STEP17_ARCHIVE` override the archive paths.
 
+The exported archives intentionally omit the final internal `run_id` directory
+because the archive name or extraction directory already identifies the run.
+After extraction, the relevant contents are therefore rooted at:
+
+```text
+06_prompts/<grouping_label>/
+07_llm_outputs/<grouping_label>/<model_name>/
+```
+
 At exit, both successful and failed runs record their finish time and complete
 launcher duration. The terminal log ends with `Run duration`, while
 `status.txt` includes `finished_at`, `duration_seconds`, and `duration_human`.

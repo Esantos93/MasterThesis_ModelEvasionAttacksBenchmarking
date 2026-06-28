@@ -40,8 +40,12 @@ if [[ ${#model_run_dirs[@]} -eq 0 ]]; then
 fi
 
 relative_run_dirs=()
+tar_transform_args=()
 for model_run_dir in "${model_run_dirs[@]}"; do
-  relative_run_dirs+=("${model_run_dir#"${experiment_output_dir}/"}")
+  relative_run_dir="${model_run_dir#"${experiment_output_dir}/"}"
+  relative_model_dir="$(dirname "${relative_run_dir}")"
+  relative_run_dirs+=("${relative_run_dir}")
+  tar_transform_args+=("--transform=s#^${relative_run_dir}#${relative_model_dir}#")
 done
 
 mkdir -p "$(dirname "${archive_path}")"
@@ -51,6 +55,7 @@ trap 'rm -f "${temporary_archive}"' EXIT
 echo "Compressing ${#relative_run_dirs[@]} Step 17 model output directorie(s) for run ${run_id}."
 tar -czf "${temporary_archive}" \
   -C "${experiment_output_dir}" \
+  "${tar_transform_args[@]}" \
   "${relative_run_dirs[@]}"
 gzip -t "${temporary_archive}"
 mv -f "${temporary_archive}" "${archive_path}"
