@@ -23,15 +23,14 @@ SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
 SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 
-#This is the historical compact patch policy name and the active compact patch policy name.
-COMPACT_PATCH_PROMPT_VERSION_V1 = "compact_patch_prompting_v1"
+#This is the active compact patch policy name.
 COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v2"
 
 #This is the fixed RISE cloud root agreed for the LLM-side pipeline steps.
 DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 
 #This list records the prompt versions that the current Step 16 implementation knows how to build.
-SUPPORTED_PROMPT_VERSIONS = [COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION]
+SUPPORTED_PROMPT_VERSIONS = [COMPACT_PATCH_PROMPT_VERSION]
 
 DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_minimal_canonical_patch_v1"
 DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "compact_patch_baseline_v1"
@@ -39,8 +38,6 @@ DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "compact_patch_baseline_v1"
 PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
     "baseline_minimal_canonical_patch_v1": {
         "profile": "baseline_minimal_canonical_patch_v1",
-        "region_container_name": "canonical_regions",
-        "physical_packet_container_name": "physical_packets",
         "top_level_fields": [
             "schema_version",
             "experiment_id",
@@ -51,29 +48,16 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
             "editable_canonical_region_ids",
             "context_canonical_region_ids",
         ],
+        "editable_header_table_name": "editable_headers",
+        "editable_header_columns_name": "editable_headers_columns",
+        "editable_header_columns": ["packet_id", "region_id", "field", "current_value", "min", "max"],
+        "region_container_name": "canonical_regions",
         "canonical_region_fields": [
             "canonical_region_id",
             "role",
             "editable",
             "payload_view",
             "payload_length_bytes",
-        ],
-        "physical_packet_fields": [
-            "packet_id",
-            "reduced_packet_index",
-            "tcp_connection_id",
-            "tcp_stream_id",
-            "canonical_region_ids",
-        ],
-        "header_region_fields": [
-            "packet_id",
-            "header_region_id",
-            "field",
-            "classification",
-            "editable",
-            "allowed_operations",
-            "constraints",
-            "current_value",
         ],
         "editable_region_fields": [
             "canonical_region_id",
@@ -95,21 +79,21 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
         "Return valid JSON only. Do not include Markdown, comments, or explanations.",
         "Do not return full packets. Return only patches/deltas.",
         "Do not modify context regions or any field outside an editable region.",
-        "Payload edits target canonical TCP regions, identified by canonical_region_id.",
-        "Header edits target physical packets, identified by packet_id and header_region_id.",
-        "For every patch, operation must be copied exactly from that region's allowed_operations.",
-        "Each patch object modifies exactly one editable region. Use multiple patch objects to modify multiple regions.",
         "If no change is needed, return patches as an empty list.",
+        (
+            "Header edits target physical packets listed in editable_headers. "
+            "For header edits, use header_edits only. "
+            "Each header_edits item must be exactly [packet_id, field, replacement_uint], using the first and third "
+            "columns of an editable_headers row. Do not copy complete editable_headers rows into header_edits. "
+            "Do not include in header_edits unchanged headers."
+        ),
+        "Payload edits target canonical TCP regions, identified by canonical_region_id.",
+        "For every payload patch, operation must be copied exactly from that region's allowed_operations.",
+        "Each payload patch object modifies exactly one editable region. Use multiple patch objects to modify multiple payload regions.",
         "replace_region patches require the fields: canonical_region_id, region_id, region_type, operation, replacement_format, replacement.",
         (
             "replace_byte_range patches require the fields: canonical_region_id, region_id, "
             "region_type, operation, offset_from_region_start_bytes, length_bytes, replacement_format, replacement."
-        ),
-        (
-            "replace_uint header patches require the fields: packet_id, region_id, region_type, "
-            "operation, replacement_format, replacement. Use region_id equal to header_region_id, "
-            "region_type equal to header_field, replacement_format equal to uint, and replacement as an integer. "
-            "Do not use canonical_region_id for header patches."
         ),
         (
             "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 "
@@ -118,6 +102,28 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
         ),
     ],
 }
+
+HEADER_ONLY_OUTPUT_INSTRUCTION = (
+    "This prompt has editable headers only. Return header edits only in header_edits. "
+    "Do not include patches in the output JSON."
+)
+PAYLOAD_ONLY_OUTPUT_INSTRUCTION = (
+    "This prompt has editable payload only. Return payload edits only in patches. "
+    "Do not include header_edits in the output JSON."
+)
+MIXED_OUTPUT_INSTRUCTION = (
+    "This prompt has editable payload and editable headers. Return payload edits only in patches, "
+    "and return header edits only in header_edits. Never duplicate header edits inside patches."
+)
+HEADER_INSTRUCTION_PREFIXES = ("Header edits",)
+PAYLOAD_INSTRUCTION_PREFIXES = (
+    "Payload edits",
+    "For every payload patch",
+    "Each payload patch object",
+    "replace_region patches",
+    "replace_byte_range patches",
+    "For replace_byte_range",
+)
 
 
 #This function reads a JSON file and returns the parsed Python object.
@@ -172,6 +178,29 @@ def load_prompt_instructions_profile(config: dict[str, Any]) -> tuple[str, list[
         )
     lines = list(PROMPT_INSTRUCTIONS_PROFILES[profile_name])
     return profile_name, lines
+
+
+#This function selects only the instruction lines that apply to the current prompt class.
+def select_prompt_instructions(
+    *,
+    instruction_lines: list[str],
+    has_editable_headers: bool,
+    has_editable_payload: bool,
+) -> list[str]:
+    selected_lines: list[str] = []
+    if has_editable_headers and has_editable_payload:
+        selected_lines.append(MIXED_OUTPUT_INSTRUCTION)
+    elif has_editable_headers:
+        selected_lines.append(HEADER_ONLY_OUTPUT_INSTRUCTION)
+    elif has_editable_payload:
+        selected_lines.append(PAYLOAD_ONLY_OUTPUT_INSTRUCTION)
+    for line in instruction_lines:
+        if line.startswith(HEADER_INSTRUCTION_PREFIXES) and not has_editable_headers:
+            continue
+        if line.startswith(PAYLOAD_INSTRUCTION_PREFIXES) and not has_editable_payload:
+            continue
+        selected_lines.append(line)
+    return selected_lines
 
 
 #This function validates the basic shape of the Step 15 compact modification-units manifest.
@@ -408,6 +437,7 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#This function copies selected keys from a source dictionary into a smaller dictionary.
 def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict[str, Any]:
     copied: dict[str, Any] = {}
     for field_name in field_names:
@@ -418,6 +448,7 @@ def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict
     return copied
 
 
+#This function builds the model-visible canonical payload region records.
 def build_projected_canonical_regions(
     *,
     prompt_unit: dict[str, Any],
@@ -452,6 +483,7 @@ def build_projected_canonical_regions(
     return projected_regions
 
 
+#This function builds the verbose physical packet projection used by legacy/richer prompt profiles.
 def build_projected_physical_packets(
     *,
     prompt_unit: dict[str, Any],
@@ -466,6 +498,7 @@ def build_projected_physical_packets(
     for physical_packet in prompt_unit.get("physical_packets", []):
         if not isinstance(physical_packet, dict):
             continue
+        physical_packet_id = physical_packet.get("packet_id")
         header_regions = physical_packet.get("header_field_classifications", [])
         if not isinstance(header_regions, list):
             continue
@@ -474,6 +507,8 @@ def build_projected_physical_packets(
             if not isinstance(header_region, dict) or not header_region.get("editable"):
                 continue
             projected_region = copy_selected_fields(header_region, header_region_fields)
+            if physical_packet_id is not None:
+                projected_region.setdefault("packet_id", physical_packet_id)
             if "header_region_id" in projected_region:
                 projected_region.setdefault("region_id", projected_region["header_region_id"])
             projected_region.setdefault("region_type", "header_field")
@@ -485,6 +520,39 @@ def build_projected_physical_packets(
         projected_packet["editable_header_regions"] = projected_header_regions
         projected_packets.append(projected_packet)
     return projected_packets
+
+
+#This function builds the compact editable-header table shown to the model.
+def build_projected_editable_header_table(
+    *,
+    prompt_unit: dict[str, Any],
+    columns: list[str],
+) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for physical_packet in prompt_unit.get("physical_packets", []):
+        if not isinstance(physical_packet, dict):
+            continue
+        physical_packet_id = physical_packet.get("packet_id")
+        header_regions = physical_packet.get("header_field_classifications", [])
+        if not isinstance(header_regions, list):
+            continue
+        for header_region in header_regions:
+            if not isinstance(header_region, dict) or not header_region.get("editable"):
+                continue
+            constraints = header_region.get("constraints", {})
+            if not isinstance(constraints, dict):
+                constraints = {}
+            region_id = header_region.get("header_region_id") or header_region.get("region_id")
+            row_values = {
+                "packet_id": physical_packet_id,
+                "region_id": region_id,
+                "field": header_region.get("field"),
+                "current_value": header_region.get("current_value"),
+                "min": constraints.get("min"),
+                "max": constraints.get("max"),
+            }
+            rows.append([row_values.get(column) for column in columns])
+    return rows
 
 
 #This function builds the compact object embedded in the patch-based prompt.
@@ -500,19 +568,47 @@ def build_compact_prompt_input(
     region_container_name = structure.get("region_container_name", "canonical_regions")
     if not isinstance(region_container_name, str) or not region_container_name:
         raise ValueError("Prompt input structure region_container_name must be a non-empty string.")
-    prompt_input[region_container_name] = build_projected_canonical_regions(
+    projected_canonical_regions = build_projected_canonical_regions(
         prompt_unit=prompt_unit,
         structure=structure,
     )
-    physical_packet_container_name = structure.get("physical_packet_container_name", "physical_packets")
-    if not isinstance(physical_packet_container_name, str) or not physical_packet_container_name:
-        raise ValueError("Prompt input structure physical_packet_container_name must be a non-empty string.")
-    projected_physical_packets = build_projected_physical_packets(
-        prompt_unit=prompt_unit,
-        structure=structure,
-    )
-    if projected_physical_packets:
-        prompt_input[physical_packet_container_name] = projected_physical_packets
+    header_table_name = structure.get("editable_header_table_name")
+    header_columns_name = structure.get("editable_header_columns_name", "editable_headers_columns")
+    header_columns = structure.get("editable_header_columns", [])
+    if header_table_name is not None:
+        if not isinstance(header_table_name, str) or not header_table_name:
+            raise ValueError("Prompt input structure editable_header_table_name must be a non-empty string.")
+        if not isinstance(header_columns_name, str) or not header_columns_name:
+            raise ValueError("Prompt input structure editable_header_columns_name must be a non-empty string.")
+        if not isinstance(header_columns, list) or not all(isinstance(column, str) for column in header_columns):
+            raise ValueError("Prompt input structure editable_header_columns must be a list of strings.")
+        editable_header_rows = build_projected_editable_header_table(
+            prompt_unit=prompt_unit,
+            columns=header_columns,
+        )
+        if editable_header_rows:
+            has_editable_canonical_region = any(
+                isinstance(region, dict) and region.get("editable")
+                for region in projected_canonical_regions
+            )
+            if not has_editable_canonical_region:
+                projected_canonical_regions = []
+                prompt_input.pop("canonical_region_ids", None)
+                prompt_input.pop("context_canonical_region_ids", None)
+                prompt_input.pop("editable_canonical_region_ids", None)
+            prompt_input[header_columns_name] = header_columns
+            prompt_input[header_table_name] = editable_header_rows
+    else:
+        physical_packet_container_name = structure.get("physical_packet_container_name", "physical_packets")
+        if not isinstance(physical_packet_container_name, str) or not physical_packet_container_name:
+            raise ValueError("Prompt input structure physical_packet_container_name must be a non-empty string.")
+        projected_physical_packets = build_projected_physical_packets(
+            prompt_unit=prompt_unit,
+            structure=structure,
+        )
+        if projected_physical_packets:
+            prompt_input[physical_packet_container_name] = projected_physical_packets
+    prompt_input[region_container_name] = projected_canonical_regions
     return prompt_input
 
 
@@ -536,19 +632,30 @@ def build_compact_patch_messages(
         prompt_unit=prompt_unit,
         structure=prompt_input_structure,
     )
+    has_editable_headers = bool(json_prompt_input.get("editable_headers"))
+    has_editable_payload = bool(json_prompt_input.get("canonical_regions"))
+    active_instruction_lines = select_prompt_instructions(
+        instruction_lines=instructions_profile_lines,
+        has_editable_headers=has_editable_headers,
+        has_editable_payload=has_editable_payload,
+    )
     json_prompt_input_text = json.dumps(json_prompt_input, indent=2, sort_keys=True)
     parent_group_id = prompt_unit["parent_group_id"]
     prompt_unit_id = prompt_unit["prompt_unit_id"]
-    output_skeleton = (
-        "{\n"
-        f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",\n'
-        f'  "parent_group_id": "{parent_group_id}",\n'
-        f'  "prompt_unit_id": "{prompt_unit_id}",\n'
-        '  "patches": []\n'
-        "}"
-    )
+    output_skeleton_lines = [
+        "{",
+        f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",',
+        f'  "parent_group_id": "{parent_group_id}",',
+        f'  "prompt_unit_id": "{prompt_unit_id}",',
+    ]
+    if has_editable_payload:
+        output_skeleton_lines.append('  "patches": []' + ("," if has_editable_headers else ""))
+    if has_editable_headers:
+        output_skeleton_lines.append('  "header_edits": []')
+    output_skeleton_lines.append("}")
+    output_skeleton = "\n".join(output_skeleton_lines)
     content = (
-        "\n".join(instructions_profile_lines)
+        "\n".join(active_instruction_lines)
         + "\n"
         "Return this JSON object:\n"
         f"{output_skeleton}\n"
@@ -571,7 +678,7 @@ def build_messages_by_prompt_version(
     prompt_version: str,
     prompt_unit: dict[str, Any],
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    if prompt_version in {COMPACT_PATCH_PROMPT_VERSION_V1, COMPACT_PATCH_PROMPT_VERSION}:
+    if prompt_version == COMPACT_PATCH_PROMPT_VERSION:
         return build_compact_patch_messages(config=config, prompt_unit=prompt_unit)
     raise ValueError(
         f"The selected prompt version ({prompt_version!r}) is not supported.\n"
@@ -589,12 +696,25 @@ def build_prompt_unit(
     prompt_unit: dict[str, Any],
 ) -> dict[str, Any]:
     editable_region_index = build_editable_region_index(prompt_unit)
+    has_editable_headers = any(
+        isinstance(region, dict) and region.get("identity_type") == "physical_header_region"
+        for region in editable_region_index["regions"]
+    )
+    has_editable_payload = any(
+        isinstance(region, dict) and region.get("identity_type") != "physical_header_region"
+        for region in editable_region_index["regions"]
+    )
     messages, prompt_template_metadata = build_messages_by_prompt_version(
         config=config,
         prompt_version=prompt_version,
         prompt_unit=prompt_unit,
     )
     prompt_contract = "patch_output"
+    required_top_level_keys = ["schema_version", "parent_group_id", "prompt_unit_id"]
+    if has_editable_payload:
+        required_top_level_keys.append("patches")
+    if has_editable_headers:
+        required_top_level_keys.append("header_edits")
 
     return {
         "schema_version": PROMPT_UNIT_SCHEMA_VERSION,
@@ -612,8 +732,14 @@ def build_prompt_unit(
         "expected_output_format": {
             "schema_version": PATCH_OUTPUT_SCHEMA_VERSION if prompt_contract == "patch_output" else None,
             "root_type": "object",
-            "required_top_level_keys": ["schema_version", "parent_group_id", "prompt_unit_id", "patches"],
+            "required_top_level_keys": required_top_level_keys,
+            "optional_top_level_keys": ["header_edits"] if has_editable_headers else [],
             "patches_type": "list",
+            "header_edits_type": (
+                "list of [packet_id, field, replacement_uint] entries for compact header updates"
+                if has_editable_headers
+                else None
+            ),
             "supported_operations": ["replace_region", "replace_byte_range", "replace_uint"],
             "replace_byte_range_required_keys": [
                 "canonical_region_id",
@@ -638,7 +764,8 @@ def build_prompt_unit(
                 "replacement",
             ],
             "replace_uint_rule": (
-                "For header_field regions, return replacement_format=uint and an integer replacement within the region constraints."
+                "For header_field regions, use packet_id as the target identity, do not include canonical_region_id, "
+                "return replacement_format=uint, and return an integer replacement within the region constraints."
             ),
             "replacement_formats": ["text", "hex", "uint"],
             "format_rule": "Return valid JSON only, with no Markdown and no explanations.",
