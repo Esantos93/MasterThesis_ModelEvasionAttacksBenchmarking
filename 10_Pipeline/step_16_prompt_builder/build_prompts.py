@@ -80,26 +80,28 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
         "Do not return full packets. Return only patches/deltas.",
         "Do not modify context regions or any field outside an editable region.",
         "If no change is needed, return patches as an empty list.",
-        #### ABOUT HEADER EDITS
-        ("Header edits target physical packets listed in editable_headers. "
-        "For header edits, use header_edits only. "
-        "Each header_edits item must be exactly [packet_id, field, replacement_uint], using the first and third "
-        "columns of an editable_headers row. Do not copy complete editable_headers rows into header_edits. "
-        "replacement_uint must be between the min and max columns for that same editable_headers row; "
-        "for ipv4.ttl, replacement_uint must be at least 1. "
-        "Do not include in header_edits unchanged headers."), 
-        #### ABOUT PAYLOAD PATCHES
-        ("Payload edits target canonical TCP regions, identified by canonical_region_id."
-        "For every payload patch, operation must be copied exactly from that region's allowed_operations; do not invent fallback operations."
-        "Each payload patch object modifies exactly one editable region. Use multiple patch objects to modify multiple payload regions."
-        "For each payload region, choose one operation only. Do not emit both replace_region and replace_byte_range for the same region."
-        "replace_region patches require the fields: canonical_region_id, region_id, region_type, operation, replacement_format, replacement."
-        "replace_byte_range patches require the fields: canonical_region_id, region_id, region_type, operation, offset_from_region_start_bytes, length_bytes, replacement_format, replacement."
-        "Prefer one replace_byte_range patch for a contiguous byte range instead of many one-byte patches."
-        "For replacement_format=hex, replacement must contain exactly two lowercase hex characters per replacement byte, for example 00 not 0."
-        "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 "
-        "for the first byte of that region, not start_offset_bytes from the original payload. "
-        "offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes."),
+        (
+            "Header edits target physical packets listed in editable_headers. "
+            "For header edits, use header_edits only. "
+            "Each header_edits item must be exactly [packet_id, field, replacement_uint], using the first and third "
+            "columns of an editable_headers row. Do not copy complete editable_headers rows into header_edits. "
+            "replacement_uint must be between the min and max columns for that same editable_headers row; "
+            "for ipv4.ttl, replacement_uint must be at least 1. "
+            "Do not include in header_edits unchanged headers."
+        ),
+        "Payload edits target canonical TCP regions, identified by canonical_region_id.",
+        "For every payload patch, operation must be copied exactly from that region's allowed_operations.",
+        "Each payload patch object modifies exactly one editable region. Use multiple patch objects to modify multiple payload regions.",
+        "replace_region patches require the fields: canonical_region_id, region_id, region_type, operation, replacement_format, replacement.",
+        (
+            "replace_byte_range patches require the fields: canonical_region_id, region_id, "
+            "region_type, operation, offset_from_region_start_bytes, length_bytes, replacement_format, replacement."
+        ),
+        (
+            "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 "
+            "for the first byte of that region, not start_offset_bytes from the original payload. "
+            "offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes."
+        ),
     ],
 }
 
