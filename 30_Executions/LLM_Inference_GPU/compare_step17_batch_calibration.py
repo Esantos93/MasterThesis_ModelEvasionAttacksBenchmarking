@@ -9,6 +9,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
+DEFAULT_FULL_PROMPT_COUNT = 96080
+
 
 def read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as input_file:
@@ -80,6 +82,8 @@ def build_row(summary_path: Path) -> dict[str, Any]:
         "failed": failed,
         "failure_json_decode": int(failure_reasons.get("JSONDecodeError", 0)),
         "failure_operation_not_allowed": int(failure_reasons.get("operation_not_allowed_for_region", 0)),
+        "failure_region_type_mismatch": int(failure_reasons.get("region_type_mismatch", 0)),
+        "failure_replacement_format_mismatch": int(failure_reasons.get("replacement_format_mismatch", 0)),
         "failure_range_exceeds_region": int(failure_reasons.get("replace_byte_range_exceeds_region", 0)),
         "failure_hex_invalid": int(failure_reasons.get("replacement_hex_invalid", 0)),
         "failure_non_editable_reference": int(failure_reasons.get("patch_references_non_editable_packet", 0)),
@@ -87,6 +91,11 @@ def build_row(summary_path: Path) -> dict[str, Any]:
         "acceptance_percent": 100.0 * accepted / attempted if attempted else None,
         "wall_clock_seconds": wall_clock,
         "attempted_prompts_per_second": attempted / wall_clock if attempted and wall_clock else None,
+        "projected_full_run_hours": (
+            DEFAULT_FULL_PROMPT_COUNT / (attempted / wall_clock) / 3600.0
+            if attempted and wall_clock
+            else None
+        ),
         "input_tokens_per_second": (
             float(aggregates["real_input_tokens"]["sum"]) / wall_clock
             if wall_clock
@@ -130,8 +139,8 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
     lines = [
         "# Step 17 Batch Calibration",
         "",
-        "| Rank | Batch | LLM attempted | Failed | Acceptance % | Wall-clock s | Prompts/s | Input tokens/s | Batch runtime median s | Batch runtime p95 s | GPU util avg % | Peak VRAM MiB |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Rank | Batch | LLM attempted | Failed | Acceptance % | Wall-clock s | Projected full-run h | Prompts/s | Input tokens/s | Batch runtime median s | Batch runtime p95 s | GPU util avg % | Peak VRAM MiB |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for rank, row in enumerate(ranked, start=1):
         lines.append(
@@ -144,6 +153,7 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
                     fmt(row["failed"], 0),
                     fmt(row["acceptance_percent"]),
                     fmt(row["wall_clock_seconds"]),
+                    fmt(row["projected_full_run_hours"]),
                     fmt(row["attempted_prompts_per_second"], 3),
                     fmt(row["input_tokens_per_second"]),
                     fmt(row["median_batch_runtime_seconds"]),
@@ -161,8 +171,8 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
             "",
             "## Failure Reasons",
             "",
-            "| Batch | JSON decode | Operation not allowed | Range exceeds region | Invalid hex | Non-editable reference | Parent group changed |",
-            "|---:|---:|---:|---:|---:|---:|---:|",
+            "| Batch | JSON decode | Operation not allowed | Region type mismatch | Format mismatch | Range exceeds region | Invalid hex | Non-editable reference | Parent group changed |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for row in sorted(rows, key=lambda item: item["batch_size"] or 0):
@@ -173,6 +183,8 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
                     fmt(row["batch_size"], 0),
                     fmt(row["failure_json_decode"], 0),
                     fmt(row["failure_operation_not_allowed"], 0),
+                    fmt(row["failure_region_type_mismatch"], 0),
+                    fmt(row["failure_replacement_format_mismatch"], 0),
                     fmt(row["failure_range_exceeds_region"], 0),
                     fmt(row["failure_hex_invalid"], 0),
                     fmt(row["failure_non_editable_reference"], 0),

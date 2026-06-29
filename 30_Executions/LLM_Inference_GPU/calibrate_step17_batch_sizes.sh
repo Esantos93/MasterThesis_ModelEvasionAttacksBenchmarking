@@ -17,6 +17,7 @@ COMPARATOR="${COMPARATOR:-${CLOUD_ROOT}/04_Steps/compare_step17_batch_calibratio
 SAMPLE_BUILDER="${SAMPLE_BUILDER:-${CLOUD_ROOT}/04_Steps/build_prompt_manifest_sample.py}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-12288}"
+RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN:-${VLLM_MAX_MODEL_LEN}}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
 current_monitor_pid=""
@@ -65,6 +66,8 @@ echo "Prompt limit: ${LIMIT_PROMPTS_S17}"
 echo "Sample method: ${SAMPLE_METHOD}"
 echo "Batch sizes: ${BATCH_SIZES}"
 echo "Model: ${MODEL_PATH}"
+echo "Runtime max model len: ${RUNTIME_MAX_MODEL_LEN}"
+echo "vLLM max model len: ${VLLM_MAX_MODEL_LEN}"
 
 for batch_size in ${BATCH_SIZES}; do
   if ! [[ "${batch_size}" =~ ^[1-9][0-9]*$ ]]; then
@@ -105,6 +108,7 @@ for batch_size in ${BATCH_SIZES}; do
   VLLM_DTYPE="${VLLM_DTYPE}" \
   VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION}" \
   VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN}" \
+  RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN}" \
   bash "${RUNNER}"
   run_exit_code=$?
   set -e
