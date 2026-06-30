@@ -16,12 +16,27 @@ from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 
 
-#These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contract.
+#These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contracts.
 PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
 PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
-SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
-SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
+SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V1 = "compact_modification_unit_v1"
+SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2 = "compact_modification_unit_v2"
+SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V1 = "compact_modification_units_manifest_v1"
+SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2 = "compact_modification_units_manifest_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
+
+SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS = {
+    SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V1,
+    SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2,
+}
+SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS = {
+    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V1,
+    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2,
+}
+SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION = {
+    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V1: "compact_modification_units_manifest_v1.json",
+    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2: "compact_modification_units_manifest_v2.json",
+}
 
 #This is the active compact patch policy name.
 COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v2"
@@ -213,11 +228,19 @@ def validate_modification_units_manifest(manifest: Any, manifest_path: Path) -> 
     if not isinstance(metadata, dict):
         raise ValueError(f"Compact modification-units manifest must contain a metadata object: {manifest_path}")
     schema_version = metadata.get("schema_version")
-    if schema_version != SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS:
         raise ValueError(
-            f"Step 16 compact patch prompting requires {SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION} from Step 15. "
-            f"Found schema_version={schema_version!r} in {manifest_path}"
+            "Step 16 compact patch prompting requires one of "
+            f"{sorted(SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS)} from Step 15. "
+            f"Found schema_version={schema_version!r} in {manifest_path}."
         )
+    if schema_version == SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2:
+        strategy = metadata.get("strategy") or metadata.get("modification_strategy")
+        if strategy != "header_only_strategy_v1":
+            raise ValueError(
+                "Step 16 supports compact_modification_units_manifest_v2 only for "
+                f"header_only_strategy_v1. Found strategy={strategy!r} in {manifest_path}."
+            )
     modification_units = manifest.get("compact_modification_units")
     if not isinstance(modification_units, list):
         raise ValueError(f"Manifest must contain a compact_modification_units list: {manifest_path}")
@@ -229,10 +252,20 @@ def validate_modification_units_manifest(manifest: Any, manifest_path: Path) -> 
 def validate_modification_unit(modification_unit: Any, modification_unit_path: Path) -> dict[str, Any]:
     if not isinstance(modification_unit, dict):
         raise ValueError(f"Modification unit root must be an object: {modification_unit_path}")
-    if modification_unit.get("schema_version") != SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
+    schema_version = modification_unit.get("schema_version")
+    if schema_version not in SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS:
         raise ValueError(
-            f"Modification unit must use schema_version={SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION}: {modification_unit_path}"
+            "Modification unit must use one of "
+            f"{sorted(SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS)}: {modification_unit_path}. "
+            f"Found schema_version={schema_version!r}."
         )
+    if schema_version == SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2:
+        strategy = modification_unit.get("strategy") or modification_unit.get("modification_strategy")
+        if strategy != "header_only_strategy_v1":
+            raise ValueError(
+                "Step 16 supports compact_modification_unit_v2 only for "
+                f"header_only_strategy_v1. Found strategy={strategy!r}: {modification_unit_path}."
+            )
     packets = modification_unit.get("packets")
     if not isinstance(packets, list):
         raise ValueError(f"Modification unit must contain a packets list: {modification_unit_path}")
@@ -241,6 +274,34 @@ def validate_modification_unit(modification_unit: Any, modification_unit_path: P
     if not isinstance(modification_unit.get("modification_unit_id"), str):
         raise ValueError(f"Modification unit must contain modification_unit_id: {modification_unit_path}")
     return modification_unit
+
+
+#This function selects the Step 15 manifest to consume.
+#V2 is preferred for Baseline-004, but directories containing both schemas must be explicit.
+def resolve_source_manifest_path(input_group_dir: Path, source_manifest: str | Path | None) -> Path:
+    if source_manifest is not None:
+        manifest_path = Path(source_manifest).expanduser()
+        if not manifest_path.is_absolute():
+            manifest_path = input_group_dir / manifest_path
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Explicit Step 15 source manifest does not exist: {manifest_path}")
+        return manifest_path
+
+    existing_paths = [
+        input_group_dir / filename
+        for filename in SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION.values()
+        if (input_group_dir / filename).exists()
+    ]
+    if not existing_paths:
+        expected = ", ".join(SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION.values())
+        raise FileNotFoundError(f"No supported Step 15 source manifest found in {input_group_dir}. Expected one of: {expected}")
+    if len(existing_paths) > 1:
+        joined = ", ".join(str(path) for path in existing_paths)
+        raise ValueError(
+            "Multiple supported Step 15 source manifests found. Use --source-manifest to select one explicitly: "
+            f"{joined}"
+        )
+    return existing_paths[0]
 
 
 #This function selects modification units either by prefix limit or by explicit modification_unit_id values.
@@ -277,7 +338,7 @@ def select_modification_unit_entries(
         joined_ids = ", ".join(missing_ids)
         raise ValueError(
             "Requested modification_unit_id values were not found in "
-            f"compact_modification_units_manifest_v1.json: {joined_ids}"
+            f"the selected compact modification-units manifest: {joined_ids}"
         )
     return selected_entries
 
@@ -735,7 +796,7 @@ def build_prompt_unit(
             "schema_version": PATCH_OUTPUT_SCHEMA_VERSION if prompt_contract == "patch_output" else None,
             "root_type": "object",
             "required_top_level_keys": required_top_level_keys,
-            "optional_top_level_keys": ["header_edits"] if has_editable_headers else [],
+            "optional_top_level_keys": [],
             "patches_type": "list",
             "header_edits_type": (
                 "list of [packet_id, field, replacement_uint] entries for compact header updates"
@@ -862,6 +923,7 @@ def run_prompt_builder(
     config_path: str | Path,
     input_dir: str | Path | None,
     output_dir: str | Path | None,
+    source_manifest: str | Path | None,
     cloud_root: str | Path,
     limit_prompts_s16: int | None,
     modification_unit_ids: list[str] | None,
@@ -883,7 +945,7 @@ def run_prompt_builder(
     paths = default_cloud_paths(config, cloud_root)
     input_group_dir = Path(input_dir).expanduser() if input_dir else paths["input_dir"]
     output_prompt_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
-    manifest_path = input_group_dir / "compact_modification_units_manifest_v1.json"
+    manifest_path = resolve_source_manifest_path(input_group_dir, source_manifest)
 
     modification_units_manifest = validate_modification_units_manifest(read_json(manifest_path), manifest_path)
     modification_unit_entries = modification_units_manifest["compact_modification_units"]
@@ -956,9 +1018,23 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
     parser.add_argument(
         "--input-dir",
-        help="Directory containing Step 15 compact modification units and compact_modification_units_manifest_v1.json.",
+        "--input-group-dir",
+        dest="input_dir",
+        help="Directory containing Step 15 compact modification units and a supported compact_modification_units manifest.",
     )
-    parser.add_argument("--output-dir", help="Directory where Step 16 prompt files will be written.")
+    parser.add_argument(
+        "--output-dir",
+        "--output-prompt-dir",
+        dest="output_dir",
+        help="Directory where Step 16 prompt files will be written.",
+    )
+    parser.add_argument(
+        "--source-manifest",
+        help=(
+            "Explicit Step 15 compact modification-units manifest to consume. "
+            "Use this when both V1 and V2 manifests are present in the input directory."
+        ),
+    )
     parser.add_argument(
         "--cloud-root",
         default=str(DEFAULT_CLOUD_ROOT),
@@ -983,6 +1059,7 @@ def main() -> None:
         config_path=args.config,
         input_dir=args.input_dir,
         output_dir=args.output_dir,
+        source_manifest=args.source_manifest,
         cloud_root=args.cloud_root,
         limit_prompts_s16=args.limit_prompts_s16,
         modification_unit_ids=args.modification_unit_id,
