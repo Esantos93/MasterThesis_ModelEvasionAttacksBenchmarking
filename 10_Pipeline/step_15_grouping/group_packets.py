@@ -23,17 +23,21 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 
 #These are the Step 15 artifact schema names produced by the current code.
-MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
-MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
+HYBRID_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
+HYBRID_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
+HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
+HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v2"
 HEADERS_FULL_CLASSIFICATION_MANIFEST_SCHEMA_VERSION = "headers_full_classification_manifest_v1"
 HEADERS_FULL_CLASSIFICATION_RECORD_SCHEMA_VERSION = "headers_full_classification_record_v1"
-PAYLOAD_STRATEGY_VERSION = "hybrid_physical_header_canonical_payload_strategy_v1"
+HYBRID_MODIFICATION_STRATEGY = "hybrid_physical_header_canonical_payload_strategy_v1"
+HEADER_ONLY_MODIFICATION_STRATEGY = "header_only_strategy_v1"
 SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
 GROUPING_UNIT = "physical_packet"
 
 #This list records the grouping policies that the current draft knows how to execute.
 #When a future grouping policy is implemented, it should be added here and in group_records_by_policy().
 SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_based"]
+SUPPORTED_MODIFICATION_STRATEGIES = [HYBRID_MODIFICATION_STRATEGY, HEADER_ONLY_MODIFICATION_STRATEGY]
 
 #These defaults implement Step 15 planning heuristics from the cross-step redesign.
 #Experiment-level budget values that affect the LLM contract must come from the active config.
@@ -52,6 +56,7 @@ DEFAULT_TOKEN_BUDGET_CONFIG = {
 }
 REQUIRED_TOKEN_BUDGET_CONFIG_KEYS = ["expected_output_patch_tokens"]
 HEADER_POLICY_SCHEMA_VERSION = "header_editability_policy_v1"
+EXPECTED_EDITABLE_HEADER_FIELDS = ["ipv4.tos", "ipv4.ttl", "tcp.window"]
 
 HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
 TEXT_PRINTABLE = set(string.printable)
@@ -75,9 +80,56 @@ def estimate_json_tokens(data: Any, chars_per_token_estimate: float) -> int:
     return max(1, int(size_chars / chars_per_token_estimate) + 1)
 
 
-#This helper mirrors exactly the compact Step 15 fields that Step 16 embeds in the LLM prompt.
+#This function selects the Step 15 modification strategy while keeping Baseline-003 as the default.
+def get_modification_strategy(config: dict[str, Any]) -> str:
+    strategy = str(config.get("pipeline", {}).get("modification_strategy", HYBRID_MODIFICATION_STRATEGY)).strip()
+    if strategy not in SUPPORTED_MODIFICATION_STRATEGIES:
+        raise ValueError(
+            f"Unsupported Step 15 modification strategy {strategy!r}. "
+            f"Supported strategies are: {SUPPORTED_MODIFICATION_STRATEGIES!r}."
+        )
+    return strategy
+
+
+#This function returns the compact source-unit schema emitted for the selected strategy.
+def modification_unit_schema_version(strategy: str) -> str:
+    if strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
+        return HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION
+    return HYBRID_MODIFICATION_UNIT_SCHEMA_VERSION
+
+
+#This function returns the manifest schema emitted for the selected strategy.
+def modification_units_manifest_schema_version(strategy: str) -> str:
+    if strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
+        return HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION
+    return HYBRID_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION
+
+
+#This function returns the manifest filename emitted for the selected strategy.
+def modification_units_manifest_filename(strategy: str) -> str:
+    if strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
+        return "compact_modification_units_manifest_v2.json"
+    return "compact_modification_units_manifest_v1.json"
+
+
+#This function states whether payload regions are exposed as editable for the selected strategy.
+def editable_payload_regions_enabled(strategy: str) -> bool:
+    return strategy != HEADER_ONLY_MODIFICATION_STRATEGY
+
+
+#This function counts the editable physical-header regions carried by a compact modification unit.
+def editable_header_region_count(prompt_unit: dict[str, Any]) -> int:
+    return sum(
+        1
+        for packet in prompt_unit.get("physical_packets", [])
+        for region in packet.get("header_field_classifications", [])
+        if isinstance(region, dict) and region.get("editable")
+    )
+
+
+#This helper mirrors the compact Step 15 fields used for token planning.
 def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
-    return {
+    view = {
         "schema_version": prompt_unit["schema_version"],
         "experiment_id": prompt_unit.get("experiment_id"),
         "parent_group_id": prompt_unit["parent_group_id"],
@@ -91,6 +143,9 @@ def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         "packets": prompt_unit.get("packets", []),
         "context_truncation": prompt_unit.get("context_truncation"),
     }
+    if prompt_unit.get("header_only"):
+        view["physical_packets"] = prompt_unit.get("physical_packets", [])
+    return view
 
 
 #This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
@@ -113,6 +168,7 @@ def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["pipeline"], ["grouping_policy", "grouping_unit"], "pipeline")
+    get_modification_strategy(config)
     grouping_unit = str(config["pipeline"]["grouping_unit"]).strip()
     if grouping_unit != GROUPING_UNIT:
         raise ValueError(f"Step 15 requires pipeline.grouping_unit={GROUPING_UNIT!r}.")
@@ -302,12 +358,21 @@ def build_compact_physical_packet(
     classification_summary = Counter(str(item["classification"]) for item in classifications)
     editable_classifications = [
         {
+            "identity_type": "physical_header_region",
+            "region_id": item["header_region_id"],
             "header_region_id": item["header_region_id"],
+            "region_type": "header_field",
+            "packet_id": item["packet_id"],
             "field": item["field"],
             "classification": item["classification"],
             "editable": item["editable"],
             "allowed_operations": item["allowed_operations"],
+            "operation": "replace_uint",
+            "replacement_format": "uint",
             "constraints": item["constraints"],
+            "min": item["constraints"].get("min"),
+            "max": item["constraints"].get("max"),
+            "original_value": item["current_value"],
             "current_value": item["current_value"],
             "applied_rule_ids": item["applied_rule_ids"],
         }
@@ -1182,16 +1247,24 @@ def build_prompt_unit(
     token_config: dict[str, Any],
     input_token_budget: int,
     context_truncation: dict[str, Any] | None,
+    modification_strategy: str,
 ) -> dict[str, Any]:
+    payload_enabled = editable_payload_regions_enabled(modification_strategy)
     prompt_unit = {
-        "schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
+        "schema_version": modification_unit_schema_version(modification_strategy),
         "experiment_id": experiment_id,
         "parent_group_id": group_metadata["parent_group_id"],
         "modification_unit_id": prompt_unit_id,
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
-        "payload_strategy_version": PAYLOAD_STRATEGY_VERSION,
+        "strategy": modification_strategy,
+        "modification_strategy": modification_strategy,
+        "payload_strategy_version": modification_strategy,
+        "header_only": modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY,
+        "editable_payload_regions_enabled": payload_enabled,
+        "editable_header_regions_enabled": True,
+        "expected_editable_header_fields": EXPECTED_EDITABLE_HEADER_FIELDS,
         "group_metadata": group_metadata,
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
@@ -1269,7 +1342,11 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
     prompt_unit["packet_ids"] = canonical_region_ids
     prompt_unit["editable_packet_ids"] = editable_region_ids
     prompt_unit["context_packet_ids"] = context_region_ids
-    prompt_unit["editable_region_count"] = sum(len(packet.get("editable_regions", [])) for packet in packets)
+    payload_editable_region_count = sum(len(packet.get("editable_regions", [])) for packet in packets)
+    header_editable_region_count = editable_header_region_count(prompt_unit)
+    prompt_unit["editable_payload_region_count"] = payload_editable_region_count
+    prompt_unit["editable_header_region_count"] = header_editable_region_count
+    prompt_unit["editable_region_count"] = payload_editable_region_count + header_editable_region_count
     prompt_unit["payload_window_count"] = sum(1 for packet in packets if packet.get("payload_view", {}).get("mode") == "payload_window")
     prompt_unit["estimated_input_tokens"] = estimate_json_tokens(
         build_token_estimation_view(prompt_unit),
@@ -1388,6 +1465,7 @@ def build_payload_window_prompt_unit(
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
+    modification_strategy: str,
 ) -> dict[str, Any]:
     window_packet_plan = {
         "payload_view": payload_window["payload_view"],
@@ -1418,6 +1496,7 @@ def build_payload_window_prompt_unit(
         token_config=token_config,
         input_token_budget=input_token_budget,
         context_truncation=None,
+        modification_strategy=modification_strategy,
     )
 
 
@@ -1438,6 +1517,7 @@ def build_budgeted_payload_window_prompt_units(
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
+    modification_strategy: str,
 ) -> tuple[list[dict[str, Any]], int]:
     record = records[source_index]
     payload = payload_hex_to_bytes(record)
@@ -1477,6 +1557,7 @@ def build_budgeted_payload_window_prompt_units(
             flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
             token_config=token_config,
             input_token_budget=input_token_budget,
+            modification_strategy=modification_strategy,
         )
         if candidate_unit["estimated_input_tokens"] <= input_token_budget or candidate_end - candidate_start <= 1:
             if candidate_unit["estimated_input_tokens"] > input_token_budget:
@@ -1508,16 +1589,23 @@ def build_base_prompt_units(
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
+    modification_strategy: str,
 ) -> list[dict[str, Any]]:
     prompt_unit_context = {
-        "schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
+        "schema_version": modification_unit_schema_version(modification_strategy),
         "experiment_id": experiment_id,
         "parent_group_id": group_metadata["parent_group_id"],
         "modification_unit_id": parent_group_id,
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
-        "payload_strategy_version": PAYLOAD_STRATEGY_VERSION,
+        "strategy": modification_strategy,
+        "modification_strategy": modification_strategy,
+        "payload_strategy_version": modification_strategy,
+        "header_only": modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY,
+        "editable_payload_regions_enabled": editable_payload_regions_enabled(modification_strategy),
+        "editable_header_regions_enabled": True,
+        "expected_editable_header_fields": EXPECTED_EDITABLE_HEADER_FIELDS,
         "group_metadata": group_metadata,
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
@@ -1574,6 +1662,7 @@ def build_base_prompt_units(
             token_config=token_config,
             input_token_budget=input_token_budget,
             context_truncation=None,
+            modification_strategy=modification_strategy,
         )
         if prompt_unit["estimated_input_tokens"] <= input_token_budget:
             prompt_units.append(prompt_unit)
@@ -1614,6 +1703,7 @@ def build_base_prompt_units(
                     "policy": "split_core_packets_without_overlap",
                     "source_modification_unit_id": prompt_unit_id,
                 },
+                modification_strategy=modification_strategy,
             )
             if current_fallback_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
                 fallback_chunks.append(current_fallback_chunk)
@@ -1655,6 +1745,7 @@ def build_base_prompt_units(
                     "policy": "split_core_packets_without_overlap",
                     "source_modification_unit_id": prompt_unit_id,
                 },
+                modification_strategy=modification_strategy,
             )
             if sub_prompt_unit["estimated_input_tokens"] <= input_token_budget:
                 prompt_units.append(sub_prompt_unit)
@@ -1696,11 +1787,64 @@ def build_base_prompt_units(
                         "policy": "single_packet_fallback_after_subwindow_overrun",
                         "source_modification_unit_id": sub_prompt_unit_id,
                     },
+                    modification_strategy=modification_strategy,
                 )
                 if packet_prompt_unit["estimated_input_tokens"] > input_token_budget:
                     mark_over_budget_prompt_unit(packet_prompt_unit, sub_prompt_unit_id)
                 prompt_units.append(packet_prompt_unit)
     return prompt_units
+
+
+#This function creates one header-only modification unit from one physical parent group.
+def build_header_only_prompt_units_for_group(
+    *,
+    experiment_id: str,
+    source_packet_json: Path,
+    source_packet_json_schema_version: str,
+    parent_group_id: str,
+    group_index: int,
+    unit_type: str,
+    records: list[dict[str, Any]],
+    grouping_policy: str,
+    group_size_packets: int | None,
+    parent_group: dict[str, Any],
+    header_field_definitions: dict[str, Any],
+    header_policy: dict[str, Any],
+    token_config: dict[str, Any],
+    input_token_budget: int,
+) -> list[dict[str, Any]]:
+    group_metadata = build_group_metadata(
+        parent_group_id,
+        group_index,
+        records,
+        grouping_policy,
+        group_size_packets,
+        "header_only_physical_packet_group",
+        parent_group,
+    )
+    compact_physical_packets = [
+        build_compact_physical_packet(
+            packet=packet,
+            header_field_definitions=header_field_definitions,
+            header_policy=header_policy,
+        )
+        for packet in parent_group.get("physical_packets", [])
+    ]
+    prompt_unit = build_prompt_unit(
+        experiment_id=experiment_id,
+        source_packet_json=source_packet_json,
+        source_packet_json_schema_version=source_packet_json_schema_version,
+        group_metadata=group_metadata,
+        prompt_unit_id=parent_group_id,
+        unit_type="header_only_physical_packet_group",
+        packets=[],
+        physical_packets=compact_physical_packets,
+        token_config=token_config,
+        input_token_budget=input_token_budget,
+        context_truncation=None,
+        modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
+    )
+    return [prompt_unit]
 
 
 #This function creates all compact prompt units for one fixed-size parent group.
@@ -1721,8 +1865,27 @@ def build_prompt_units_for_group(
     flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
+    modification_strategy: str,
     heartbeat: Any | None,
 ) -> list[dict[str, Any]]:
+    if modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
+        return build_header_only_prompt_units_for_group(
+            experiment_id=experiment_id,
+            source_packet_json=source_packet_json,
+            source_packet_json_schema_version=source_packet_json_schema_version,
+            parent_group_id=parent_group_id,
+            group_index=group_index,
+            unit_type=unit_type,
+            records=records,
+            grouping_policy=grouping_policy,
+            group_size_packets=group_size_packets,
+            parent_group=parent_group,
+            header_field_definitions=header_field_definitions,
+            header_policy=header_policy,
+            token_config=token_config,
+            input_token_budget=input_token_budget,
+        )
+
     payload_plans = []
     for record_index, record in enumerate(records, start=1):
         payload_plans.append(build_payload_plan(record, token_config, input_token_budget))
@@ -1757,6 +1920,7 @@ def build_prompt_units_for_group(
         flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
         input_token_budget=input_token_budget,
+        modification_strategy=modification_strategy,
     )
 
     window_counter = 0
@@ -1777,6 +1941,7 @@ def build_prompt_units_for_group(
                 flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
                 token_config=token_config,
                 input_token_budget=input_token_budget,
+                modification_strategy=modification_strategy,
             )
             prompt_units.extend(new_prompt_units)
             window_counter = next_window_counter - 1
@@ -1888,7 +2053,17 @@ def validate_prompt_unit_ownership(
 def build_canonical_ownership_summary(
     canonical_lengths: dict[str, int],
     editable_intervals: dict[str, list[tuple[int, int, str]]],
+    modification_strategy: str,
 ) -> dict[str, Any]:
+    if not editable_payload_regions_enabled(modification_strategy):
+        return {
+            "canonical_region_count": len(canonical_lengths),
+            "canonical_regions_with_editable_ownership": 0,
+            "editable_interval_count": 0,
+            "duplicate_or_overlapping_editable_interval_count": 0,
+            "editable_payload_regions_enabled": False,
+            "policy": "canonical_payload_editing_disabled_by_header_only_strategy",
+        }
     missing = sorted(set(canonical_lengths) - set(editable_intervals))
     if missing:
         raise ValueError(f"Canonical regions without editable ownership: {missing[:10]}")
@@ -1897,7 +2072,57 @@ def build_canonical_ownership_summary(
         "canonical_regions_with_editable_ownership": len(editable_intervals),
         "editable_interval_count": sum(len(intervals) for intervals in editable_intervals.values()),
         "duplicate_or_overlapping_editable_interval_count": 0,
+        "editable_payload_regions_enabled": True,
     }
+
+
+#This function confirms that physical parent groups cover every source packet exactly once.
+def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]], ordered_packets: list[dict[str, Any]]) -> dict[str, Any]:
+    expected_packet_ids = [str(packet["packet_id"]) for packet in ordered_packets]
+    seen_packet_ids: list[str] = []
+    for parent_group in parent_groups:
+        seen_packet_ids.extend(str(packet["packet_id"]) for packet in parent_group.get("physical_packets", []))
+    seen_counts = Counter(seen_packet_ids)
+    duplicate_packet_ids = sorted(packet_id for packet_id, count in seen_counts.items() if count > 1)
+    missing_packet_ids = sorted(set(expected_packet_ids) - set(seen_packet_ids))
+    unexpected_packet_ids = sorted(set(seen_packet_ids) - set(expected_packet_ids))
+    if duplicate_packet_ids or missing_packet_ids or unexpected_packet_ids:
+        raise ValueError(
+            "Physical packet parent-group coverage failed: "
+            f"duplicates={duplicate_packet_ids[:10]}, missing={missing_packet_ids[:10]}, "
+            f"unexpected={unexpected_packet_ids[:10]}"
+        )
+    return {
+        "source_physical_packet_count": len(expected_packet_ids),
+        "covered_physical_packet_count": len(seen_packet_ids),
+        "unique_covered_physical_packet_count": len(seen_counts),
+        "duplicate_physical_packet_count": 0,
+        "missing_physical_packet_count": 0,
+    }
+
+
+#This function enforces the header-only Step 15 source-unit contract.
+def validate_header_only_prompt_unit(prompt_unit: dict[str, Any]) -> None:
+    if prompt_unit.get("schema_version") != HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION:
+        raise ValueError("Header-only Step 15 units must use compact_modification_unit_v2.")
+    if prompt_unit.get("packets") != []:
+        raise ValueError("Header-only Step 15 units must not contain canonical payload packet entries.")
+    if prompt_unit.get("payload_window_count") != 0:
+        raise ValueError("Header-only Step 15 units must not contain canonical payload windows.")
+    if prompt_unit.get("editable_payload_region_count") != 0:
+        raise ValueError("Header-only Step 15 units must not expose editable payload regions.")
+    for physical_packet in prompt_unit.get("physical_packets", []):
+        for region in physical_packet.get("header_field_classifications", []):
+            if not region.get("editable"):
+                continue
+            if region.get("identity_type") != "physical_header_region":
+                raise ValueError("Header-only editable regions must use identity_type=physical_header_region.")
+            if region.get("field") not in EXPECTED_EDITABLE_HEADER_FIELDS:
+                raise ValueError(f"Unexpected editable header field in header-only unit: {region.get('field')!r}")
+            if region.get("operation") != "replace_uint":
+                raise ValueError("Header-only editable regions must use operation=replace_uint.")
+            if region.get("replacement_format") != "uint":
+                raise ValueError("Header-only editable regions must use replacement_format=uint.")
 
 
 #This function builds the top-level compact modification-units manifest artifact.
@@ -1919,16 +2144,25 @@ def build_manifest(
     payload_mode_counts: Counter[str],
     canonical_ownership_summary: dict[str, Any],
     header_classification_artifacts: dict[str, Any],
+    modification_strategy: str,
+    physical_parent_group_coverage: dict[str, Any],
 ) -> dict[str, Any]:
+    header_only = modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY
     return {
         "metadata": {
-            "schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
+            "schema_version": modification_units_manifest_schema_version(modification_strategy),
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "source_packet_json": str(input_json_path),
             "source_packet_json_schema_version": packet_json.get("metadata", {}).get("schema_version"),
             "output_dir": str(output_dir),
+            "strategy": modification_strategy,
+            "modification_strategy": modification_strategy,
+            "header_only": header_only,
+            "editable_payload_regions_enabled": editable_payload_regions_enabled(modification_strategy),
+            "editable_header_regions_enabled": True,
+            "expected_editable_header_fields": EXPECTED_EDITABLE_HEADER_FIELDS,
             "grouping_policy": grouping_policy,
             "grouping_unit": GROUPING_UNIT,
             "group_size_packets": group_size_packets,
@@ -1940,8 +2174,8 @@ def build_manifest(
             "modification_unit_count": len(prompt_unit_summaries),
             "total_packet_count": len(packet_json["traffic"]),
             "total_canonical_region_count": len(packet_json["canonical_tcp_regions"]),
-            "compact_view_schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
-            "payload_strategy_version": PAYLOAD_STRATEGY_VERSION,
+            "compact_view_schema_version": modification_unit_schema_version(modification_strategy),
+            "payload_strategy_version": modification_strategy,
             "header_editability_policy": {
                 "schema_version": header_policy["schema_version"],
                 "policy_id": header_policy["policy_id"],
@@ -1959,6 +2193,7 @@ def build_manifest(
             "over_budget_summary": build_over_budget_summary(prompt_unit_summaries, input_token_budget),
             "payload_mode_counts": dict(sorted(payload_mode_counts.items())),
             "canonical_ownership_summary": canonical_ownership_summary,
+            "physical_parent_group_coverage": physical_parent_group_coverage,
             "immutable_fields": packet_json.get("immutable_fields", []),
         },
         "compact_modification_units": prompt_unit_summaries,
@@ -1987,6 +2222,7 @@ def run_grouping(
     config = load_json_config(config_path)
     validate_config(config)
 
+    modification_strategy = get_modification_strategy(config)
     grouping_policy = str(config["pipeline"]["grouping_policy"]).strip()
     paths = default_paths(config)
     input_json_path = Path(input_json).expanduser() if input_json else paths["input_json"]
@@ -2012,6 +2248,7 @@ def run_grouping(
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
     )
+    physical_parent_group_coverage = validate_physical_parent_group_coverage(parent_groups, ordered_traffic)
     canonical_records = build_canonical_region_records(packet_json)
     canonical_records.sort(
         key=lambda record: (
@@ -2093,10 +2330,14 @@ def run_grouping(
             flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
             token_config=token_config,
             input_token_budget=input_token_budget,
+            modification_strategy=modification_strategy,
             heartbeat=heartbeat,
         )
         for prompt_unit in prompt_units:
-            validate_prompt_unit_ownership(prompt_unit, canonical_lengths, editable_intervals)
+            if modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
+                validate_header_only_prompt_unit(prompt_unit)
+            else:
+                validate_prompt_unit_ownership(prompt_unit, canonical_lengths, editable_intervals)
             for packet in prompt_unit["packets"]:
                 payload_mode_counts[str(packet.get("payload_view", {}).get("mode", "unknown"))] += 1
             prompt_unit_path = output_group_dir / f"{prompt_unit['modification_unit_id']}.json"
@@ -2107,7 +2348,11 @@ def run_grouping(
             f"modification_units_written={len(prompt_unit_summaries)}"
         )
 
-    canonical_ownership_summary = build_canonical_ownership_summary(canonical_lengths, editable_intervals)
+    canonical_ownership_summary = build_canonical_ownership_summary(
+        canonical_lengths,
+        editable_intervals,
+        modification_strategy,
+    )
     manifest = build_manifest(
         config=config,
         input_json_path=input_json_path,
@@ -2125,8 +2370,10 @@ def run_grouping(
         payload_mode_counts=payload_mode_counts,
         canonical_ownership_summary=canonical_ownership_summary,
         header_classification_artifacts=header_classification_artifacts,
+        modification_strategy=modification_strategy,
+        physical_parent_group_coverage=physical_parent_group_coverage,
     )
-    manifest_path = output_group_dir / "compact_modification_units_manifest_v1.json"
+    manifest_path = output_group_dir / modification_units_manifest_filename(modification_strategy)
     write_json(manifest_path, manifest)
 
     return {
@@ -2142,6 +2389,8 @@ def run_grouping(
         "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
         "parent_group_size_statistics": parent_group_stats,
         "input_token_budget": input_token_budget,
+        "modification_strategy": modification_strategy,
+        "manifest_schema_version": modification_units_manifest_schema_version(modification_strategy),
     }
 
 

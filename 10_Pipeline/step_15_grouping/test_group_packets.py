@@ -127,13 +127,20 @@ def packet_json_v4(records: list[dict], include_flow_context: bool) -> dict:
 
 
 # This helper creates one complete Step 15 config without relying on repository experiment paths.
-def config(output_root: Path, grouping_policy: str, group_size: int | None = None) -> dict:
+def config(
+    output_root: Path,
+    grouping_policy: str,
+    group_size: int | None = None,
+    modification_strategy: str | None = None,
+) -> dict:
     pipeline = {
         "grouping_policy": grouping_policy,
         "grouping_unit": "physical_packet",
         "experiment_config_label": f"test-{grouping_policy}",
         "header_editability_policy_path": "step_15_grouping/header_editability_policy_v1.json",
     }
+    if modification_strategy is not None:
+        pipeline["modification_strategy"] = modification_strategy
     if group_size is not None:
         pipeline["group_size_packets"] = group_size
     if grouping_policy == "flow_based":
@@ -346,6 +353,67 @@ class CanonicalStep15Tests(unittest.TestCase):
             root = Path(temporary_directory)
             with self.assertRaisesRegex(ValueError, "packet_json_v4"):
                 self.run_step15(source, config(root, "fixed_packet_count", group_size=1), root)
+
+    def test_header_only_strategy_emits_v2_units_without_payload_editability(self) -> None:
+        records = [
+            tcp_record(packet_number, 1000 + packet_number * 10, b"attack")
+            for packet_number in range(1, 8)
+        ]
+        source = packet_json_v4(records, include_flow_context=False)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "fixed_packet_count",
+                group_size=6,
+                modification_strategy="header_only_strategy_v1",
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual("compact_modification_units_manifest_v2", manifest["metadata"]["schema_version"])
+        self.assertEqual("compact_modification_unit_v2", manifest["metadata"]["compact_view_schema_version"])
+        self.assertEqual("header_only_strategy_v1", manifest["metadata"]["strategy"])
+        self.assertTrue(manifest["metadata"]["header_only"])
+        self.assertFalse(manifest["metadata"]["editable_payload_regions_enabled"])
+        self.assertTrue(manifest["metadata"]["editable_header_regions_enabled"])
+        self.assertEqual("physical_packet", manifest["metadata"]["grouping_unit"])
+        self.assertEqual(6, manifest["metadata"]["group_size_packets"])
+        self.assertEqual(7, manifest["metadata"]["physical_parent_group_coverage"]["covered_physical_packet_count"])
+        self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        self.assertEqual(2, manifest["metadata"]["modification_unit_count"])
+        self.assertEqual(
+            ["ipv4.tos", "ipv4.ttl", "tcp.window"],
+            manifest["metadata"]["expected_editable_header_fields"],
+        )
+        self.assertEqual(
+            0,
+            manifest["metadata"]["canonical_ownership_summary"]["editable_interval_count"],
+        )
+        self.assertFalse(manifest["metadata"]["canonical_ownership_summary"]["editable_payload_regions_enabled"])
+        self.assertTrue(all(unit["schema_version"] == "compact_modification_unit_v2" for unit in units))
+        self.assertTrue(all(unit["header_only"] for unit in units))
+        self.assertTrue(all(unit["packets"] == [] for unit in units))
+        self.assertTrue(all(unit["payload_window_count"] == 0 for unit in units))
+        self.assertTrue(all(unit["editable_payload_region_count"] == 0 for unit in units))
+        self.assertEqual([18, 3], [unit["editable_region_count"] for unit in units])
+        self.assertEqual([18, 3], [unit["editable_header_region_count"] for unit in units])
+        editable_regions = [
+            region
+            for unit in units
+            for packet in unit["physical_packets"]
+            for region in packet["header_field_classifications"]
+        ]
+        self.assertEqual(
+            {"physical_header_region"},
+            {region["identity_type"] for region in editable_regions},
+        )
+        self.assertEqual(
+            {"ipv4.tos", "ipv4.ttl", "tcp.window"},
+            {region["field"] for region in editable_regions},
+        )
+        self.assertEqual({"uint"}, {region["replacement_format"] for region in editable_regions})
+        self.assertEqual({"replace_uint"}, {region["operation"] for region in editable_regions})
 
 
 if __name__ == "__main__":
