@@ -62,8 +62,12 @@ def build_row(summary_path: Path) -> dict[str, Any]:
     aggregates = summary["aggregates"]["llm_attempted"]
     runtime_totals = summary["runtime_totals"]["llm_attempted"]
 
-    batch_match = re.search(r"batch_(\d+)", str(summary_path))
-    batch_size = int(batch_match.group(1)) if batch_match else None
+    batch_size = None
+    for parent in summary_path.parents:
+        batch_match = re.fullmatch(r"batch_(\d+)", parent.name)
+        if batch_match:
+            batch_size = int(batch_match.group(1))
+            break
     attempted = int(aggregates["prompt_count"])
     accepted = int(statuses.get("accepted", 0))
     failed = int(statuses.get("failed", 0))
