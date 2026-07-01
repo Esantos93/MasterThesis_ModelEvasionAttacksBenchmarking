@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_llm_batch
 import run_llm_batch_vllm
@@ -320,6 +323,43 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                     "replacement": 0,
                 }
             ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "replacement_uint_below_min")
+
+    def test_header_only_prompt_rejects_payload_patch(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 0,
+                    "length_bytes": 1,
+                    "replacement_format": "hex",
+                    "replacement": "00",
+                }
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "patch_references_non_editable_packet")
+
+    def test_compact_header_edits_reject_ttl_zero(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "ipv4.ttl", 0]],
         }
 
         result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
