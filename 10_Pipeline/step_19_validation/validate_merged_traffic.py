@@ -44,6 +44,7 @@ DEFAULT_REQUIRED_FIELDS = [
     "payload_length_bytes",
     "packet_length_bytes",
 ]
+BASELINE_004_ALLOWED_HEADER_FIELDS = {"ipv4.tos", "ipv4.ttl", "tcp.window"}
 
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
@@ -292,24 +293,50 @@ def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tupl
 
 #This function builds a packet-to-patch index from Step 18 patch_application metadata.
 #The index lets Step 19 verify that payload changes only occur on packets modified by accepted patches.
-def build_patch_application_indexes(merged_json: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], set[str]]:
+def build_patch_application_indexes(merged_json: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], list[dict[str, Any]], set[str]]:
     patch_application = merged_json.get("patch_application", {})
     if not isinstance(patch_application, dict):
-        return {}, set()
+        return {}, {}, [], set()
     applied_patches = patch_application.get("applied_patches", [])
     if not isinstance(applied_patches, list):
-        return {}, set()
+        return {}, {}, [], set()
     patches_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    header_edits_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    payload_edits = []
     patch_group_keys = set()
     for patch in applied_patches:
         if not isinstance(patch, dict) or patch.get("packet_id") is None:
             continue
         packet_id = str(patch["packet_id"])
         patches_by_packet[packet_id].append(patch)
+        if patch.get("edit_kind") == "physical_header":
+            header_edits_by_packet[packet_id].append(patch)
+        elif patch.get("edit_kind") == "canonical_payload":
+            payload_edits.append(patch)
         prompt_unit_id = patch.get("prompt_unit_id")
         if prompt_unit_id is not None:
             patch_group_keys.add(f"patch::{prompt_unit_id}")
-    return patches_by_packet, patch_group_keys
+    return patches_by_packet, header_edits_by_packet, payload_edits, patch_group_keys
+
+
+#This function returns the value of an editable physical header field from a packet record.
+def header_field_value(record: dict[str, Any], field: str) -> Any:
+    if field == "ipv4.tos":
+        ipv4 = record.get("ipv4_header", {})
+        if isinstance(ipv4, dict) and "tos" in ipv4:
+            return ipv4["tos"]
+        return record.get("tos")
+    if field == "ipv4.ttl":
+        ipv4 = record.get("ipv4_header", {})
+        if isinstance(ipv4, dict) and "ttl" in ipv4:
+            return ipv4["ttl"]
+        return record.get("ttl")
+    if field == "tcp.window":
+        tcp = record.get("tcp_header", {})
+        if isinstance(tcp, dict) and "window" in tcp:
+            return tcp["window"]
+        return record.get("window")
+    return None
 
 
 #This function extracts packet ids that belong to Step 17 groups classified as LLM Output Failure by Step 18.
@@ -368,6 +395,7 @@ def validate_patch_application_for_record(
     record_index: int,
     reference_by_packet_id: dict[str, dict[str, Any]],
     patches_by_packet: dict[str, list[dict[str, Any]]],
+    header_edits_by_packet: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     if not reference_by_packet_id:
         return []
@@ -380,19 +408,59 @@ def validate_patch_application_for_record(
         return []
     reference_payload = reference.get("payload_hex")
     actual_payload = record.get("payload_hex")
-    if actual_payload == reference_payload:
-        return []
-    if packet_id_text not in patches_by_packet:
-        return [
+    issues = []
+    if actual_payload != reference_payload:
+        issues.append(
             issue(
                 "error",
-                "payload_changed_without_applied_patch",
-                "payload_hex differs from Step 14 but Step 18 did not record an accepted patch for this packet.",
+                "payload_changed_in_header_only_output",
+                "payload_hex differs from Step 14 in a header-only Step 18 output.",
                 record_index=record_index,
                 packet_id=packet_id,
             )
-        ]
-    return []
+        )
+
+    edits = header_edits_by_packet.get(packet_id_text, [])
+    edits_by_field = {str(edit.get("field")): edit for edit in edits if edit.get("field") is not None}
+    for field in BASELINE_004_ALLOWED_HEADER_FIELDS:
+        reference_value = header_field_value(reference, field)
+        actual_value = header_field_value(record, field)
+        edit = edits_by_field.get(field)
+        if actual_value != reference_value and edit is None:
+            issues.append(
+                issue(
+                    "error",
+                    "header_field_changed_without_applied_edit",
+                    "Header field differs from Step 14 but Step 18 did not record an accepted header edit for it.",
+                    record_index=record_index,
+                    packet_id=packet_id,
+                    field=field,
+                    expected_value=reference_value,
+                    actual_value=actual_value,
+                )
+            )
+        if edit is not None:
+            replacement = edit.get("replacement")
+            constraints = edit.get("constraints", {})
+            min_value = constraints.get("min") if isinstance(constraints, dict) else None
+            max_value = constraints.get("max") if isinstance(constraints, dict) else None
+            if edit.get("identity_type") != "physical_header_region" or edit.get("region_type") != "header_field":
+                issues.append(issue("error", "applied_header_edit_identity_invalid", "Applied header edit does not target a physical header region.", record_index=record_index, packet_id=packet_id, field=field))
+            if edit.get("operation") != "replace_uint" or edit.get("replacement_format") != "uint":
+                issues.append(issue("error", "applied_header_edit_operation_invalid", "Applied header edit must be replace_uint with uint replacement format.", record_index=record_index, packet_id=packet_id, field=field))
+            if not isinstance(replacement, int) or isinstance(replacement, bool):
+                issues.append(issue("error", "applied_header_replacement_not_integer", "Applied header replacement must be an integer.", record_index=record_index, packet_id=packet_id, field=field, replacement=replacement))
+            else:
+                if isinstance(min_value, int) and replacement < min_value:
+                    issues.append(issue("error", "applied_header_replacement_below_min", "Applied header replacement is below the declared minimum.", record_index=record_index, packet_id=packet_id, field=field, replacement=replacement, min=min_value))
+                if isinstance(max_value, int) and replacement > max_value:
+                    issues.append(issue("error", "applied_header_replacement_above_max", "Applied header replacement is above the declared maximum.", record_index=record_index, packet_id=packet_id, field=field, replacement=replacement, max=max_value))
+                if actual_value != replacement:
+                    issues.append(issue("error", "applied_header_replacement_not_reflected", "Merged packet field does not equal the applied header replacement.", record_index=record_index, packet_id=packet_id, field=field, expected_value=replacement, actual_value=actual_value))
+            if edit.get("original_value") != reference_value:
+                issues.append(issue("error", "applied_header_original_value_mismatch", "Applied header edit original_value does not match Step 14 reference.", record_index=record_index, packet_id=packet_id, field=field, expected_value=reference_value, actual_value=edit.get("original_value")))
+
+    return issues
 
 #This function compares one modified packet record against the original reference record for the same packet_id.
 #Any immutable-field difference is an error because it breaks PRE/POST traceability.
@@ -537,10 +605,26 @@ def validate_merged_traffic(
     llm_output_failure_groups = group_outcomes.get("llm_output_failure_groups", [])
     if not isinstance(llm_output_failure_groups, list):
         llm_output_failure_groups = []
+    error_count = 0
+    warning_count = 0
     llm_output_failure_packet_id_set = llm_output_failure_packet_ids(llm_output_failure_groups)
     llm_output_failure_group_by_packet = llm_output_failure_group_by_packet_id(llm_output_failure_groups)
-    patches_by_packet, _patch_group_keys = build_patch_application_indexes(merged_json)
+    patches_by_packet, header_edits_by_packet, payload_edits, _patch_group_keys = build_patch_application_indexes(merged_json)
+    patch_application = merged_json.get("patch_application", {}) if isinstance(merged_json.get("patch_application"), dict) else {}
+    no_effect_edits = patch_application.get("no_effect_edits", [])
+    if not isinstance(no_effect_edits, list):
+        no_effect_edits = []
     accepted_group_by_packet = accepted_group_by_packet_id(group_outcomes)
+    if payload_edits:
+        root_issues.append(
+            issue(
+                "error",
+                "payload_edits_present_in_header_only_output",
+                "Baseline-004 Step 18 output must not contain canonical payload edits.",
+                payload_edit_count=len(payload_edits),
+            )
+        )
+        error_count += 1
 
     packet_id_counts = Counter(
         str(record.get("packet_id"))
@@ -550,8 +634,6 @@ def validate_merged_traffic(
     duplicate_packet_ids = {packet_id for packet_id, count in packet_id_counts.items() if count > 1}
     preliminary_packets = []
     groups: dict[str, dict[str, Any]] = {}
-    error_count = 0
-    warning_count = 0
 
     for record_index, record in enumerate(traffic, start=1):
         record_issues = validate_basic_record_schema(record, record_index, required_fields)
@@ -599,6 +681,7 @@ def validate_merged_traffic(
                     record_index=record_index,
                     reference_by_packet_id=reference_by_packet_id,
                     patches_by_packet=patches_by_packet,
+                    header_edits_by_packet=header_edits_by_packet,
                 )
             )
 
@@ -781,6 +864,9 @@ def validate_merged_traffic(
             "preserved_non_llm_processed_packets_count": len(preserved_non_llm_processed_packet_ids),
             "unexpectedly_uncovered_packet_count": len(unexpectedly_uncovered_packet_ids),
             "invalid_traffic_packet_count": len(invalid_traffic_packets),
+            "effective_header_edit_count": sum(len(edits) for edits in header_edits_by_packet.values()),
+            "no_effect_edit_count": len(no_effect_edits),
+            "payload_edit_count": len(payload_edits),
             "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
         },
     }
@@ -936,6 +1022,9 @@ def main() -> None:
         print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
         print(f"Preserved non-LLM-processed packets: {result['preserved_non_llm_processed_packets_count']}")
         print(f"Unexpectedly uncovered packets: {result['unexpectedly_uncovered_packet_count']}")
+        print(f"Effective header edits: {result['effective_header_edit_count']}")
+        print(f"No-effect edits: {result['no_effect_edit_count']}")
+        print(f"Payload edits: {result['payload_edit_count']}")
         print(f"Errors: {result['error_count']}")
         print(f"Warnings: {result['warning_count']}")
         print(f"Validation report: {result['validation_report']}")
