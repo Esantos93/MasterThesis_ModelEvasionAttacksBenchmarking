@@ -225,8 +225,15 @@ def normalize_one_traffic_version(
     if not metadata_path.exists():
         raise FileNotFoundError(f"Step 21 execution metadata does not exist: {metadata_path}")
     execution_metadata = read_json(metadata_path)
+    source_traffic_version = execution_metadata.get("traffic_version")
     source_experiment_config_label = execution_metadata.get("experiment_config_label")
     source_traffic_scope = execution_metadata.get("traffic_scope")
+    source_post_run_label = execution_metadata.get("post_run_label")
+    if source_traffic_version != traffic_version:
+        raise ValueError(
+            "Step 21 execution metadata traffic_version does not match the requested normalization side: "
+            f"{source_traffic_version!r} != {traffic_version!r}"
+        )
     if traffic_version == "post" and source_experiment_config_label != configured_experiment_config_label:
         raise ValueError(
             "Step 21 POST metadata experiment_config_label does not match the active config: "
@@ -264,10 +271,12 @@ def normalize_one_traffic_version(
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "traffic_version": traffic_version,
+            "source_traffic_version": source_traffic_version,
             "configured_experiment_config_label": configured_experiment_config_label,
             "source_experiment_config_label": source_experiment_config_label,
             "normalized_experiment_config_label": normalized_experiment_config_label,
             "traffic_scope": source_traffic_scope,
+            "source_post_run_label": source_post_run_label,
             "source_snort_raw_dir": str(input_dir),
             "source_execution_metadata": str(metadata_path),
             "source_alert_json": str(alert_json_path),
@@ -293,10 +302,12 @@ def normalize_one_traffic_version(
         "schema_version": "snort_alert_normalization_metadata_v1",
         "generated_at_utc": utc_now(),
         "traffic_version": traffic_version,
+        "source_traffic_version": source_traffic_version,
         "configured_experiment_config_label": configured_experiment_config_label,
         "source_experiment_config_label": source_experiment_config_label,
         "normalized_experiment_config_label": normalized_experiment_config_label,
         "traffic_scope": source_traffic_scope,
+        "source_post_run_label": source_post_run_label,
         "source_alert_json": str(alert_json_path),
         "source_execution_metadata": str(metadata_path),
         "source_step_21_metadata": execution_metadata,
@@ -309,6 +320,7 @@ def normalize_one_traffic_version(
         "traffic_version": traffic_version,
         "alert_count": summary["alert_count"],
         "unique_signature_count": summary["unique_signature_count"],
+        "detector_source_counts": summary["detector_source_counts"],
         "normalized_alerts": str(normalized_path),
         "normalization_metadata": str(metadata_output_path),
     }
@@ -434,7 +446,8 @@ def main() -> None:
             print(
                 f"{result['traffic_version']}: alerts={result['alert_count']} "
                 f"unique_signatures={result['unique_signature_count']} output={result['normalized_alerts']}"
-        )
+            )
+            print(f"{result['traffic_version']}: detector_sources={result['detector_source_counts']}")
 
 
 if __name__ == "__main__":
