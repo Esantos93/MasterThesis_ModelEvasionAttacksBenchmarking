@@ -21,6 +21,24 @@
     "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
     "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
     "detector_policy_label": "security-ips",
+    "detection_policy_options": [
+      {
+        "label": "connectivity-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-connectivity-ips.states"
+      },
+      {
+        "label": "balanced-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-balanced-ips.states"
+      },
+      {
+        "label": "security-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states"
+      },
+      {
+        "label": "max-detect-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states"
+      }
+    ],
     "plugin_path": "/usr/local/etc/snort/so_rules",
     "daq_dir": "/usr/local/lib/daq",
     "snaplen": 65535,
