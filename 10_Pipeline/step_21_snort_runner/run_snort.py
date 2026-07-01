@@ -43,7 +43,7 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 
 
 # This function validates the minimum config shape required by Step 21.
-# It checks the experiment paths, Snort execution settings, detector rule toggles, and the pipeline experiment_config_label.
+# It checks the experiment paths, Snort execution settings, detector rule toggles, detector policy label, and the pipeline experiment_config_label.
 # The rules_policy_path is optional, but when present it must be a string so it can be injected safely into the Snort Lua override.
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "snort", "pipeline"], "config")
@@ -68,6 +68,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("snort.daq_dir must be set because Snort needs the DAQ directory for this benchmark setup.")
     if not isinstance(snort.get("rules_policy_path", ""), str):
         raise ValueError("snort.rules_policy_path must be a string when provided.")
+    if "detector_policy_label" in snort:
+        detector_policy_label = snort["detector_policy_label"]
+        if not isinstance(detector_policy_label, str):
+            raise ValueError("snort.detector_policy_label must be a string when provided.")
+        if not sanitize_name_component(detector_policy_label):
+            raise ValueError("snort.detector_policy_label must not be empty when provided.")
 
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
@@ -86,6 +92,23 @@ def experiment_config_label_from_config(config: dict[str, Any]) -> str:
     return config["pipeline"]["experiment_config_label"]
 
 
+# This function returns the detector policy label used to partition Step 21 Snort artifacts.
+# It is a directory/metadata label, not the Snort .states path itself.
+def detector_policy_label_from_config(config: dict[str, Any]) -> str:
+    snort_config = config["snort"]
+    detector_policy_label = str(snort_config.get("detector_policy_label", "")).strip()
+    if detector_policy_label:
+        return sanitize_name_component(detector_policy_label)
+
+    rules_policy_path = str(snort_config.get("rules_policy_path", "")).strip()
+    if rules_policy_path:
+        policy_stem = Path(expand_config_path(rules_policy_path)).stem
+        policy_stem = policy_stem.removeprefix("rulestates-")
+        return sanitize_name_component(policy_stem)
+
+    return "none"
+
+
 # This function returns the default input PCAP for either PRE or POST traffic.
 # PRE traffic is common to every experiment configuration, while POST traffic is resolved through experiment_config_label.
 def default_input_pcap(
@@ -101,19 +124,21 @@ def default_input_pcap(
 
 
 # This function returns the default Step 21 output directory for a Snort run.
-# PRE artifacts are stored in a single common directory, while POST artifacts are separated by execution timestamp.
+# PRE artifacts are common only within the selected detector policy, while POST artifacts are additionally separated by execution timestamp.
 def default_output_dir(
     config: dict[str, Any],
     traffic_version: str,
+    detector_policy_label: str,
     post_run_label: str | None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
+    detector_root = experiment_root / "11_snort_raw" / detector_policy_label
     if traffic_version == "pre":
-        return experiment_root / "11_snort_raw" / "pre"
+        return detector_root / "pre"
     if not post_run_label:
         raise ValueError("post_run_label must be provided for POST Step 21 output directories.")
-    return experiment_root / "11_snort_raw" / "post" / post_run_label
+    return detector_root / "post" / post_run_label
 
 
 # This function builds the inline Lua ips table passed to Snort through --lua.
@@ -335,6 +360,7 @@ def run_one_snort_execution(
     *,
     config: dict[str, Any],
     traffic_version: str,
+    detector_policy_label: str,
     experiment_config_label: str | None,
     post_run_label: str | None,
     input_pcap_path: Path,
@@ -360,6 +386,7 @@ def run_one_snort_execution(
 
     traffic_scope = "pre_common" if traffic_version == "pre" else "post_experiment_config"
     print(f"[{traffic_version}] scope={traffic_scope} dry_run={dry_run}")
+    print(f"[{traffic_version}] detector_policy_label={detector_policy_label}")
     print(f"[{traffic_version}] experiment_config_label={experiment_config_label or 'null'}")
     print(f"[{traffic_version}] post_run_label={post_run_label or 'null'}")
     print(f"[{traffic_version}] input_pcap={input_pcap_path}")
@@ -400,6 +427,7 @@ def run_one_snort_execution(
         "config_source": config.get("_config_path", ""),
         "traffic_version": traffic_version,
         "traffic_scope": traffic_scope,
+        "detector_policy_label": detector_policy_label,
         "experiment_config_label": experiment_config_label,
         "post_run_label": post_run_label,
         "input_pcap": str(input_pcap_path),
@@ -457,6 +485,7 @@ def run_snort(
     validate_config(config)
 
     experiment_config_label = experiment_config_label_from_config(config)
+    detector_policy_label = detector_policy_label_from_config(config)
     runs: list[dict[str, Any]] = []
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
     post_run_label = f"run-{utc_minute_timestamp_for_path()}" if "post" in selected_versions else None
@@ -471,12 +500,13 @@ def run_snort(
         resolved_output_dir = (
             Path(output_dir).expanduser()
             if output_dir and len(selected_versions) == 1
-            else default_output_dir(config, selected_version, run_post_label, experiment_root)
+            else default_output_dir(config, selected_version, detector_policy_label, run_post_label, experiment_root)
         )
         runs.append(
             run_one_snort_execution(
                 config=config,
                 traffic_version=selected_version,
+                detector_policy_label=detector_policy_label,
                 experiment_config_label=run_experiment_config_label,
                 post_run_label=run_post_label,
                 input_pcap_path=resolved_input,
@@ -488,7 +518,7 @@ def run_snort(
 
 
 # This function resolves the terminal log path for Step 21.
-# Terminal logs are grouped by the requested traffic execution scope, while POST raw artifacts are separated by post_run_label.
+# Terminal logs are grouped by detector policy and the requested traffic execution scope, while POST raw artifacts are separated by post_run_label.
 def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         return Path(args.log_file).expanduser()
@@ -496,7 +526,8 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     config = load_json_config(args.config)
     validate_config(config)
     experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
-    branch_label = f"{args.traffic_version}-traffic"
+    detector_policy_label = detector_policy_label_from_config(config)
+    branch_label = str(Path(detector_policy_label) / f"{args.traffic_version}-traffic")
     return default_step_log_path(
         experiment_root=experiment_root,
         step_name="step_21_snort_runner",
@@ -551,7 +582,10 @@ def main() -> None:
 
         for run in runs:
             label = run["experiment_config_label"] or run["traffic_scope"]
-            print(f"{run['traffic_version']} {label}: exit_code={run['exit_code']} output_dir={run['output_dir']}")
+            print(
+                f"{run['traffic_version']} {run['detector_policy_label']} {label}: "
+                f"exit_code={run['exit_code']} output_dir={run['output_dir']}"
+            )
 
 
 if __name__ == "__main__":
