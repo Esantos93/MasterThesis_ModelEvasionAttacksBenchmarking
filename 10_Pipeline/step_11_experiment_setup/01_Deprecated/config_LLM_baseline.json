@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_thursday_baseline_003",
-    "description": "Hybrid physical-header and canonical-payload CICIDS2017 Thursday baseline using six-packet parent groups.",
+    "experiment_id": "exp_cicids2017_thursday_baseline_001",
+    "description": "First narrow CICIDS2017 Thursday baseline modification benchmark.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -27,7 +27,7 @@
     "enable_builtin_rules": true
   },
   "llm": {
-    "model_name": "Llama-3.1-8B-Instruct",
+    "model_name": "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
     "model_path": "/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
     "prompt_version": "compact_patch_prompting_v2",
     "prompt_input_json_data_profile": "baseline_minimal_canonical_patch_v1",
@@ -50,14 +50,13 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "baseline-v3-hybrid-fixed-size-6",
+    "experiment_config_label": "baseline-fixed-size",
     "experiment_config_label_options": [
-      "baseline-v3-hybrid-fixed-size-6"
+      "baseline-fixed-size"
     ],
     "grouping_policy": "fixed_packet_count",
-    "grouping_unit": "physical_packet",
-    "group_size_packets": 6,
-    "header_editability_policy_path": "step_15_grouping/header_editability_policy_v1.json",
+    "grouping_unit": "canonical_tcp_region",
+    "group_size_packets": 3,
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0

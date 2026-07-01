@@ -20,6 +20,7 @@
     "enable_ruleset": false,
     "ruleset_path": "",
     "rules_policy_path": "",
+    "detector_policy_label": "none",
     "plugin_path": "/usr/local/etc/snort/so_rules",
     "daq_dir": "/usr/local/lib/daq",
     "snaplen": 65535,

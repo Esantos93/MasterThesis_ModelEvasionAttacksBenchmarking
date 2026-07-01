@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_thursday_baseline_003",
-    "description": "Hybrid physical-header and canonical-payload CICIDS2017 Thursday baseline using six-packet parent groups.",
+    "experiment_id": "exp_cicids2017_thursday_baseline_002",
+    "description": "Potential Llama-3.1-8B final fixed-size CICIDS2017 Thursday baseline benchmark using six-packet parent groups.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -50,14 +50,13 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "baseline-v3-hybrid-fixed-size-6",
+    "experiment_config_label": "baseline-002-fixed-size-6",
     "experiment_config_label_options": [
-      "baseline-v3-hybrid-fixed-size-6"
+      "baseline-002-fixed-size-6"
     ],
     "grouping_policy": "fixed_packet_count",
-    "grouping_unit": "physical_packet",
+    "grouping_unit": "canonical_tcp_region",
     "group_size_packets": 6,
-    "header_editability_policy_path": "step_15_grouping/header_editability_policy_v1.json",
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0

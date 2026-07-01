@@ -20,6 +20,7 @@
     "enable_ruleset": true,
     "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
     "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
+    "detector_policy_label": "security-ips",
     "plugin_path": "/usr/local/etc/snort/so_rules",
     "daq_dir": "/usr/local/lib/daq",
     "snaplen": 65535,
