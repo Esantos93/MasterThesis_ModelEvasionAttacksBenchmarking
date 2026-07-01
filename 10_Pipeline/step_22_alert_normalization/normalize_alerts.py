@@ -16,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.naming import sanitize_name_component
 from common.terminal_logging import terminal_log
 
 
@@ -47,12 +48,16 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 
 # This function validates the minimum config shape required by Step 22.
 def validate_config(config: dict[str, Any]) -> None:
-    require_keys(config, ["experiment", "pipeline"], "config")
+    require_keys(config, ["experiment", "pipeline", "snort"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
+    require_keys(config["snort"], ["detector_policy_label"], "snort")
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+    detector_policy_label = config["snort"]["detector_policy_label"]
+    if not isinstance(detector_policy_label, str) or not sanitize_name_component(detector_policy_label):
+        raise ValueError("snort.detector_policy_label must be a non-empty string.")
 
 
 # This function returns the experiment configuration label fixed in the Step 11 config.
@@ -60,33 +65,45 @@ def experiment_config_label_from_config(config: dict[str, Any]) -> str:
     return config["pipeline"]["experiment_config_label"]
 
 
+def detector_policy_label_from_config(config: dict[str, Any]) -> str:
+    return sanitize_name_component(config["snort"]["detector_policy_label"])
+
+
+def rules_policy_path_from_config(config: dict[str, Any]) -> str:
+    return str(config.get("snort", {}).get("rules_policy_path", "")).strip()
+
+
 # This function resolves the default Step 21 input directory for PRE or POST alert artifacts.
 def default_snort_input_dir(
     config: dict[str, Any],
     traffic_version: str,
+    detector_policy_label: str,
     experiment_config_label: str,
     post_run_label: str | None = None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
+    detector_root = experiment_root / "11_snort_raw" / detector_policy_label
     if traffic_version == "pre":
-        return experiment_root / "11_snort_raw" / "pre"
+        return detector_root / "pre"
     if not post_run_label:
         raise ValueError("POST normalization requires --post-run-label unless --input-dir is provided explicitly.")
-    return experiment_root / "11_snort_raw" / "post" / post_run_label
+    return detector_root / "post" / post_run_label
 
 
 # This function resolves the default Step 22 output directory for PRE or POST normalized alerts.
 def default_normalized_output_dir(
     config: dict[str, Any],
     traffic_version: str,
+    detector_policy_label: str,
     experiment_config_label: str,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
+    detector_root = experiment_root / "12_alerts_processed" / detector_policy_label
     if traffic_version == "pre":
-        return experiment_root / "12_alerts_processed" / "pre"
-    return experiment_root / "12_alerts_processed" / "post" / experiment_config_label
+        return detector_root / "pre"
+    return detector_root / "post" / experiment_config_label
 
 
 # This function finds the converted Step 21 alert JSON file in a Snort raw output directory.
@@ -216,6 +233,8 @@ def normalize_one_traffic_version(
     *,
     config: dict[str, Any],
     traffic_version: str,
+    configured_detector_policy_label: str,
+    configured_rules_policy_path: str,
     configured_experiment_config_label: str,
     input_dir: Path,
     output_dir: Path,
@@ -226,6 +245,8 @@ def normalize_one_traffic_version(
         raise FileNotFoundError(f"Step 21 execution metadata does not exist: {metadata_path}")
     execution_metadata = read_json(metadata_path)
     source_traffic_version = execution_metadata.get("traffic_version")
+    source_detector_policy_label = execution_metadata.get("detector_policy_label")
+    source_rules_policy_path = execution_metadata.get("rules_policy_path")
     source_experiment_config_label = execution_metadata.get("experiment_config_label")
     source_traffic_scope = execution_metadata.get("traffic_scope")
     source_post_run_label = execution_metadata.get("post_run_label")
@@ -233,6 +254,11 @@ def normalize_one_traffic_version(
         raise ValueError(
             "Step 21 execution metadata traffic_version does not match the requested normalization side: "
             f"{source_traffic_version!r} != {traffic_version!r}"
+        )
+    if source_detector_policy_label != configured_detector_policy_label:
+        raise ValueError(
+            "Step 21 execution metadata detector_policy_label does not match the active config: "
+            f"{source_detector_policy_label!r} != {configured_detector_policy_label!r}"
         )
     if traffic_version == "post" and source_experiment_config_label != configured_experiment_config_label:
         raise ValueError(
@@ -272,6 +298,10 @@ def normalize_one_traffic_version(
             "config_source": config.get("_config_path", ""),
             "traffic_version": traffic_version,
             "source_traffic_version": source_traffic_version,
+            "configured_detector_policy_label": configured_detector_policy_label,
+            "source_detector_policy_label": source_detector_policy_label,
+            "configured_rules_policy_path": configured_rules_policy_path,
+            "source_rules_policy_path": source_rules_policy_path,
             "configured_experiment_config_label": configured_experiment_config_label,
             "source_experiment_config_label": source_experiment_config_label,
             "normalized_experiment_config_label": normalized_experiment_config_label,
@@ -303,6 +333,10 @@ def normalize_one_traffic_version(
         "generated_at_utc": utc_now(),
         "traffic_version": traffic_version,
         "source_traffic_version": source_traffic_version,
+        "configured_detector_policy_label": configured_detector_policy_label,
+        "source_detector_policy_label": source_detector_policy_label,
+        "configured_rules_policy_path": configured_rules_policy_path,
+        "source_rules_policy_path": source_rules_policy_path,
         "configured_experiment_config_label": configured_experiment_config_label,
         "source_experiment_config_label": source_experiment_config_label,
         "normalized_experiment_config_label": normalized_experiment_config_label,
@@ -318,6 +352,8 @@ def normalize_one_traffic_version(
     write_json(metadata_output_path, processing_metadata)
     return {
         "traffic_version": traffic_version,
+        "detector_policy_label": configured_detector_policy_label,
+        "rules_policy_path": configured_rules_policy_path,
         "alert_count": summary["alert_count"],
         "unique_signature_count": summary["unique_signature_count"],
         "detector_source_counts": summary["detector_source_counts"],
@@ -340,6 +376,8 @@ def normalize_alerts(
     config = load_json_config(config_path)
     validate_config(config)
     experiment_config_label = experiment_config_label_from_config(config)
+    detector_policy_label = detector_policy_label_from_config(config)
+    rules_policy_path = rules_policy_path_from_config(config)
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
     if (input_dir or output_dir or input_alert_json) and len(selected_versions) != 1:
         raise ValueError("--input-dir, --output-dir, and --input-alert-json overrides are only valid for one traffic version.")
@@ -356,6 +394,7 @@ def normalize_alerts(
             else default_snort_input_dir(
                 config,
                 selected_version,
+                detector_policy_label,
                 experiment_config_label,
                 post_run_label if selected_version == "post" else None,
                 experiment_root,
@@ -364,13 +403,15 @@ def normalize_alerts(
         resolved_output_dir = (
             Path(output_dir).expanduser()
             if output_dir
-            else default_normalized_output_dir(config, selected_version, experiment_config_label, experiment_root)
+            else default_normalized_output_dir(config, selected_version, detector_policy_label, experiment_config_label, experiment_root)
         )
         resolved_input_alert_json = Path(input_alert_json).expanduser() if input_alert_json else None
         results.append(
             normalize_one_traffic_version(
                 config=config,
                 traffic_version=selected_version,
+                configured_detector_policy_label=detector_policy_label,
+                configured_rules_policy_path=rules_policy_path,
                 configured_experiment_config_label=experiment_config_label,
                 input_dir=resolved_input_dir,
                 output_dir=resolved_output_dir,
@@ -389,7 +430,8 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     config = load_json_config(args.config)
     validate_config(config)
     experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
-    log_root = experiment_root / "logs" / "step_22_alert_normalization"
+    detector_policy_label = detector_policy_label_from_config(config)
+    log_root = experiment_root / "logs" / "step_22_alert_normalization" / detector_policy_label
     if args.traffic_version == "pre":
         log_dir = log_root / "pre"
         label_for_filename = "pre"
@@ -414,7 +456,7 @@ def parse_cli_args() -> argparse.Namespace:
     add("--config", required=True, help="Path to the experiment JSON config.")
     add("--traffic-version", choices=["pre", "post", "both"], default="both", help="Traffic side to normalize.")
     add("--experiment-root", help="Optional experiment root override.")
-    add("--post-run-label", help="Required for POST default input resolution. Step 21 POST run label under 11_snort_raw/post/.")
+    add("--post-run-label", help="Required for POST default input resolution. Step 21 POST run label under 11_snort_raw/<detector_policy_label>/post/.")
     add("--input-dir", help="Explicit Step 21 input directory. Only valid for one traffic version.")
     add("--input-alert-json", help="Explicit converted Step 21 alerts__*.json path. Only valid for one traffic version.")
     add("--output-dir", help="Explicit Step 22 output directory. Only valid for one traffic version.")
@@ -444,10 +486,11 @@ def main() -> None:
 
         for result in results:
             print(
-                f"{result['traffic_version']}: alerts={result['alert_count']} "
+                f"{result['traffic_version']} {result['detector_policy_label']}: alerts={result['alert_count']} "
                 f"unique_signatures={result['unique_signature_count']} output={result['normalized_alerts']}"
             )
-            print(f"{result['traffic_version']}: detector_sources={result['detector_source_counts']}")
+            print(f"{result['traffic_version']} {result['detector_policy_label']}: rules_policy_path={result['rules_policy_path'] or 'none'}")
+            print(f"{result['traffic_version']} {result['detector_policy_label']}: detector_sources={result['detector_source_counts']}")
 
 
 if __name__ == "__main__":
