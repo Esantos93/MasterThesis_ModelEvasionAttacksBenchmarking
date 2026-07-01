@@ -16,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.naming import sanitize_name_component
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
@@ -41,12 +42,16 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 
 # This function validates the minimum config shape required by Step 23.
 def validate_config(config: dict[str, Any]) -> None:
-    require_keys(config, ["experiment", "pipeline"], "config")
+    require_keys(config, ["experiment", "pipeline", "snort"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
+    require_keys(config["snort"], ["detector_policy_label"], "snort")
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+    detector_policy_label = config["snort"]["detector_policy_label"]
+    if not isinstance(detector_policy_label, str) or not sanitize_name_component(detector_policy_label):
+        raise ValueError("snort.detector_policy_label must be a non-empty string.")
 
 
 # This function returns the experiment configuration label fixed in the Step 11 config.
@@ -54,16 +59,26 @@ def experiment_config_label_from_config(config: dict[str, Any]) -> str:
     return config["pipeline"]["experiment_config_label"]
 
 
+def detector_policy_label_from_config(config: dict[str, Any]) -> str:
+    return sanitize_name_component(config["snort"]["detector_policy_label"])
+
+
+def rules_policy_path_from_config(config: dict[str, Any]) -> str:
+    return str(config.get("snort", {}).get("rules_policy_path", "")).strip()
+
+
 # This function resolves default Step 22 normalized alert paths and default Step 23 output paths.
 def default_paths(
     config: dict[str, Any],
+    detector_policy_label: str,
     experiment_config_label: str,
     experiment_root_override: str | Path | None = None,
 ) -> dict[str, Path]:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
-    pre_dir = experiment_root / "12_alerts_processed" / "pre"
-    post_dir = experiment_root / "12_alerts_processed" / "post" / experiment_config_label
-    comparison_dir = experiment_root / "13_comparison"
+    processed_root = experiment_root / "12_alerts_processed" / detector_policy_label
+    pre_dir = processed_root / "pre"
+    post_dir = processed_root / "post" / experiment_config_label
+    comparison_dir = experiment_root / "13_comparison" / detector_policy_label
     return {
         "pre_normalized": pre_dir / "normalized-alerts__traffic-pre.json",
         "post_normalized": post_dir / f"normalized-alerts__traffic-post__experiment-config-{experiment_config_label}.json",
@@ -87,6 +102,29 @@ def load_normalized_alerts(path: Path, expected_traffic_version: str) -> tuple[d
         if not isinstance(alert.get("signature_key"), str):
             raise ValueError(f"Normalized alert {index} has no string signature_key in: {path}")
     return artifact, alerts
+
+
+def validate_normalization_metadata(
+    artifact: dict[str, Any],
+    *,
+    artifact_path: Path,
+    expected_detector_policy_label: str,
+) -> None:
+    metadata = artifact.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Normalized alert artifact has invalid metadata: {artifact_path}")
+    source_detector_policy_label = metadata.get("source_detector_policy_label")
+    configured_detector_policy_label = metadata.get("configured_detector_policy_label")
+    if configured_detector_policy_label != expected_detector_policy_label:
+        raise ValueError(
+            "Normalized artifact configured_detector_policy_label does not match active config: "
+            f"{configured_detector_policy_label!r} != {expected_detector_policy_label!r} in {artifact_path}"
+        )
+    if source_detector_policy_label != expected_detector_policy_label:
+        raise ValueError(
+            "Normalized artifact source_detector_policy_label does not match active config: "
+            f"{source_detector_policy_label!r} != {expected_detector_policy_label!r} in {artifact_path}"
+        )
 
 
 # This helper returns a compact alert reference for comparison records.
@@ -258,13 +296,25 @@ def compare_normalized_alerts(
     config = load_json_config(config_path)
     validate_config(config)
     experiment_config_label = experiment_config_label_from_config(config)
-    paths = default_paths(config, experiment_config_label, experiment_root)
+    detector_policy_label = detector_policy_label_from_config(config)
+    rules_policy_path = rules_policy_path_from_config(config)
+    paths = default_paths(config, detector_policy_label, experiment_config_label, experiment_root)
     pre_path = Path(pre_normalized).expanduser() if pre_normalized else paths["pre_normalized"]
     post_path = Path(post_normalized).expanduser() if post_normalized else paths["post_normalized"]
     comparison_dir = Path(output_dir).expanduser() if output_dir else paths["comparison_dir"]
 
     pre_artifact, pre_alerts = load_normalized_alerts(pre_path, "pre")
     post_artifact, post_alerts = load_normalized_alerts(post_path, "post")
+    validate_normalization_metadata(
+        pre_artifact,
+        artifact_path=pre_path,
+        expected_detector_policy_label=detector_policy_label,
+    )
+    validate_normalization_metadata(
+        post_artifact,
+        artifact_path=post_path,
+        expected_detector_policy_label=detector_policy_label,
+    )
     comparison = compare_alert_multisets(pre_alerts, post_alerts)
     per_signature_summary = summarize_by_signature(pre_alerts, post_alerts)
     comparison_dir.mkdir(parents=True, exist_ok=True)
@@ -277,6 +327,8 @@ def compare_normalized_alerts(
         "generated_at_utc": utc_now(),
         "experiment_id": config["experiment"]["experiment_id"],
         "config_source": config.get("_config_path", ""),
+        "detector_policy_label": detector_policy_label,
+        "rules_policy_path": rules_policy_path,
         "experiment_config_label": experiment_config_label,
         "source_pre_normalized_alerts": str(pre_path),
         "source_post_normalized_alerts": str(post_path),
@@ -321,6 +373,8 @@ def compare_normalized_alerts(
         "post_unique_signature_count": comparison["summary"]["post_unique_signature_count"],
         "pre_detector_source_counts": comparison["summary"]["pre_detector_source_counts"],
         "post_detector_source_counts": comparison["summary"]["post_detector_source_counts"],
+        "detector_policy_label": detector_policy_label,
+        "rules_policy_path": rules_policy_path,
         "classification_counts": comparison["summary"]["classification_counts"],
         "successful_evasion_count": comparison["summary"]["successful_evasion_count"],
         "alert_mutation_count": comparison["summary"]["alert_mutation_count"],
@@ -339,10 +393,11 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     config = load_json_config(args.config)
     validate_config(config)
     experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
+    detector_policy_label = detector_policy_label_from_config(config)
     return default_step_log_path(
         experiment_root=experiment_root,
         step_name="step_23_alert_comparison",
-        branch_label=None,
+        branch_label=detector_policy_label,
         filename_prefix="step_23_alert_comparison",
     )
 
@@ -380,6 +435,8 @@ def main() -> None:
 
         print(f"PRE alerts: {result['pre_alert_count']}")
         print(f"POST alerts: {result['post_alert_count']}")
+        print(f"Detector policy: {result['detector_policy_label']}")
+        print(f"Rules policy path: {result['rules_policy_path'] or 'none'}")
         print(f"PRE unique signatures: {result['pre_unique_signature_count']}")
         print(f"POST unique signatures: {result['post_unique_signature_count']}")
         print(f"PRE detector sources: {result['pre_detector_source_counts']}")
