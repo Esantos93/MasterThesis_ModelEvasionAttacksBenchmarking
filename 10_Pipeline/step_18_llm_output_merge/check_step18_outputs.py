@@ -1,6 +1,5 @@
 import argparse
 import json
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -49,10 +48,12 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     merged_data = load_json(merged)
     report_data = load_json(merge_report)
 
+    summary = report_data.get("summary", {})
+    group_outcomes = report_data.get("group_outcomes", {})
     patch_application = report_data.get("patch_application", {})
 
     print_json("STEP 18 METADATA", merged_data.get("metadata", {}), limit=4000)
-    print_json("STEP 18 SUMMARY", report_data.get("summary", {}))
+    print_json("STEP 18 SUMMARY", summary)
 
     print("\nSTEP 18 PATCH APPLICATION COUNTS")
     print("applied_patches:", len(patch_application.get("applied_patches", [])))
@@ -62,10 +63,13 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     print("modified_packet_ids:", len(patch_application.get("modified_packet_ids", [])))
     print("errors:", len(patch_application.get("errors", [])))
 
-    group_counts = Counter()
-    for key in ["accepted_groups", "llm_output_failure_groups", "invalid_traffic_groups"]:
-        group_counts[key] = len(report_data.get(key, []))
-    print_json("STEP 18 GROUP COUNTS", dict(group_counts))
+    group_counts = {
+        "accepted_group_count": summary.get("accepted_group_count", 0),
+        "llm_output_failure_group_count": summary.get("llm_output_failure_group_count", 0),
+        "accepted_groups_in_group_outcomes": len(group_outcomes.get("accepted_groups", [])),
+        "llm_output_failure_groups_in_group_outcomes": len(group_outcomes.get("llm_output_failure_groups", [])),
+    }
+    print_json("STEP 18 GROUP COUNTS", group_counts)
 
     payload_edits = patch_application.get("payload_edits", [])
     if payload_edits:
