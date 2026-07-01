@@ -74,6 +74,10 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("snort.detector_policy_label must be a string when provided.")
         if not sanitize_name_component(detector_policy_label):
             raise ValueError("snort.detector_policy_label must not be empty when provided.")
+    if "snaplen" in snort:
+        snaplen = snort["snaplen"]
+        if not isinstance(snaplen, int) or isinstance(snaplen, bool) or snaplen <= 0:
+            raise ValueError("snort.snaplen must be a positive integer when provided.")
 
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
@@ -190,6 +194,9 @@ def build_snort_command(
             build_lua_ips_config(snort_config),
         ]
     )
+    snaplen = snort_config.get("snaplen")
+    if snaplen is not None:
+        command.extend(["--snaplen", str(snaplen)])
     return command
 
 
@@ -395,6 +402,7 @@ def run_one_snort_execution(
     print(f"[{traffic_version}] snort_config_path={expand_config_path(snort_config['config_path'])}")
     print(f"[{traffic_version}] plugin_path={expand_config_path(snort_config['plugin_path'])}")
     print(f"[{traffic_version}] daq_dir={expand_config_path(snort_config['daq_dir'])}")
+    print(f"[{traffic_version}] snaplen={snort_config.get('snaplen') or 'default'}")
     print(f"[{traffic_version}] enable_ruleset={snort_config['enable_ruleset']}")
     print(f"[{traffic_version}] enable_builtin_rules={snort_config['enable_builtin_rules']}")
     print(f"[{traffic_version}] ruleset_path={expand_config_path(snort_config['ruleset_path']) if snort_config['enable_ruleset'] else 'disabled'}")
@@ -436,6 +444,7 @@ def run_one_snort_execution(
         "snort_config_path": expand_config_path(snort_config["config_path"]),
         "plugin_path": expand_config_path(snort_config["plugin_path"]),
         "daq_dir": expand_config_path(snort_config["daq_dir"]),
+        "snaplen": snort_config.get("snaplen"),
         "enable_builtin_rules": snort_config["enable_builtin_rules"],
         "enable_ruleset": snort_config["enable_ruleset"],
         "ruleset_path": expand_config_path(snort_config["ruleset_path"]) if snort_config["enable_ruleset"] else "",
