@@ -488,7 +488,7 @@ def run_snort(
 
 
 # This function resolves the terminal log path for Step 21.
-# Terminal logs are grouped by the requested traffic execution scope, while POST artifacts remain separated by experiment_config_label.
+# Terminal logs are grouped by the requested traffic execution scope, while POST raw artifacts are separated by post_run_label.
 def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         return Path(args.log_file).expanduser()
