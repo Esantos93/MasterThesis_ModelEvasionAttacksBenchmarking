@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import binascii
 import bisect
 import json
@@ -121,51 +120,6 @@ def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, A
 # It is used before assigning JSON values to Scapy header fields.
 def is_int_like(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-# This helper returns an integer value when the JSON field is valid, otherwise it returns the provided default.
-def int_or_default(value: Any, default: int | None) -> int | None:
-    if is_int_like(value):
-        return value
-    return default
-
-
-def normalize_tcp_option_value(value: Any) -> Any:
-    if value is None or isinstance(value, (bytes, str)) or is_int_like(value):
-        return value
-    if isinstance(value, (tuple, list)):
-        return tuple(normalize_tcp_option_value(item) for item in value)
-    raise ValueError(f"unsupported TCP option value type: {type(value).__name__}")
-
-
-# Step 14 stores Scapy's list-of-tuples display form as text. literal_eval parses
-# only Python literals; unlike eval, it cannot execute names, calls, or imports.
-def parse_tcp_options(value: Any, supported_names: set[str] | frozenset[str]) -> list[tuple[Any, Any]]:
-    if value in (None, "", "[]"):
-        return []
-    if isinstance(value, str):
-        try:
-            parsed = ast.literal_eval(value)
-        except (SyntaxError, ValueError) as error:
-            raise ValueError(f"TCP options display string is not a valid literal: {error}") from error
-    else:
-        parsed = value
-
-    if not isinstance(parsed, (list, tuple)):
-        raise ValueError("TCP options must be a list or tuple of (name, value) pairs")
-
-    normalized = []
-    for index, option in enumerate(parsed):
-        if not isinstance(option, (list, tuple)) or len(option) != 2:
-            raise ValueError(f"TCP option at index {index} is not a two-item pair")
-        name, option_value = option
-        if isinstance(name, str):
-            if name not in supported_names:
-                raise ValueError(f"TCP option at index {index} has unsupported name {name!r}")
-        elif not (is_int_like(name) and 0 <= name <= 255):
-            raise ValueError(f"TCP option at index {index} must use a supported name or an 8-bit kind")
-        normalized.append((name, normalize_tcp_option_value(option_value)))
-    return normalized
 
 
 # PCAPs normally store Ethernet frames without the four-byte FCS but retain the
@@ -534,6 +488,8 @@ def prepare_tcp_sequence_translation(
 ) -> dict[str, Any]:
     prepared_by_index = {}
     segments_by_direction: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
+    payload_content_changed_packet_count = 0
+    payload_length_changed_packet_count = 0
 
     for record in traffic:
         reduced_packet_index = record.get("reduced_packet_index")
@@ -544,6 +500,9 @@ def prepare_tcp_sequence_translation(
         descriptor = reference_context["descriptors_by_index"][reduced_packet_index]
         validate_record_against_reference(record, descriptor)
         final_payload = decode_payload_hex_strict(record)
+        if descriptor is not None:
+            payload_content_changed_packet_count += int(descriptor["payload"] != final_payload)
+            payload_length_changed_packet_count += int(len(descriptor["payload"]) != len(final_payload))
         prepared_by_index[reduced_packet_index] = {
             "record": record,
             "descriptor": descriptor,
@@ -736,6 +695,8 @@ def prepare_tcp_sequence_translation(
             "reference_pcap_packet_count": reference_context["packet_count"],
             "tcp_connection_count": reference_context["connection_count"],
             "tcp_direction_count": len(direction_results),
+            "tcp_payload_content_changed_packet_count": payload_content_changed_packet_count,
+            "tcp_payload_length_changed_packet_count": payload_length_changed_packet_count,
             "tcp_connections_with_payload_length_delta": len(adjusted_connections),
             "resized_tcp_segment_count": resized_segment_count,
             "tcp_translation_event_count": sum(result["translation_event_count"] for result in direction_results),
@@ -756,6 +717,30 @@ def prepare_tcp_sequence_translation(
             "tcp_reconstruction_error_count": 0,
         },
     }
+
+
+def enforce_active_reconstruction_contract(config: dict[str, Any], translation_plan: dict[str, Any]) -> None:
+    pipeline = config.get("pipeline", {})
+    modification_strategy = pipeline.get("modification_strategy")
+    if modification_strategy != "header_only_strategy_v1":
+        return
+
+    summary = translation_plan["summary"]
+    payload_counters = {
+        "tcp_payload_content_changed_packet_count": summary.get("tcp_payload_content_changed_packet_count", 0),
+        "tcp_payload_length_changed_packet_count": summary.get("tcp_payload_length_changed_packet_count", 0),
+        "resized_tcp_segment_count": summary.get("resized_tcp_segment_count", 0),
+        "tcp_payload_growth_bytes": summary.get("tcp_payload_growth_bytes", 0),
+        "tcp_payload_shrinkage_bytes": summary.get("tcp_payload_shrinkage_bytes", 0),
+        "tcp_net_payload_delta_bytes": summary.get("tcp_net_payload_delta_bytes", 0),
+    }
+    if any(payload_counters.values()):
+        raise TcpReconstructionError(
+            "baseline004_payload_change_detected",
+            "Baseline-004 is header-only, but Step 20 detected payload changes before reconstruction.",
+            modification_strategy=modification_strategy,
+            **payload_counters,
+        )
 
 
 # This function decodes the mutable payload_hex field into bytes.
@@ -860,141 +845,6 @@ def rebuild_from_reference_packet(
     elif IPv6 in packet:
         packet[IPv6].plen = None
     return packet
-
-
-# This function rebuilds the Ethernet layer from the JSON record.
-# Ethernet source, destination, and type are taken from Step 14 / Step 19 fields.
-def build_ethernet(record: dict[str, Any], scapy: dict[str, Any], packet_issues: list[dict[str, Any]]) -> Any:
-    Ether = scapy["Ether"]
-    eth_src = record.get("eth_src")
-    eth_dst = record.get("eth_dst")
-    eth_type = int_or_default(record.get("eth_type"), None)
-    if not isinstance(eth_src, str) or not isinstance(eth_dst, str):
-        packet_issues.append(
-            issue(
-                "error",
-                "ethernet_address_missing",
-                "eth_src and eth_dst must be strings before PCAP reconstruction.",
-            )
-        )
-        return None
-    kwargs = {"src": eth_src, "dst": eth_dst}
-    if eth_type is not None:
-        kwargs["type"] = eth_type
-    return Ether(**kwargs)
-
-
-# This function rebuilds either an IPv4 or IPv6 layer from the JSON record.
-# It preserves IP addresses, protocol number, TTL or hop limit, IPv4 ID, and IPv4 flags when those values are available.
-def build_ip_layer(record: dict[str, Any], scapy: dict[str, Any], packet_issues: list[dict[str, Any]]) -> Any:
-    IP = scapy["IP"]
-    IPv6 = scapy["IPv6"]
-    ip_version = record.get("ip_version")
-    src_ip = record.get("src_ip")
-    dst_ip = record.get("dst_ip")
-    if not isinstance(src_ip, str) or not src_ip or not isinstance(dst_ip, str) or not dst_ip:
-        packet_issues.append(issue("error", "ip_address_missing", "src_ip and dst_ip are required for IP packets."))
-        return None
-
-    proto = int_or_default(record.get("proto"), None)
-    ttl = int_or_default(record.get("ttl"), None)
-    if ip_version == 4:
-        kwargs = {"src": src_ip, "dst": dst_ip}
-        if proto is not None:
-            kwargs["proto"] = proto
-        if ttl is not None:
-            kwargs["ttl"] = ttl
-        ip_id = int_or_default(record.get("ip_id"), None)
-        if ip_id is not None:
-            kwargs["id"] = ip_id
-        ip_flags = record.get("ip_flags")
-        if isinstance(ip_flags, str) and ip_flags:
-            kwargs["flags"] = ip_flags
-        return IP(**kwargs)
-    if ip_version == 6:
-        kwargs = {"src": src_ip, "dst": dst_ip}
-        if proto is not None:
-            kwargs["nh"] = proto
-        if ttl is not None:
-            kwargs["hlim"] = ttl
-        return IPv6(**kwargs)
-
-    packet_issues.append(
-        issue(
-            "error",
-            "unsupported_ip_version",
-            "Only IPv4 and IPv6 records can be reconstructed as IP packets.",
-            ip_version=ip_version,
-        )
-    )
-    return None
-
-
-# This function rebuilds the supported transport layer from the JSON record.
-# TCP, UDP, and ICMP are reconstructed explicitly. Unsupported transport protocols are reported and the payload is attached after the IP layer.
-def build_transport_layer(record: dict[str, Any], scapy: dict[str, Any], packet_issues: list[dict[str, Any]]) -> Any:
-    TCP = scapy["TCP"]
-    UDP = scapy["UDP"]
-    ICMP = scapy["ICMP"]
-    transport_protocol = str(record.get("transport_protocol") or "").upper()
-
-    if transport_protocol == "TCP":
-        src_port = int_or_default(record.get("src_port"), None)
-        dst_port = int_or_default(record.get("dst_port"), None)
-        if src_port is None or dst_port is None:
-            packet_issues.append(issue("error", "tcp_ports_missing", "TCP records require src_port and dst_port."))
-            return None
-        kwargs = {
-            "sport": src_port,
-            "dport": dst_port,
-            "flags": int_or_default(record.get("tcp_flags"), 0),
-        }
-        window = int_or_default(record.get("window"), None)
-        if window is not None:
-            kwargs["window"] = window
-        try:
-            options = parse_tcp_options(record.get("options"), scapy["TCP_OPTION_NAMES"])
-        except ValueError as error:
-            packet_issues.append(
-                issue(
-                    "error",
-                    "tcp_options_invalid",
-                    "TCP options could not be parsed and validated for reconstruction.",
-                    field="options",
-                    failure_message=str(error),
-                    policy="reject_instead_of_omitting_tcp_options",
-                )
-            )
-            options = []
-        if options:
-            kwargs["options"] = options
-        return TCP(**kwargs)
-
-    if transport_protocol == "UDP":
-        src_port = int_or_default(record.get("src_port"), None)
-        dst_port = int_or_default(record.get("dst_port"), None)
-        if src_port is None or dst_port is None:
-            packet_issues.append(issue("error", "udp_ports_missing", "UDP records require src_port and dst_port."))
-            return None
-        return UDP(sport=src_port, dport=dst_port)
-
-    if transport_protocol == "ICMP":
-        kwargs = {
-            "type": int_or_default(record.get("icmp_type"), 8),
-            "code": int_or_default(record.get("icmp_code"), 0),
-        }
-        return ICMP(**kwargs)
-
-    if transport_protocol:
-        packet_issues.append(
-            issue(
-                "warning",
-                "transport_protocol_not_reconstructed",
-                "Unsupported transport protocol; payload is attached directly after the IP layer.",
-                transport_protocol=transport_protocol,
-            )
-        )
-    return None
 
 
 # This function extracts group-level context from the Step 18 merge trace when it is present.
@@ -1600,6 +1450,7 @@ def reconstruct_validated_traffic(
             traffic=traffic,
             reference_context=reference_context,
         )
+        enforce_active_reconstruction_contract(config, translation_plan)
     except Exception as error:
         error_detail = (
             error.detail
