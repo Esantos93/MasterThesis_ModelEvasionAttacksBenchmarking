@@ -7,12 +7,73 @@ from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 HEADER_POLICY_SCHEMA_VERSION = "header_editability_policy_v1"
+KNOWN_HEADER_PROTOCOLS = {"ethernet", "ipv4", "tcp"}
 HEADER_FIELD_ALIASES = {
     "ipv4.tos": "tos",
     "ipv4.ttl": "ttl",
     "ipv4.identification": "ip_id",
     "tcp.window": "window",
 }
+TCP_FLAG_BITS = {
+    "ns": 0x100,
+    "cwr": 0x080,
+    "ece": 0x040,
+    "urg": 0x020,
+    "ack": 0x010,
+    "psh": 0x008,
+    "rst": 0x004,
+    "syn": 0x002,
+    "fin": 0x001,
+}
+
+
+#This helper coerces boolean-like bit values into integer bits.
+def bit_value(value: Any) -> int:
+    return 1 if bool(value) else 0
+
+
+#This helper keeps IPv4 fragmentation composite and subfields consistent after edits.
+def sync_ipv4_fragment_fields(header: dict[str, Any]) -> None:
+    flags = header.get("flags")
+    if not isinstance(flags, dict):
+        return
+    combined = (
+        (bit_value(flags.get("reserved")) << 15)
+        | (bit_value(flags.get("dont_fragment")) << 14)
+        | (bit_value(flags.get("more_fragments")) << 13)
+        | (int(header.get("fragment_offset_units") or 0) & 0x1FFF)
+    )
+    header["flags_fragment_offset"] = combined
+    header["fragmented"] = bool((combined & 0x2000) or (combined & 0x1FFF))
+    header["fragment_offset_bytes"] = (combined & 0x1FFF) * 8
+
+
+#This helper keeps TCP flag raw value and top-level aliases consistent after subflag edits.
+def sync_tcp_flag_fields(record: dict[str, Any]) -> None:
+    header = record.get("tcp_header")
+    if not isinstance(header, dict):
+        return
+    flags = header.get("flags")
+    if not isinstance(flags, dict):
+        return
+    raw = 0
+    for flag_name, bit_mask in TCP_FLAG_BITS.items():
+        if bit_value(flags.get(flag_name)):
+            raw |= bit_mask
+    flags["raw"] = raw
+    record["tcp_flags"] = raw
+    flag_letters = [
+        ("fin", "F"),
+        ("syn", "S"),
+        ("rst", "R"),
+        ("psh", "P"),
+        ("ack", "A"),
+        ("urg", "U"),
+        ("ece", "E"),
+        ("cwr", "C"),
+        ("ns", "N"),
+    ]
+    record["tcp_flags_str"] = "".join(letter for flag_name, letter in flag_letters if bit_value(flags.get(flag_name)))
 
 
 #This function reads a JSON file and returns the parsed Python object.
@@ -46,13 +107,14 @@ def header_policy_rule_lookup(policy: dict[str, Any]) -> dict[str, dict[str, Any
             expanded_fields.append(f"{rule['protocol']}.{rule['field']}")
         for field in rule.get("fields", []):
             field_text = str(field)
-            if "." in field_text:
+            field_protocol, _, _field_remainder = field_text.partition(".")
+            if "." in field_text and field_protocol in KNOWN_HEADER_PROTOCOLS:
                 expanded_fields.append(field_text)
+            elif "protocol" in rule:
+                expanded_fields.append(f"{rule['protocol']}.{field_text}")
             else:
                 for protocol in rule.get("protocols", []):
                     expanded_fields.append(f"{protocol}.{field_text}")
-                if "protocol" in rule:
-                    expanded_fields.append(f"{rule['protocol']}.{field_text}")
         for field_key in expanded_fields:
             if field_key in lookup:
                 raise ValueError(f"Header editability policy defines multiple rules for {field_key!r}.")
@@ -164,6 +226,18 @@ def set_header_value(record: dict[str, Any], field: str, value: int) -> None:
         if field == "ipv4.tos":
             header["dscp"] = value >> 2
             header["ecn"] = value & 0x03
+        if field.startswith("ipv4.flags.") or field == "ipv4.fragment_offset_units":
+            sync_ipv4_fragment_fields(header)
+        if field == "ipv4.flags_fragment_offset":
+            flags = header.get("flags")
+            if isinstance(flags, dict):
+                flags["reserved"] = bool(value & 0x8000)
+                flags["dont_fragment"] = bool(value & 0x4000)
+                flags["more_fragments"] = bool(value & 0x2000)
+            header["fragment_offset_units"] = value & 0x1FFF
+            sync_ipv4_fragment_fields(header)
+        if field.startswith("tcp.flags."):
+            sync_tcp_flag_fields(record)
     alias = HEADER_FIELD_ALIASES.get(field)
     if alias is not None:
         record[alias] = value
