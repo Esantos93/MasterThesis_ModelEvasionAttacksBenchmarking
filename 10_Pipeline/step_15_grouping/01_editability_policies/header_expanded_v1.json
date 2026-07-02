@@ -1,7 +1,7 @@
 {
   "schema_version": "header_editability_policy_v1",
   "policy_id": "expanded_header_editability_v1",
-  "description": "Expanded header-only policy for final experiment 03. It keeps payload bytes non-editable and exposes a broader packet-scoped IPv4/TCP header surface than the conservative Baseline, while keeping lengths, checksums, TCP state, parser-selection fields, flow identity fields, fragmentation controls, and TCP control flags under pipeline or immutable ownership.",
+  "description": "Expanded header-only policy for final experiment 03. It keeps payload bytes non-editable and exposes a deliberately broader IPv4/TCP header surface than the conservative Baseline, including experimental fragmentation and TCP control-flag fields, while keeping lengths, checksums, parser-selection fields, flow identity fields, TCP sequence/acknowledgement state, and TCP NS/ACK ownership under pipeline or immutable ownership.",
   "justification_document": "20_Notes/28_Experimentos_Finales/03_expanded_header_editability_experiment.md",
   "default_classification": "immutable_field",
   "source_priority": [
@@ -217,35 +217,162 @@
       ]
     },
     {
-      "rule_id": "immutable_fragmentation_and_tcp_control_flags_v1",
-      "protocols": [
-        "ipv4",
-        "tcp"
+      "rule_id": "ipv4_flags_fragment_offset_editable_experimental",
+      "protocol": "ipv4",
+      "field": "flags_fragment_offset",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
       ],
+      "constraints": {
+        "encoding": "uint16_be",
+        "min": 0,
+        "max": 65535,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "ipv4.checksum"
+        ],
+        "experimental_risk": "may_introduce_ipv4_fragmentation"
+      },
+      "rationale": "This experiment intentionally exposes the combined IPv4 flags/fragment-offset word to test a more adversarial header surface. Invalid or non-materializable outputs must be rejected downstream rather than counted as evasion.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "ipv4_fragmentation_subfields_editable_experimental",
+      "protocol": "ipv4",
       "fields": [
-        "ipv4.flags_fragment_offset",
-        "ipv4.flags.reserved",
-        "ipv4.flags.dont_fragment",
-        "ipv4.flags.more_fragments",
-        "ipv4.fragment_offset_units",
-        "tcp.flags",
-        "tcp.flags.ns",
-        "tcp.flags.cwr",
-        "tcp.flags.ece",
-        "tcp.flags.urg",
-        "tcp.flags.ack",
-        "tcp.flags.psh",
-        "tcp.flags.rst",
-        "tcp.flags.syn",
-        "tcp.flags.fin",
-        "tcp.urgent_pointer"
+        "flags.reserved",
+        "flags.dont_fragment",
+        "flags.more_fragments"
+      ],
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "bit",
+        "min": 0,
+        "max": 1,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "ipv4.checksum"
+        ],
+        "experimental_risk": "may_introduce_ipv4_fragmentation"
+      },
+      "rationale": "The expanded policy exposes IPv4 fragmentation flag bits as bounded experimental header edits while retaining downstream validation as the arbiter of invalid traffic.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "ipv4_fragment_offset_editable_experimental",
+      "protocol": "ipv4",
+      "field": "fragment_offset_units",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "uint13",
+        "min": 0,
+        "max": 8191,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "ipv4.checksum"
+        ],
+        "experimental_risk": "may_introduce_ipv4_fragmentation"
+      },
+      "rationale": "The expanded policy allows the LLM to propose IPv4 fragment offsets as an intentionally aggressive header-only perturbation. Step 20 validation must reject serialized traffic that violates the selected-dataset contract.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "tcp_control_subflags_editable_experimental",
+      "protocol": "tcp",
+      "fields": [
+        "flags.cwr",
+        "flags.ece",
+        "flags.urg",
+        "flags.psh",
+        "flags.rst",
+        "flags.syn",
+        "flags.fin"
+      ],
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "bit",
+        "min": 0,
+        "max": 1,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "tcp.checksum"
+        ],
+        "experimental_risk": "may_change_tcp_state_interpretation"
+      },
+      "rationale": "The expanded policy deliberately exposes selected TCP control bits to test whether a larger header surface changes Snort evasion behavior. TCP ACK and NS remain non-editable to preserve acknowledgement semantics and the pipeline-controlled data-offset byte.",
+      "source_refs": [
+        "rfc_793_tcp",
+        "rfc_9293_tcp",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "tcp_urgent_pointer_editable_experimental",
+      "protocol": "tcp",
+      "field": "urgent_pointer",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "uint16_be",
+        "min": 0,
+        "max": 65535,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "tcp.checksum"
+        ],
+        "experimental_risk": "meaningful_only_with_tcp_urg_flag"
+      },
+      "rationale": "The urgent pointer is exposed with the URG flag in the expanded experiment so inconsistent combinations can be observed and rejected or reported by downstream validation.",
+      "source_refs": [
+        "rfc_793_tcp",
+        "rfc_9293_tcp",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "immutable_remaining_tcp_flag_ownership_v1",
+      "protocol": "tcp",
+      "fields": [
+        "flags",
+        "flags.ns",
+        "flags.ack"
       ],
       "classification": "immutable_field",
       "editable": false,
       "allowed_operations": [],
-      "rationale": "Fragmentation and TCP control flags affect reassembly, state transitions, stream ownership or urgent data semantics. They remain immutable for this expanded header-only policy.",
+      "rationale": "The aggregate TCP flags byte is not independently editable because the experiment exposes selected subflags. TCP ACK remains immutable to preserve acknowledgement semantics, and TCP NS remains immutable because it shares the pipeline-controlled data-offset/reserved/NS byte.",
       "source_refs": [
-        "rfc_791_ipv4",
         "rfc_793_tcp",
         "rfc_9293_tcp",
         "thesis_conservative_methodology"
