@@ -1,0 +1,255 @@
+{
+  "schema_version": "header_editability_policy_v1",
+  "policy_id": "expanded_header_editability_v1",
+  "description": "Expanded header-only policy for final experiment 03. It keeps payload bytes non-editable and exposes a broader packet-scoped IPv4/TCP header surface than the conservative Baseline, while keeping lengths, checksums, TCP state, parser-selection fields, flow identity fields, fragmentation controls, and TCP control flags under pipeline or immutable ownership.",
+  "justification_document": "20_Notes/28_Experimentos_Finales/03_expanded_header_editability_experiment.md",
+  "default_classification": "immutable_field",
+  "source_priority": [
+    "pipeline_diary",
+    "normative_protocol_standards",
+    "snort_normalization_and_inspection",
+    "conservative_methodology"
+  ],
+  "sources": {
+    "pipeline_diary": {
+      "type": "pipeline_diary",
+      "title": "Pipeline Implementation Diary",
+      "relevance": "Defines the final header-only contract and the requirement that pipeline-controlled fields remain deterministic."
+    },
+    "rfc_791_ipv4": {
+      "type": "normative_protocol_standards",
+      "title": "RFC 791 - Internet Protocol",
+      "relevance": "Defines IPv4 header fields, TTL, identification, fragmentation, protocol, addresses, total length and header checksum."
+    },
+    "rfc_6864_ipv4_id": {
+      "type": "normative_protocol_standards",
+      "title": "RFC 6864 - Updated Specification of the IPv4 ID Field",
+      "relevance": "Clarifies IPv4 Identification semantics, especially for non-fragmented datagrams."
+    },
+    "rfc_793_tcp": {
+      "type": "normative_protocol_standards",
+      "title": "RFC 793 - Transmission Control Protocol",
+      "relevance": "Defines TCP ports, sequence and acknowledgement numbers, flags, window, checksum and urgent pointer."
+    },
+    "rfc_9293_tcp": {
+      "type": "normative_protocol_standards",
+      "title": "RFC 9293 - Transmission Control Protocol",
+      "relevance": "Current TCP functional specification used to justify conservative treatment of TCP state fields."
+    },
+    "snort_3_pipeline": {
+      "type": "snort_normalization_and_inspection",
+      "title": "Snort 3 validation and alert-comparison pipeline",
+      "relevance": "The experiment measures Snort alert changes and must avoid modifications that only break protocol reconstruction."
+    },
+    "thesis_conservative_methodology": {
+      "type": "conservative_methodology",
+      "title": "Thesis conservative mutable/immutable methodology",
+      "relevance": "Fields are editable only when the modification can be authorized, bounded and later validated without changing experiment identity."
+    }
+  },
+  "rules": [
+    {
+      "rule_id": "ipv4_tos_editable",
+      "protocol": "ipv4",
+      "field": "tos",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "uint8",
+        "min": 0,
+        "max": 255,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "ipv4.checksum"
+        ]
+      },
+      "rationale": "IPv4 TOS/DSCP/ECN is packet scoped and does not define flow identity, payload ownership, TCP byte ownership or packet length.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "ipv4_identification_editable_non_fragmented_dataset",
+      "protocol": "ipv4",
+      "field": "identification",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "uint16_be",
+        "min": 0,
+        "max": 65535,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "ipv4.checksum"
+        ],
+        "requires_non_fragmented_ipv4": true
+      },
+      "rationale": "The active Step 14 contract rejects fragmented IPv4 packets, so IPv4 Identification can be tested as a bounded packet-scoped field without changing TCP stream ownership, payload bytes or flow identity.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "rfc_6864_ipv4_id",
+        "pipeline_diary",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "ipv4_ttl_editable_bounded",
+      "protocol": "ipv4",
+      "field": "ttl",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "uint8",
+        "min": 1,
+        "max": 255,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "ipv4.checksum"
+        ]
+      },
+      "rationale": "TTL is packet scoped and routinely changes in transit. It must remain non-zero to avoid creating an expired packet.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "tcp_window_editable",
+      "protocol": "tcp",
+      "field": "window",
+      "classification": "llm_editable_headers_region",
+      "editable": true,
+      "allowed_operations": [
+        "replace_uint"
+      ],
+      "constraints": {
+        "encoding": "uint16_be",
+        "min": 0,
+        "max": 65535,
+        "preserve_width_bits": true,
+        "requires_pipeline_recalculation": [
+          "tcp.checksum"
+        ]
+      },
+      "rationale": "The advertised TCP receive window is packet scoped and does not change byte ownership, sequence space or flow identity.",
+      "source_refs": [
+        "rfc_793_tcp",
+        "rfc_9293_tcp",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "pipeline_recalculates_ipv4_lengths_and_checksum",
+      "protocol": "ipv4",
+      "fields": [
+        "total_length",
+        "checksum"
+      ],
+      "classification": "pipeline_controlled_field",
+      "editable": false,
+      "allowed_operations": [],
+      "rationale": "IPv4 total length and checksum are deterministic consequences of packet materialization and accepted edits.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "pipeline_controls_tcp_state_and_checksum",
+      "protocol": "tcp",
+      "fields": [
+        "sequence_number",
+        "acknowledgement_number",
+        "data_offset_reserved_ns",
+        "checksum"
+      ],
+      "classification": "pipeline_controlled_field",
+      "editable": false,
+      "allowed_operations": [],
+      "rationale": "TCP sequence/acknowledgement numbers, data offset and checksum must be translated or recomputed deterministically after payload/header materialization.",
+      "source_refs": [
+        "rfc_793_tcp",
+        "rfc_9293_tcp",
+        "snort_3_pipeline",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "immutable_link_network_transport_identity",
+      "protocols": [
+        "ethernet",
+        "ipv4",
+        "tcp"
+      ],
+      "fields": [
+        "ethernet.destination_mac",
+        "ethernet.source_mac",
+        "ethernet.outer_ether_type",
+        "ethernet.ether_type",
+        "ipv4.version",
+        "ipv4.ihl_words",
+        "ipv4.protocol",
+        "ipv4.source_address",
+        "ipv4.destination_address",
+        "tcp.source_port",
+        "tcp.destination_port"
+      ],
+      "classification": "immutable_field",
+      "editable": false,
+      "allowed_operations": [],
+      "rationale": "These fields define link/network/transport identity or parser selection. Editing them would change the selected conversation or invalidate downstream traceability.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "rfc_793_tcp",
+        "rfc_9293_tcp",
+        "thesis_conservative_methodology"
+      ]
+    },
+    {
+      "rule_id": "immutable_fragmentation_and_tcp_control_flags_v1",
+      "protocols": [
+        "ipv4",
+        "tcp"
+      ],
+      "fields": [
+        "ipv4.flags_fragment_offset",
+        "ipv4.flags.reserved",
+        "ipv4.flags.dont_fragment",
+        "ipv4.flags.more_fragments",
+        "ipv4.fragment_offset_units",
+        "tcp.flags",
+        "tcp.flags.ns",
+        "tcp.flags.cwr",
+        "tcp.flags.ece",
+        "tcp.flags.urg",
+        "tcp.flags.ack",
+        "tcp.flags.psh",
+        "tcp.flags.rst",
+        "tcp.flags.syn",
+        "tcp.flags.fin",
+        "tcp.urgent_pointer"
+      ],
+      "classification": "immutable_field",
+      "editable": false,
+      "allowed_operations": [],
+      "rationale": "Fragmentation and TCP control flags affect reassembly, state transitions, stream ownership or urgent data semantics. They remain immutable for this expanded header-only policy.",
+      "source_refs": [
+        "rfc_791_ipv4",
+        "rfc_793_tcp",
+        "rfc_9293_tcp",
+        "thesis_conservative_methodology"
+      ]
+    }
+  ]
+}
