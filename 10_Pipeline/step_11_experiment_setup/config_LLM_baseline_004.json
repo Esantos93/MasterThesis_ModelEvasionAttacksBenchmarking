@@ -19,8 +19,8 @@
     "config_path": "/usr/local/etc/snort/snort.lua",
     "enable_ruleset": true,
     "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
-    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
-    "detector_policy_label": "security-ips",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states",
+    "detector_policy_label": "max-detect-ips",
     "detection_policy_options": [
       {
         "label": "connectivity-ips",
