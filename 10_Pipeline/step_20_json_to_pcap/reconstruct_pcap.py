@@ -17,7 +17,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
-from common.header_policy import is_editable_header_field, load_header_editability_policy
+from common.header_policy import editable_header_fields_from_policy, header_field_value, is_editable_header_field, load_header_editability_policy
 from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
 
@@ -790,6 +790,92 @@ def payload_bytes(record: dict[str, Any], packet_issues: list[dict[str, Any]]) -
         return b""
 
 
+# This helper coerces integer header values before assigning them to Scapy fields.
+def int_header_value(record: dict[str, Any], field: str) -> int | None:
+    value = header_field_value(record, field)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+# This function materializes policy-authorized physical-header edits onto a copied reference packet.
+def apply_editable_header_fields_to_packet(
+    *,
+    packet: Any,
+    record: dict[str, Any],
+    header_policy: dict[str, Any],
+    scapy: dict[str, Any],
+) -> None:
+    editable_fields = set(editable_header_fields_from_policy(header_policy))
+    IP = scapy["IP"]
+    TCP = scapy["TCP"]
+
+    if IP in packet:
+        ip_layer = packet[IP]
+        if "ipv4.tos" in editable_fields:
+            value = int_header_value(record, "ipv4.tos")
+            if value is not None:
+                ip_layer.tos = value
+        if "ipv4.identification" in editable_fields:
+            value = int_header_value(record, "ipv4.identification")
+            if value is not None:
+                ip_layer.id = value
+        if "ipv4.ttl" in editable_fields:
+            value = int_header_value(record, "ipv4.ttl")
+            if value is not None:
+                ip_layer.ttl = value
+        if "ipv4.flags_fragment_offset" in editable_fields:
+            value = int_header_value(record, "ipv4.flags_fragment_offset")
+            if value is not None:
+                ip_layer.flags = (value >> 13) & 0x07
+                ip_layer.frag = value & 0x1FFF
+        ipv4_fragment_subfields = {
+            "ipv4.flags.reserved",
+            "ipv4.flags.dont_fragment",
+            "ipv4.flags.more_fragments",
+            "ipv4.fragment_offset_units",
+        }
+        if editable_fields.intersection(ipv4_fragment_subfields):
+            reserved = int_header_value(record, "ipv4.flags.reserved") or 0
+            dont_fragment = int_header_value(record, "ipv4.flags.dont_fragment") or 0
+            more_fragments = int_header_value(record, "ipv4.flags.more_fragments") or 0
+            fragment_offset = int_header_value(record, "ipv4.fragment_offset_units")
+            if fragment_offset is not None:
+                ip_layer.flags = ((reserved & 1) << 2) | ((dont_fragment & 1) << 1) | (more_fragments & 1)
+                ip_layer.frag = fragment_offset & 0x1FFF
+
+    if TCP in packet:
+        tcp_layer = packet[TCP]
+        if "tcp.window" in editable_fields:
+            value = int_header_value(record, "tcp.window")
+            if value is not None:
+                tcp_layer.window = value
+        if "tcp.urgent_pointer" in editable_fields:
+            value = int_header_value(record, "tcp.urgent_pointer")
+            if value is not None:
+                tcp_layer.urgptr = value
+        tcp_flag_fields = {
+            "tcp.flags.ns": 0x100,
+            "tcp.flags.cwr": 0x080,
+            "tcp.flags.ece": 0x040,
+            "tcp.flags.urg": 0x020,
+            "tcp.flags.ack": 0x010,
+            "tcp.flags.psh": 0x008,
+            "tcp.flags.rst": 0x004,
+            "tcp.flags.syn": 0x002,
+            "tcp.flags.fin": 0x001,
+        }
+        if editable_fields.intersection(tcp_flag_fields):
+            raw_flags = 0
+            for field, bit_mask in tcp_flag_fields.items():
+                value = int_header_value(record, field)
+                if value:
+                    raw_flags |= bit_mask
+            tcp_layer.flags = raw_flags
+
+
 # This function rebuilds one packet from the reference frame plus validated JSON/header changes.
 def rebuild_from_reference_packet(
     *,
@@ -798,6 +884,7 @@ def rebuild_from_reference_packet(
     payload: bytes,
     tcp_translation: dict[str, Any] | None,
     scapy: dict[str, Any],
+    header_policy: dict[str, Any],
     packet_issues: list[dict[str, Any]],
 ) -> Any:
     packet = reference_packet.copy()
@@ -854,6 +941,13 @@ def rebuild_from_reference_packet(
     if payload:
         transport.add_payload(Raw(load=payload))
 
+    apply_editable_header_fields_to_packet(
+        packet=packet,
+        record=record,
+        header_policy=header_policy,
+        scapy=scapy,
+    )
+
     if hasattr(transport, "chksum"):
         transport.chksum = None
     if UDP in packet:
@@ -892,6 +986,7 @@ def reconstruct_one_packet(
     scapy: dict[str, Any],
     reference_packet: Any,
     tcp_translation: dict[str, Any] | None,
+    header_policy: dict[str, Any],
 ) -> dict[str, Any]:
     packet_issues: list[dict[str, Any]] = []
     if not isinstance(record, dict):
@@ -916,6 +1011,7 @@ def reconstruct_one_packet(
         payload=payload,
         tcp_translation=tcp_translation,
         scapy=scapy,
+        header_policy=header_policy,
         packet_issues=packet_issues,
     )
 
@@ -1297,6 +1393,8 @@ def audit_reconstructed_pcap(
                 "src": "ipv4.source_address",
                 "dst": "ipv4.destination_address",
                 "id": "ipv4.identification",
+                "flags": "ipv4.flags_fragment_offset",
+                "frag": "ipv4.fragment_offset_units",
                 "ttl": "ipv4.ttl",
                 "tos": "ipv4.tos",
             }
@@ -1310,12 +1408,27 @@ def audit_reconstructed_pcap(
             tcp_policy_fields = {
                 "sport": "tcp.source_port",
                 "dport": "tcp.destination_port",
+                "flags": "tcp.flags",
                 "window": "tcp.window",
                 "urgptr": "tcp.urgent_pointer",
             }
             for field in ("sport", "dport", "flags", "window", "urgptr"):
                 if getattr(output_tcp, field) != getattr(reference_tcp, field):
-                    if is_editable_header_field(header_policy, tcp_policy_fields.get(field, "")):
+                    tcp_flags_authorized = field == "flags" and any(
+                        is_editable_header_field(header_policy, flag_field)
+                        for flag_field in [
+                            "tcp.flags.ns",
+                            "tcp.flags.cwr",
+                            "tcp.flags.ece",
+                            "tcp.flags.urg",
+                            "tcp.flags.ack",
+                            "tcp.flags.psh",
+                            "tcp.flags.rst",
+                            "tcp.flags.syn",
+                            "tcp.flags.fin",
+                        ]
+                    )
+                    if tcp_flags_authorized or is_editable_header_field(header_policy, tcp_policy_fields.get(field, "")):
                         continue
                     record_issue(record_index, "tcp_immutable_field_changed", "An immutable TCP field differs from Step 13.", field=field)
             translation = prepared["tcp_translation"]
@@ -1582,6 +1695,7 @@ def reconstruct_validated_traffic(
             scapy,
             reference_context["packets_by_index"][reduced_packet_index],
             prepared["tcp_translation"],
+            header_policy,
         )
         packet_results.append(reconstruction["result"])
         if reconstruction["packet"] is not None:
