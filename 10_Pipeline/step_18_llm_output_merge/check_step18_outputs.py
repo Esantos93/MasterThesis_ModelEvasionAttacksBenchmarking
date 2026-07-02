@@ -74,7 +74,7 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     payload_edits = patch_application.get("payload_edits", [])
     if payload_edits:
         print_json(
-            "WARNING: PAYLOAD EDITS FOUND. BASELINE-004 EXPECTS ZERO.",
+            "WARNING: PAYLOAD EDITS FOUND. HEADER-ONLY RUNS EXPECT ZERO.",
             payload_edits[:sample_size],
             limit=5000,
         )
@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--experiment-root",
         default="/home/santos/Experiments/exp_cicids2017_baseline_004",
-        help="Experiment root folder. Defaults to the Baseline-004 VM path.",
+        help="Experiment root folder. Defaults to the legacy baseline VM path.",
     )
     parser.add_argument(
         "--experiment-config-label",

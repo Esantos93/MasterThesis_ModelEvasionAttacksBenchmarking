@@ -16,6 +16,13 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.header_policy import (
+    header_field_value,
+    is_editable_header_field,
+    load_header_editability_policy,
+    set_header_value,
+    validate_uint_replacement,
+)
 from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
 
@@ -26,9 +33,6 @@ PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
 MERGED_SCHEMA_VERSION = "patch_applied_traffic_v1"
 REPORT_SCHEMA_VERSION = "patch_application_report_v1"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
-BASELINE_004_ALLOWED_HEADER_FIELDS = {"ipv4.tos", "ipv4.ttl", "tcp.window"}
-
-
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
@@ -219,47 +223,6 @@ def packet_ids_from_prompt_package(prompt_package: dict[str, Any] | None) -> lis
     return sorted(set(fallback_packet_ids))
 
 
-#This function returns the current value of one editable physical header field from the Step 14 packet record.
-def current_header_value(record: dict[str, Any], field: str) -> Any:
-    if field == "ipv4.tos":
-        ipv4 = record.get("ipv4_header", {})
-        if isinstance(ipv4, dict) and "tos" in ipv4:
-            return ipv4["tos"]
-        return record.get("tos")
-    if field == "ipv4.ttl":
-        ipv4 = record.get("ipv4_header", {})
-        if isinstance(ipv4, dict) and "ttl" in ipv4:
-            return ipv4["ttl"]
-        return record.get("ttl")
-    if field == "tcp.window":
-        tcp = record.get("tcp_header", {})
-        if isinstance(tcp, dict) and "window" in tcp:
-            return tcp["window"]
-        return record.get("window")
-    return None
-
-
-#This function applies one unsigned integer header replacement to the copied Step 14 packet record.
-def set_header_value(record: dict[str, Any], field: str, value: int) -> None:
-    if field == "ipv4.tos":
-        if isinstance(record.get("ipv4_header"), dict):
-            record["ipv4_header"]["tos"] = value
-            record["ipv4_header"]["dscp"] = value >> 2
-            record["ipv4_header"]["ecn"] = value & 0x03
-        if "tos" in record:
-            record["tos"] = value
-        return
-    if field == "ipv4.ttl":
-        if isinstance(record.get("ipv4_header"), dict):
-            record["ipv4_header"]["ttl"] = value
-        record["ttl"] = value
-        return
-    if field == "tcp.window":
-        if isinstance(record.get("tcp_header"), dict):
-            record["tcp_header"]["window"] = value
-        record["window"] = value
-
-
 #This function validates one physical header patch and converts it to an edit record.
 def build_header_edit(
     *,
@@ -267,6 +230,7 @@ def build_header_edit(
     patch_index: int,
     prompt_package: dict[str, Any],
     region: dict[str, Any],
+    header_policy: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
     parsed_path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -279,7 +243,7 @@ def build_header_edit(
         return None, {"reason": "header_patch_references_non_header_region", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
     if region.get("region_type") != "header_field" or patch.get("region_type") != "header_field":
         return None, {"reason": "header_patch_region_type_invalid", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
-    if field not in BASELINE_004_ALLOWED_HEADER_FIELDS:
+    if not isinstance(field, str) or not is_editable_header_field(header_policy, field):
         return None, {"reason": "header_field_not_allowed", "packet_id": packet_id_text, "region_id": region_id, "field": field, "patch_index": patch_index}
     if region_id != region.get("header_region_id", region.get("region_id")):
         return None, {"reason": "header_region_id_mismatch", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
@@ -294,18 +258,18 @@ def build_header_edit(
         return None, {"reason": "packet_id_not_in_step14_reference", "packet_id": packet_id_text, "patch_index": patch_index}
 
     replacement = patch.get("replacement")
-    if not isinstance(replacement, int) or isinstance(replacement, bool):
-        return None, {"reason": "header_replacement_not_integer", "packet_id": packet_id_text, "region_id": region_id, "replacement": replacement, "patch_index": patch_index}
-
     constraints = region.get("constraints", {})
+    replacement_error = validate_uint_replacement(replacement=replacement, constraints=constraints)
+    if replacement_error == "header_replacement_not_integer":
+        return None, {"reason": "header_replacement_not_integer", "packet_id": packet_id_text, "region_id": region_id, "replacement": replacement, "patch_index": patch_index}
     min_value = constraints.get("min")
     max_value = constraints.get("max")
-    if isinstance(min_value, int) and replacement < min_value:
+    if replacement_error == "header_replacement_below_min":
         return None, {"reason": "header_replacement_below_min", "packet_id": packet_id_text, "region_id": region_id, "replacement": replacement, "min": min_value, "patch_index": patch_index}
-    if isinstance(max_value, int) and replacement > max_value:
+    if replacement_error == "header_replacement_above_max":
         return None, {"reason": "header_replacement_above_max", "packet_id": packet_id_text, "region_id": region_id, "replacement": replacement, "max": max_value, "patch_index": patch_index}
 
-    original_value = current_header_value(packet_index[packet_id_text], field)
+    original_value = header_field_value(packet_index[packet_id_text], field)
     if original_value != region.get("current_value"):
         return None, {"reason": "header_current_value_mismatch", "packet_id": packet_id_text, "region_id": region_id, "field": field, "reference_value": original_value, "region_current_value": region.get("current_value"), "patch_index": patch_index}
 
@@ -467,6 +431,7 @@ def build_patch_edit(
     patch_index: int,
     prompt_package: dict[str, Any],
     editable_lookup: dict[tuple[str, str], dict[str, Any]],
+    header_policy: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
     parsed_path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -489,6 +454,7 @@ def build_patch_edit(
             patch_index=patch_index,
             prompt_package=prompt_package,
             region=region,
+            header_policy=header_policy,
             packet_index=packet_index,
             parsed_path=parsed_path,
         )
@@ -604,6 +570,7 @@ def collect_edits_for_parsed_output(
     parsed_output: dict[str, Any],
     metadata: dict[str, Any],
     prompt_root: Path | None,
+    header_policy: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     prompt_package, prompt_error = load_prompt_package(metadata, prompt_root)
@@ -653,6 +620,7 @@ def collect_edits_for_parsed_output(
             patch_index=patch_index,
             prompt_package=prompt_package,
             editable_lookup=editable_lookup,
+            header_policy=header_policy,
             packet_index=packet_index,
             parsed_path=parsed_path,
         )
@@ -706,6 +674,7 @@ def apply_model_patches(
     *,
     model_root: Path,
     prompt_root: Path | None,
+    header_policy: dict[str, Any],
     reference_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     parsed_dir = model_root / "parsed"
@@ -749,6 +718,7 @@ def apply_model_patches(
             parsed_output=parsed_output,
             metadata=metadata,
             prompt_root=prompt_root,
+            header_policy=header_policy,
             packet_index=packet_index,
         )
         if errors or group["status"] != "accepted":
@@ -857,9 +827,11 @@ def merge_model_outputs(
     experiment_config_label: str,
 ) -> dict[str, Any]:
     reference, reference_records = load_reference_traffic(reference_json)
+    header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
     model_report = apply_model_patches(
         model_root=model_root,
         prompt_root=prompt_root,
+        header_policy=header_policy,
         reference_records=reference_records,
     )
     traffic = model_report.pop("traffic")
@@ -879,6 +851,11 @@ def merge_model_outputs(
             "model_output_root": str(model_root),
             "reference_json": str(reference_json),
             "source_packet_json_schema_version": reference.get("metadata", {}).get("schema_version"),
+            "header_editability_policy": {
+                "schema_version": header_policy["schema_version"],
+                "policy_id": header_policy["policy_id"],
+                "policy_path": header_policy.get("_policy_path"),
+            },
             "merge_policy": {
                 "input_contract": "patch_output_v1",
                 "apply_patches_to_step14_reference": True,

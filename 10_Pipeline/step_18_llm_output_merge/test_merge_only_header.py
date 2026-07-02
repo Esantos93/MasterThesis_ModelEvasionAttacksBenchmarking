@@ -6,6 +6,7 @@ from pathlib import Path
 from merge_llm_outputs import (
     build_editable_region_lookup,
     build_patch_edit,
+    read_json,
     set_header_value,
 )
 
@@ -14,8 +15,9 @@ def packet_record() -> dict:
     return {
         "packet_id": "packet_000001",
         "ttl": 64,
+        "ip_id": 1234,
         "window": 8192,
-        "ipv4_header": {"tos": 0, "ttl": 64},
+        "ipv4_header": {"tos": 0, "identification": 1234, "ttl": 64},
         "tcp_header": {"window": 8192},
         "payload_hex": "",
     }
@@ -45,6 +47,18 @@ def prompt_unit() -> dict:
                 {
                     "identity_type": "physical_header_region",
                     "packet_id": "packet_000001",
+                    "region_id": "packet_000001:ipv4.identification",
+                    "header_region_id": "packet_000001:ipv4.identification",
+                    "region_type": "header_field",
+                    "field": "ipv4.identification",
+                    "current_value": 1234,
+                    "format": "uint",
+                    "allowed_operations": ["replace_uint"],
+                    "constraints": {"min": 0, "max": 65535},
+                },
+                {
+                    "identity_type": "physical_header_region",
+                    "packet_id": "packet_000001",
                     "region_id": "packet_000001:tcp.window",
                     "header_region_id": "packet_000001:tcp.window",
                     "region_type": "header_field",
@@ -67,6 +81,7 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             patch_index=1,
             prompt_package=prompt,
             editable_lookup=build_editable_region_lookup(prompt),
+            header_policy=read_json(Path("step_15_grouping/01_editability_policies/header_v1.json")),
             packet_index={"packet_000001": packet_record()},
             parsed_path=Path("parsed.json"),
         )
@@ -145,9 +160,12 @@ class HeaderOnlyMergeTests(unittest.TestCase):
     def test_set_header_value_updates_structured_and_flat_fields(self) -> None:
         record = packet_record()
         set_header_value(record, "ipv4.ttl", 1)
+        set_header_value(record, "ipv4.identification", 4321)
         set_header_value(record, "tcp.window", 0)
         self.assertEqual(1, record["ttl"])
         self.assertEqual(1, record["ipv4_header"]["ttl"])
+        self.assertEqual(4321, record["ip_id"])
+        self.assertEqual(4321, record["ipv4_header"]["identification"])
         self.assertEqual(0, record["window"])
         self.assertEqual(0, record["tcp_header"]["window"])
 
