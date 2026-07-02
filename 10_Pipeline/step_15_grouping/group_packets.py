@@ -18,6 +18,12 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.header_policy import (
+    editable_header_fields_from_policy,
+    header_policy_rule_lookup,
+    load_header_editability_policy,
+    nested_header_value,
+)
 from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
 
@@ -55,8 +61,7 @@ DEFAULT_TOKEN_BUDGET_CONFIG = {
     "payload_window_right_context_bytes": 128,
 }
 REQUIRED_TOKEN_BUDGET_CONFIG_KEYS = ["expected_output_patch_tokens"]
-HEADER_POLICY_SCHEMA_VERSION = "header_editability_policy_v1"
-EXPECTED_EDITABLE_HEADER_FIELDS = ["ipv4.tos", "ipv4.ttl", "tcp.window"]
+ACTIVE_EDITABLE_HEADER_FIELDS: list[str] = []
 
 HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
 TEXT_PRINTABLE = set(string.printable)
@@ -232,73 +237,6 @@ def validate_packet_json(packet_json: Any, input_path: Path) -> dict[str, Any]:
 #This helper returns one stable ordered list without duplicating values.
 def unique_strings(values: list[Any]) -> list[str]:
     return list(dict.fromkeys(str(value) for value in values))
-
-
-#This function resolves the header editability policy path selected by the active config.
-def resolve_header_policy_path(config: dict[str, Any], config_path: str | Path) -> Path:
-    policy_value = config.get("pipeline", {}).get("header_editability_policy_path")
-    if not policy_value:
-        raise ValueError("Step 15 requires pipeline.header_editability_policy_path for packet_json_v4.")
-    policy_path = Path(str(policy_value)).expanduser()
-    if policy_path.is_absolute():
-        return policy_path
-    config_relative = Path(config_path).expanduser().parent / policy_path
-    if config_relative.exists():
-        return config_relative
-    return PIPELINE_ROOT / policy_path
-
-
-#This function loads the global header editability policy used by Step 15.
-def load_header_editability_policy(config: dict[str, Any], config_path: str | Path) -> dict[str, Any]:
-    policy_path = resolve_header_policy_path(config, config_path)
-    policy = read_json(policy_path)
-    if not isinstance(policy, dict):
-        raise ValueError(f"Header editability policy must be a JSON object: {policy_path}")
-    if policy.get("schema_version") != HEADER_POLICY_SCHEMA_VERSION:
-        raise ValueError(
-            f"Step 15 requires header policy schema {HEADER_POLICY_SCHEMA_VERSION!r}; "
-            f"found {policy.get('schema_version')!r}: {policy_path}"
-        )
-    if not isinstance(policy.get("rules"), list):
-        raise ValueError(f"Header editability policy must contain a rules list: {policy_path}")
-    policy["_policy_path"] = str(policy_path)
-    policy["_rule_lookup"] = header_policy_rule_lookup(policy)
-    return policy
-
-
-#This helper returns a nested value from a structured packet header.
-def nested_header_value(header: dict[str, Any], field_name: str) -> Any:
-    current: Any = header
-    for part in field_name.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    return current
-
-
-#This function expands the policy rules into a field->rule lookup.
-def header_policy_rule_lookup(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    lookup: dict[str, dict[str, Any]] = {}
-    for rule in policy["rules"]:
-        if not isinstance(rule, dict):
-            raise ValueError("Header editability policy rules must be JSON objects.")
-        expanded_fields: list[str] = []
-        if "protocol" in rule and "field" in rule:
-            expanded_fields.append(f"{rule['protocol']}.{rule['field']}")
-        for field in rule.get("fields", []):
-            field_text = str(field)
-            if "." in field_text:
-                expanded_fields.append(field_text)
-            else:
-                for protocol in rule.get("protocols", []):
-                    expanded_fields.append(f"{protocol}.{field_text}")
-                if "protocol" in rule:
-                    expanded_fields.append(f"{rule['protocol']}.{field_text}")
-        for field_key in expanded_fields:
-            if field_key in lookup:
-                raise ValueError(f"Header editability policy defines multiple rules for {field_key!r}.")
-            lookup[field_key] = rule
-    return lookup
 
 
 #This function evaluates the global header policy for one physical packet.
@@ -1264,7 +1202,7 @@ def build_prompt_unit(
         "header_only": modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY,
         "editable_payload_regions_enabled": payload_enabled,
         "editable_header_regions_enabled": True,
-        "expected_editable_header_fields": EXPECTED_EDITABLE_HEADER_FIELDS,
+        "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
         "group_metadata": group_metadata,
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
@@ -1605,7 +1543,7 @@ def build_base_prompt_units(
         "header_only": modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY,
         "editable_payload_regions_enabled": editable_payload_regions_enabled(modification_strategy),
         "editable_header_regions_enabled": True,
-        "expected_editable_header_fields": EXPECTED_EDITABLE_HEADER_FIELDS,
+        "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
         "group_metadata": group_metadata,
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
@@ -2117,7 +2055,7 @@ def validate_header_only_prompt_unit(prompt_unit: dict[str, Any]) -> None:
                 continue
             if region.get("identity_type") != "physical_header_region":
                 raise ValueError("Header-only editable regions must use identity_type=physical_header_region.")
-            if region.get("field") not in EXPECTED_EDITABLE_HEADER_FIELDS:
+            if region.get("field") not in ACTIVE_EDITABLE_HEADER_FIELDS:
                 raise ValueError(f"Unexpected editable header field in header-only unit: {region.get('field')!r}")
             if region.get("operation") != "replace_uint":
                 raise ValueError("Header-only editable regions must use operation=replace_uint.")
@@ -2162,7 +2100,7 @@ def build_manifest(
             "header_only": header_only,
             "editable_payload_regions_enabled": editable_payload_regions_enabled(modification_strategy),
             "editable_header_regions_enabled": True,
-            "expected_editable_header_fields": EXPECTED_EDITABLE_HEADER_FIELDS,
+            "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
             "grouping_policy": grouping_policy,
             "grouping_unit": GROUPING_UNIT,
             "group_size_packets": group_size_packets,
@@ -2236,6 +2174,8 @@ def run_grouping(
     token_config = get_token_budget_config(config)
     input_token_budget = compute_input_token_budget(token_config)
     header_policy = load_header_editability_policy(config, config_path)
+    global ACTIVE_EDITABLE_HEADER_FIELDS
+    ACTIVE_EDITABLE_HEADER_FIELDS = editable_header_fields_from_policy(header_policy)
     flow_payload_slide_window_overlap_units = get_flow_payload_slide_window_overlap_units(config, grouping_policy)
 
     packet_json = validate_packet_json(read_json(input_json_path), input_json_path)
@@ -2263,6 +2203,7 @@ def run_grouping(
     start_time = time.monotonic()
     last_heartbeat_time = [start_time]
 
+    #This function prints bounded progress updates during long Step 15 planning runs.
     def heartbeat(message: str, force: bool = False) -> None:
         if heartbeat_seconds <= 0:
             return

@@ -15,14 +15,15 @@ HEADER_ONLY_UNIT_SCHEMA = "compact_modification_unit_v2"
 HYBRID_MANIFEST_SCHEMA = "compact_modification_units_manifest_v1"
 HYBRID_UNIT_SCHEMA = "compact_modification_unit_v1"
 PACKET_JSON_SCHEMA = "packet_json_v4"
-EXPECTED_HEADER_FIELDS = {"ipv4.tos", "ipv4.ttl", "tcp.window"}
 
 
+#Read a JSON artifact from disk.
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
+#Resolve an artifact path from an absolute path or the Step 15 output directory.
 def resolve_existing_path(path_value: Any, base_dir: Path) -> Path:
     if not isinstance(path_value, str) or not path_value:
         raise ValueError(f"Expected non-empty path string, found {path_value!r}")
@@ -35,6 +36,7 @@ def resolve_existing_path(path_value: Any, base_dir: Path) -> Path:
     raise FileNotFoundError(f"Could not resolve artifact path: {path_value}")
 
 
+#Find the Step 15 manifest expected for the selected strategy.
 def find_manifest(output_dir: Path, expected_strategy: str | None) -> Path:
     if expected_strategy == HEADER_ONLY_STRATEGY:
         candidate = output_dir / "compact_modification_units_manifest_v2.json"
@@ -53,6 +55,7 @@ def find_manifest(output_dir: Path, expected_strategy: str | None) -> Path:
     return existing[0]
 
 
+#Check that header classification side artifacts match the manifest metadata.
 def check_header_classification_artifacts(metadata: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     manifest_path = resolve_existing_path(metadata.get("headers_full_classification_manifest"), output_dir)
     jsonl_path = resolve_existing_path(metadata.get("headers_full_classification_jsonl"), output_dir)
@@ -84,6 +87,7 @@ def check_header_classification_artifacts(metadata: dict[str, Any], output_dir: 
     }
 
 
+#Validate manifest-level invariants shared by Step 15 strategies.
 def check_common_manifest(
     *,
     manifest: dict[str, Any],
@@ -127,6 +131,7 @@ def check_common_manifest(
     return check_header_classification_artifacts(metadata, manifest_path.parent)
 
 
+#Validate header-only modification units and editable header regions.
 def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
     metadata = manifest["metadata"]
     if metadata.get("schema_version") != HEADER_ONLY_MANIFEST_SCHEMA:
@@ -139,8 +144,9 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         raise ValueError("Header-only manifest must disable editable payload regions.")
     if metadata.get("editable_header_regions_enabled") is not True:
         raise ValueError("Header-only manifest must enable editable header regions.")
-    if set(metadata.get("expected_editable_header_fields", [])) != EXPECTED_HEADER_FIELDS:
-        raise ValueError("Header-only manifest has unexpected editable header fields.")
+    expected_header_fields = {str(field) for field in metadata.get("expected_editable_header_fields", [])}
+    if not expected_header_fields:
+        raise ValueError("Header-only manifest must record expected_editable_header_fields.")
 
     coverage = metadata.get("physical_parent_group_coverage", {})
     if coverage.get("duplicate_physical_packet_count") != 0 or coverage.get("missing_physical_packet_count") != 0:
@@ -178,7 +184,7 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
                     raise ValueError(f"Unexpected region identity in {unit_path}: {region.get('identity_type')!r}")
                 if region.get("region_type") != "header_field":
                     raise ValueError(f"Unexpected region_type in {unit_path}: {region.get('region_type')!r}")
-                if region.get("field") not in EXPECTED_HEADER_FIELDS:
+                if region.get("field") not in expected_header_fields:
                     raise ValueError(f"Unexpected editable field in {unit_path}: {region.get('field')!r}")
                 if region.get("operation") != "replace_uint":
                     raise ValueError(f"Unexpected operation in {unit_path}: {region.get('operation')!r}")
@@ -209,6 +215,7 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     }
 
 
+#Validate hybrid modification units and canonical payload-window counts.
 def check_hybrid_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
     metadata = manifest["metadata"]
     if metadata.get("schema_version") != HYBRID_MANIFEST_SCHEMA:
@@ -230,6 +237,7 @@ def check_hybrid_units(manifest: dict[str, Any], manifest_path: Path) -> dict[st
     }
 
 
+#Parse command-line arguments for the Step 15 checker.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate Step 15 compact modification-unit outputs.")
     parser.add_argument("--output-dir", required=True, help="Step 15 policy output directory, e.g. 05_groups/fixed_packet_count_size_006.")
@@ -239,6 +247,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#Run the Step 15 output checks selected by the manifest strategy.
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser()

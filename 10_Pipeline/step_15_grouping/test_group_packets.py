@@ -132,12 +132,13 @@ def config(
     grouping_policy: str,
     group_size: int | None = None,
     modification_strategy: str | None = None,
+    header_policy_path: str | None = None,
 ) -> dict:
     pipeline = {
         "grouping_policy": grouping_policy,
         "grouping_unit": "physical_packet",
         "experiment_config_label": f"test-{grouping_policy}",
-        "header_editability_policy_path": "step_15_grouping/header_editability_policy_v1.json",
+        "header_editability_policy_path": header_policy_path or "step_15_grouping/01_editability_policies/header_v1.json",
     }
     if modification_strategy is not None:
         pipeline["modification_strategy"] = modification_strategy
@@ -414,6 +415,59 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
         self.assertEqual({"uint"}, {region["replacement_format"] for region in editable_regions})
         self.assertEqual({"replace_uint"}, {region["operation"] for region in editable_regions})
+
+    def test_header_only_strategy_uses_active_header_policy_fields(self) -> None:
+        records = [tcp_record(packet_number, 1000 + packet_number * 10, b"attack") for packet_number in range(1, 3)]
+        source = packet_json_v4(records, include_flow_context=False)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            policy_path = root / "expanded_header_policy.json"
+            baseline_policy = json.loads(
+                Path("step_15_grouping/01_editability_policies/header_v1.json").read_text(encoding="utf-8")
+            )
+            identification_rule = {
+                "rule_id": "test_ipv4_identification_editable",
+                "protocol": "ipv4",
+                "field": "identification",
+                "classification": "llm_editable_headers_region",
+                "editable": True,
+                "allowed_operations": ["replace_uint"],
+                "constraints": {"encoding": "uint16_be", "min": 0, "max": 65535},
+                "source_refs": [],
+            }
+            baseline_policy["policy_id"] = "test_expanded_header_editability"
+            baseline_policy["rules"].insert(2, identification_rule)
+            for rule in baseline_policy["rules"]:
+                fields = rule.get("fields", [])
+                if "ipv4.identification" in fields:
+                    rule["fields"] = [field for field in fields if field != "ipv4.identification"]
+            policy_path.write_text(json.dumps(baseline_policy), encoding="utf-8")
+
+            active_config = config(
+                root,
+                "fixed_packet_count",
+                group_size=6,
+                modification_strategy="header_only_strategy_v1",
+                header_policy_path=str(policy_path),
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(
+            ["ipv4.identification", "ipv4.tos", "ipv4.ttl", "tcp.window"],
+            manifest["metadata"]["expected_editable_header_fields"],
+        )
+        editable_regions = [
+            region
+            for unit in units
+            for packet in unit["physical_packets"]
+            for region in packet["header_field_classifications"]
+        ]
+        self.assertEqual(
+            {"ipv4.identification", "ipv4.tos", "ipv4.ttl", "tcp.window"},
+            {region["field"] for region in editable_regions},
+        )
+        self.assertEqual([8], [unit["editable_header_region_count"] for unit in units])
 
 
 if __name__ == "__main__":
