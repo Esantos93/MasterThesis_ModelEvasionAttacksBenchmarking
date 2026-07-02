@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_baseline_004",
-    "description": "Header-only CICIDS2017 baseline using six-physical-packet parent groups and the conservative header editability policy.",
+    "experiment_id": "03_exp_cicids2017_expanded_header_editability",
+    "description": "Final experiment 03: header-only CICIDS2017 run using six-physical-packet parent groups and an expanded header editability policy. Payload bytes remain non-editable.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -19,8 +19,8 @@
     "config_path": "/usr/local/etc/snort/snort.lua",
     "enable_ruleset": true,
     "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
-    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states",
-    "detector_policy_label": "max-detect-ips",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
+    "detector_policy_label": "security-ips",
     "detection_policy_options": [
       {
         "label": "connectivity-ips",
@@ -68,15 +68,16 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "baseline_004_headers_only_fixed_size_6",
+    "experiment_config_label": "expanded_header_editability_fixed_size_6",
     "experiment_config_label_options": [
-      "baseline_004_headers_only_fixed_size_6"
+      "expanded_header_editability_fixed_size_6"
     ],
     "grouping_policy": "fixed_packet_count",
     "grouping_unit": "physical_packet",
     "group_size_packets": 6,
+    "flow_payload_slide_window_overlap_units": 1,
     "modification_strategy": "header_only_strategy_v1",
-    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_v1.json",
+    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_expanded_v1.json",
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0
