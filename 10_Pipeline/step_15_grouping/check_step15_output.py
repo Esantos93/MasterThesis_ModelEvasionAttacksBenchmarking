@@ -257,15 +257,25 @@ def main() -> None:
         contract_summary = check_header_only_units(manifest, manifest_path)
     else:
         contract_summary = check_hybrid_units(manifest, manifest_path)
+    metadata = manifest["metadata"]
     summary = {
         "status": "ok",
         "manifest": str(manifest_path),
-        "manifest_schema": manifest["metadata"].get("schema_version"),
-        "unit_schema": manifest["metadata"].get("compact_view_schema_version"),
+        "manifest_schema": metadata.get("schema_version"),
+        "unit_schema": metadata.get("compact_view_schema_version"),
         "strategy": strategy,
-        "total_packet_count": manifest["metadata"].get("total_packet_count"),
-        "parent_group_count": manifest["metadata"].get("parent_group_count"),
-        "modification_unit_count": manifest["metadata"].get("modification_unit_count"),
+        "grouping_policy": metadata.get("grouping_policy"),
+        "grouping_unit": metadata.get("grouping_unit"),
+        "group_size_packets": metadata.get("group_size_packets"),
+        "total_packet_count": metadata.get("total_packet_count"),
+        "parent_group_count": metadata.get("parent_group_count"),
+        "modification_unit_count": metadata.get("modification_unit_count"),
+        "parent_group_size_statistics": metadata.get("parent_group_size_statistics"),
+        "input_token_budget": metadata.get("input_token_budget"),
+        "over_budget_summary": metadata.get("over_budget_summary"),
+        "editable_header_regions_enabled": metadata.get("editable_header_regions_enabled"),
+        "editable_payload_regions_enabled": metadata.get("editable_payload_regions_enabled"),
+        "expected_editable_header_fields": metadata.get("expected_editable_header_fields"),
         **common_summary,
         **contract_summary,
     }
