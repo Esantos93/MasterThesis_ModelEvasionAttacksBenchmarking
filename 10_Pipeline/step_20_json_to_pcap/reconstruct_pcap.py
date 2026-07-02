@@ -17,6 +17,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.header_policy import is_editable_header_field, load_header_editability_policy
 from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
 
@@ -28,7 +29,9 @@ TCP_SEQUENCE_MODULUS = 1 << 32
 TCP_SEQUENCE_MASK = TCP_SEQUENCE_MODULUS - 1
 
 
+# This exception carries a machine-readable reconstruction failure reason.
 class TcpReconstructionError(ValueError):
+    # This initializer stores the reconstruction failure context for later reports.
     def __init__(self, reason: str, message: str, **context: Any):
         super().__init__(message)
         self.detail = {
@@ -138,10 +141,12 @@ def apply_ethernet_minimum_padding(packet: Any, scapy: dict[str, Any]) -> tuple[
     return padded_packet, scapy["raw"](padded_packet), padding_length
 
 
+# This function normalizes an address and port into the endpoint tuple used by TCP connection tracking.
 def tcp_endpoint(address: str, port: int) -> tuple[str, int]:
     return address, port
 
 
+# This function creates an order-independent key for a bidirectional TCP connection.
 def canonical_tcp_connection_key(
     source: tuple[str, int],
     destination: tuple[str, int],
@@ -149,10 +154,12 @@ def canonical_tcp_connection_key(
     return tuple(sorted((source, destination)))
 
 
+# This function converts a wrapped TCP sequence number into a relative number from an anchor.
 def tcp_relative_number(value: int, anchor: int) -> int:
     return (value - anchor) & TCP_SEQUENCE_MASK
 
 
+# This function creates the mutable state record used while assigning packets to TCP connections.
 def new_tcp_connection(
     *,
     connection_key: tuple[tuple[str, int], tuple[str, int]],
@@ -173,6 +180,7 @@ def new_tcp_connection(
     }
 
 
+# This function assigns one reference packet descriptor to the active TCP connection state.
 def assign_tcp_connection(
     descriptor: dict[str, Any],
     current_connections: dict[tuple[tuple[str, int], tuple[str, int]], dict[str, Any]],
@@ -225,6 +233,7 @@ def assign_tcp_connection(
     return current
 
 
+# This function extracts the TCP/IP fields needed to track reference-packet stream state.
 def reference_tcp_descriptor(
     packet: Any,
     reduced_packet_index: int,
@@ -264,6 +273,7 @@ def reference_tcp_descriptor(
     }
 
 
+# This function loads the reference PCAP packets required by the validated Step 19 traffic.
 def load_reference_pcap_context(
     *,
     reference_pcap_path: Path,
@@ -311,6 +321,7 @@ def load_reference_pcap_context(
     }
 
 
+# This function verifies that a Step 19 record still matches the immutable reference packet identity.
 def validate_record_against_reference(
     record: dict[str, Any],
     descriptor: dict[str, Any] | None,
@@ -339,6 +350,7 @@ def validate_record_against_reference(
         )
 
 
+# This function decodes payload_hex and fails closed when the JSON payload is malformed.
 def decode_payload_hex_strict(record: dict[str, Any]) -> bytes:
     payload_hex = record.get("payload_hex", "")
     if not isinstance(payload_hex, str):
@@ -349,6 +361,7 @@ def decode_payload_hex_strict(record: dict[str, Any]) -> bytes:
         raise ValueError(f"Record {record.get('packet_id')} has invalid payload_hex: {error}") from error
 
 
+# This function detects modified TCP overlaps that would make stream reconstruction ambiguous.
 def validate_overlapping_tcp_segments(segments: list[dict[str, Any]]) -> dict[str, int]:
     ordered = sorted(segments, key=lambda item: (item["start"], item["end"], item["packet_id"]))
     active = []
@@ -412,6 +425,7 @@ def validate_overlapping_tcp_segments(segments: list[dict[str, Any]]) -> dict[st
     }
 
 
+# This function builds the TCP sequence/ack translation plan for one stream direction.
 def build_tcp_translation(
     *,
     anchor: int,
@@ -464,6 +478,7 @@ def build_tcp_translation(
     }
 
 
+# This function translates one TCP sequence-space value through a prepared resize plan.
 def translate_tcp_number(value: int, translation: dict[str, Any] | None) -> tuple[int, int, bool]:
     if not translation or not translation["positions"]:
         return value, 0, False
@@ -477,10 +492,12 @@ def translate_tcp_number(value: int, translation: dict[str, Any] | None) -> tupl
     return (value + delta) & TCP_SEQUENCE_MASK, delta, inside_resized_interval
 
 
+# This function renders an endpoint tuple as JSON-friendly report data.
 def endpoint_report_value(endpoint: tuple[str, int]) -> dict[str, Any]:
     return {"ip": endpoint[0], "port": endpoint[1]}
 
 
+# This function prepares deterministic TCP sequence, acknowledgement and SACK translation for all packets.
 def prepare_tcp_sequence_translation(
     *,
     traffic: list[dict[str, Any]],
@@ -719,6 +736,7 @@ def prepare_tcp_sequence_translation(
     }
 
 
+# This function enforces strategy-specific reconstruction constraints before packet materialization.
 def enforce_active_reconstruction_contract(config: dict[str, Any], translation_plan: dict[str, Any]) -> None:
     pipeline = config.get("pipeline", {})
     modification_strategy = pipeline.get("modification_strategy")
@@ -736,8 +754,8 @@ def enforce_active_reconstruction_contract(config: dict[str, Any], translation_p
     }
     if any(payload_counters.values()):
         raise TcpReconstructionError(
-            "baseline004_payload_change_detected",
-            "Baseline-004 is header-only, but Step 20 detected payload changes before reconstruction.",
+            "header_only_payload_change_detected",
+            "The active strategy is header-only, but Step 20 detected payload changes before reconstruction.",
             modification_strategy=modification_strategy,
             **payload_counters,
         )
@@ -772,6 +790,7 @@ def payload_bytes(record: dict[str, Any], packet_issues: list[dict[str, Any]]) -
         return b""
 
 
+# This function rebuilds one packet from the reference frame plus validated JSON/header changes.
 def rebuild_from_reference_packet(
     *,
     reference_packet: Any,
@@ -997,6 +1016,7 @@ def write_packets(output_pcap_path: Path, packets: list[Any], scapy: dict[str, A
         writer.close()
 
 
+# This function independently verifies an Internet checksum over serialized bytes.
 def internet_checksum_is_valid(data: bytes) -> bool:
     if len(data) % 2:
         data += b"\x00"
@@ -1008,6 +1028,7 @@ def internet_checksum_is_valid(data: bytes) -> bool:
     return total == 0xFFFF
 
 
+# This function parses TCP option kinds from raw option bytes for independent validation.
 def tcp_option_kinds_from_bytes(option_bytes: bytes) -> tuple[list[int], str | None]:
     kinds = []
     offset = 0
@@ -1030,6 +1051,7 @@ def tcp_option_kinds_from_bytes(option_bytes: bytes) -> tuple[list[int], str | N
     return kinds, None
 
 
+# This function finds inconsistent overlaps in reassembled TCP byte intervals.
 def tcp_overlap_conflicts(
     segments_by_direction: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]]
 ) -> set[tuple[str, str]]:
@@ -1056,6 +1078,7 @@ def tcp_overlap_conflicts(
     return conflicts
 
 
+# This function summarizes TCP connection handshake and closure evidence in the POST subset.
 def tcp_connection_state_inventory(
     traffic: list[dict[str, Any]],
     reference_context: dict[str, Any],
@@ -1158,12 +1181,14 @@ def tcp_connection_state_inventory(
     }
 
 
+# This function independently audits the reconstructed PCAP against protocol and policy invariants.
 def audit_reconstructed_pcap(
     *,
     output_pcap_path: Path,
     traffic: list[dict[str, Any]],
     reference_context: dict[str, Any],
     translation_plan: dict[str, Any],
+    header_policy: dict[str, Any],
     scapy: dict[str, Any],
 ) -> dict[str, Any]:
     issues_by_record_index: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -1173,6 +1198,7 @@ def audit_reconstructed_pcap(
     original_segments: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
     reconstructed_segments: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
 
+    # This function records bounded per-packet audit issues and aggregate reason counts.
     def record_issue(record_index: int, reason: str, message: str, **extra: Any) -> None:
         issue_counts[reason] += 1
         if len(issues_by_record_index[record_index]) < 20:
@@ -1267,13 +1293,30 @@ def audit_reconstructed_pcap(
 
             reference_ip = reference_packet[scapy["IP"]]
             output_ip = packet[scapy["IP"]]
+            ipv4_policy_fields = {
+                "src": "ipv4.source_address",
+                "dst": "ipv4.destination_address",
+                "id": "ipv4.identification",
+                "ttl": "ipv4.ttl",
+                "tos": "ipv4.tos",
+            }
             for field in ("src", "dst", "id", "flags", "frag", "ttl", "tos"):
                 if getattr(output_ip, field) != getattr(reference_ip, field):
+                    if is_editable_header_field(header_policy, ipv4_policy_fields.get(field, "")):
+                        continue
                     record_issue(record_index, "ipv4_immutable_field_changed", "An immutable IPv4 field differs from Step 13.", field=field)
             reference_tcp = reference_packet[scapy["TCP"]]
             output_tcp = packet[scapy["TCP"]]
+            tcp_policy_fields = {
+                "sport": "tcp.source_port",
+                "dport": "tcp.destination_port",
+                "window": "tcp.window",
+                "urgptr": "tcp.urgent_pointer",
+            }
             for field in ("sport", "dport", "flags", "window", "urgptr"):
                 if getattr(output_tcp, field) != getattr(reference_tcp, field):
+                    if is_editable_header_field(header_policy, tcp_policy_fields.get(field, "")):
+                        continue
                     record_issue(record_index, "tcp_immutable_field_changed", "An immutable TCP field differs from Step 13.", field=field)
             translation = prepared["tcp_translation"]
             if int(output_tcp.seq) != translation["reconstructed_sequence_number"]:
@@ -1440,6 +1483,7 @@ def reconstruct_validated_traffic(
 
     # Scapy is imported after the JSON contract is checked, so path/schema errors appear before dependency errors.
     scapy = import_scapy()
+    header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
     try:
         reference_context = load_reference_pcap_context(
             reference_pcap_path=reference_pcap_path,
@@ -1550,6 +1594,7 @@ def reconstruct_validated_traffic(
             traffic=traffic,
             reference_context=reference_context,
             translation_plan=translation_plan,
+            header_policy=header_policy,
             scapy=scapy,
         )
         for record_index_text, validation_issues in network_protocol_validation[

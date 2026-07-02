@@ -261,7 +261,7 @@ class ActiveReconstructionContractTests(unittest.TestCase):
         with self.assertRaises(TcpReconstructionError) as context:
             enforce_active_reconstruction_contract(config, translation_plan)
 
-        self.assertEqual("baseline004_payload_change_detected", context.exception.detail["reason"])
+        self.assertEqual("header_only_payload_change_detected", context.exception.detail["reason"])
 
     def test_non_header_only_contract_allows_payload_changes(self):
         config = {"pipeline": {"modification_strategy": "hybrid_strategy_v1"}}

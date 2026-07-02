@@ -32,6 +32,7 @@ HEADER_ONLY_ZERO_FIELDS = [
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    """Carga un fichero JSON y exige que la raiz sea un objeto."""
     with path.open("r", encoding="utf-8") as input_file:
         data = json.load(input_file)
     if not isinstance(data, dict):
@@ -40,14 +41,17 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def file_size_mb(path: Path) -> float:
+    """Devuelve el tamano del fichero en MB."""
     return path.stat().st_size / (1024 * 1024)
 
 
 def format_json(value: Any) -> str:
+    """Serializa un valor como JSON legible y ordenado."""
     return json.dumps(value, indent=2, sort_keys=True)
 
 
 def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> Any:
+    """Lee una ruta anidada de diccionarios y devuelve un valor por defecto si falta."""
     current: Any = data
     for key in path:
         if not isinstance(current, dict) or key not in current:
@@ -57,20 +61,23 @@ def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> An
 
 
 def add_equal_check(failures: list[str], label: str, actual: Any, expected: Any) -> None:
+    """Anade un fallo si el valor actual no coincide con el esperado."""
     if actual != expected:
         failures.append(f"{label}: expected {expected!r}, got {actual!r}")
 
 
 def add_zero_check(failures: list[str], label: str, actual: Any) -> None:
+    """Anade un fallo si el contador no es cero ni nulo."""
     if actual not in (0, None):
         failures.append(f"{label}: expected 0, got {actual!r}")
 
 
 def parse_args() -> argparse.Namespace:
+    """Parsea los argumentos de linea de comandos del comprobador."""
     parser = argparse.ArgumentParser(
         description=(
             "Check Step 20 reconstructed PCAP outputs and reconstruction_report.json "
-            "for the active Baseline-004 branch."
+            "for the selected experiment branch."
         )
     )
     parser.add_argument(
@@ -104,6 +111,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Ejecuta las comprobaciones principales del Step 20."""
     args = parse_args()
     experiment_root = Path(args.experiment_root).expanduser()
     experiment_config_label = sanitize_name_component(args.experiment_config_label)
