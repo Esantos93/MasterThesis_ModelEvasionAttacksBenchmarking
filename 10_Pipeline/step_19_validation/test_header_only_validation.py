@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from validate_merged_traffic import validate_merged_traffic
+from validate_merged_traffic import read_json, validate_merged_traffic
+
+
+HEADER_POLICY = read_json("step_15_grouping/01_editability_policies/header_v1.json")
 
 
 def reference_record() -> dict:
@@ -20,8 +23,9 @@ def reference_record() -> dict:
         "ip_version": 4,
         "transport_protocol": "TCP",
         "ttl": 64,
+        "ip_id": 1234,
         "window": 8192,
-        "ipv4_header": {"tos": 0, "ttl": 64},
+        "ipv4_header": {"tos": 0, "identification": 1234, "ttl": 64},
         "tcp_header": {"window": 8192},
         "payload_hex": "",
         "payload_length_bytes": 0,
@@ -61,6 +65,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         result = validate_merged_traffic(
             merged_json=merged,
             reference_by_packet_id={"packet_000001": reference_record()},
+            header_policy=HEADER_POLICY,
             immutable_fields=["packet_id", "original_packet_number", "reduced_packet_index", "timestamp_epoch_pcap"],
             required_fields=[
                 "packet_id",
@@ -100,6 +105,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         result = validate_merged_traffic(
             merged_json=merged,
             reference_by_packet_id={"packet_000001": reference_record()},
+            header_policy=HEADER_POLICY,
             immutable_fields=["packet_id"],
             required_fields=["packet_id", "payload_hex", "payload_length_bytes", "packet_length_bytes"],
         )

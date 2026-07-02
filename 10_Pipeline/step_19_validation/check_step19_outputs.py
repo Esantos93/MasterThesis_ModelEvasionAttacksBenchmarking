@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--experiment-root",
         default="/home/santos/Experiments/exp_cicids2017_baseline_004",
-        help="Experiment root folder. Defaults to the Baseline-004 VM path.",
+        help="Experiment root folder. Defaults to the legacy baseline VM path.",
     )
     parser.add_argument(
         "--experiment-config-label",

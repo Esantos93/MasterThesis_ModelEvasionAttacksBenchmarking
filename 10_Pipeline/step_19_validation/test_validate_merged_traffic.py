@@ -1,6 +1,9 @@
 import unittest
 
-from step_19_validation.validate_merged_traffic import validate_merged_traffic
+from step_19_validation.validate_merged_traffic import read_json, validate_merged_traffic
+
+
+HEADER_POLICY = read_json("step_15_grouping/01_editability_policies/header_v1.json")
 
 
 def packet(packet_id: str, payload_hex: str) -> dict:
@@ -16,6 +19,7 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
         return validate_merged_traffic(
             merged_json={"traffic": [merged_record], "group_outcomes": {}},
             reference_by_packet_id={reference_record["packet_id"]: reference_record},
+            header_policy=HEADER_POLICY,
             immutable_fields=[],
             required_fields=[],
         )

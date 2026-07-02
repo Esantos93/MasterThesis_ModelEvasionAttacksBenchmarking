@@ -15,6 +15,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.header_policy import editable_header_fields_from_policy, header_field_value, load_header_editability_policy
 from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
 
@@ -44,8 +45,6 @@ DEFAULT_REQUIRED_FIELDS = [
     "payload_length_bytes",
     "packet_length_bytes",
 ]
-BASELINE_004_ALLOWED_HEADER_FIELDS = {"ipv4.tos", "ipv4.ttl", "tcp.window"}
-
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
@@ -319,26 +318,6 @@ def build_patch_application_indexes(merged_json: dict[str, Any]) -> tuple[dict[s
     return patches_by_packet, header_edits_by_packet, payload_edits, patch_group_keys
 
 
-#This function returns the value of an editable physical header field from a packet record.
-def header_field_value(record: dict[str, Any], field: str) -> Any:
-    if field == "ipv4.tos":
-        ipv4 = record.get("ipv4_header", {})
-        if isinstance(ipv4, dict) and "tos" in ipv4:
-            return ipv4["tos"]
-        return record.get("tos")
-    if field == "ipv4.ttl":
-        ipv4 = record.get("ipv4_header", {})
-        if isinstance(ipv4, dict) and "ttl" in ipv4:
-            return ipv4["ttl"]
-        return record.get("ttl")
-    if field == "tcp.window":
-        tcp = record.get("tcp_header", {})
-        if isinstance(tcp, dict) and "window" in tcp:
-            return tcp["window"]
-        return record.get("window")
-    return None
-
-
 #This function extracts packet ids that belong to Step 17 groups classified as LLM Output Failure by Step 18.
 def llm_output_failure_packet_ids(llm_output_failure_groups: list[Any]) -> set[str]:
     packet_ids = set()
@@ -396,6 +375,7 @@ def validate_patch_application_for_record(
     reference_by_packet_id: dict[str, dict[str, Any]],
     patches_by_packet: dict[str, list[dict[str, Any]]],
     header_edits_by_packet: dict[str, list[dict[str, Any]]],
+    header_policy: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if not reference_by_packet_id:
         return []
@@ -422,7 +402,7 @@ def validate_patch_application_for_record(
 
     edits = header_edits_by_packet.get(packet_id_text, [])
     edits_by_field = {str(edit.get("field")): edit for edit in edits if edit.get("field") is not None}
-    for field in BASELINE_004_ALLOWED_HEADER_FIELDS:
+    for field in editable_header_fields_from_policy(header_policy):
         reference_value = header_field_value(reference, field)
         actual_value = header_field_value(record, field)
         edit = edits_by_field.get(field)
@@ -570,6 +550,7 @@ def validate_merged_traffic(
     *,
     merged_json: dict[str, Any],
     reference_by_packet_id: dict[str, dict[str, Any]],
+    header_policy: dict[str, Any],
     immutable_fields: list[str],
     required_fields: list[str],
 ) -> dict[str, Any]:
@@ -620,7 +601,7 @@ def validate_merged_traffic(
             issue(
                 "error",
                 "payload_edits_present_in_header_only_output",
-                "Baseline-004 Step 18 output must not contain canonical payload edits.",
+                "Header-only Step 18 output must not contain canonical payload edits.",
                 payload_edit_count=len(payload_edits),
             )
         )
@@ -679,11 +660,12 @@ def validate_merged_traffic(
                 validate_patch_application_for_record(
                     record=record,
                     record_index=record_index,
-                    reference_by_packet_id=reference_by_packet_id,
-                    patches_by_packet=patches_by_packet,
-                    header_edits_by_packet=header_edits_by_packet,
-                )
+                reference_by_packet_id=reference_by_packet_id,
+                patches_by_packet=patches_by_packet,
+                header_edits_by_packet=header_edits_by_packet,
+                header_policy=header_policy,
             )
+        )
 
         has_error = any(item["severity"] == "error" for item in record_issues)
         error_count += sum(1 for item in record_issues if item["severity"] == "error")
@@ -893,9 +875,11 @@ def run_validation(
 
     merged_json = read_json(input_path)
     reference_by_packet_id, immutable_fields = build_reference_by_packet_id(reference_json_path)
+    header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
     validation = validate_merged_traffic(
         merged_json=merged_json,
         reference_by_packet_id=reference_by_packet_id,
+        header_policy=header_policy,
         immutable_fields=immutable_fields,
         required_fields=DEFAULT_REQUIRED_FIELDS,
     )
@@ -909,6 +893,11 @@ def run_validation(
             "experiment_config_label": experiment_config_label,
             "input_json": str(input_path),
             "reference_json": str(reference_json_path),
+            "header_editability_policy": {
+                "schema_version": header_policy["schema_version"],
+                "policy_id": header_policy["policy_id"],
+                "policy_path": header_policy.get("_policy_path"),
+            },
             "classification_mapping_note": {
                 "validation_errors_map_to": "Invalid Traffic",
                 "evaluation_categories": [
