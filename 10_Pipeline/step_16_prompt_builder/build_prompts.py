@@ -14,6 +14,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common import prompt_projection
 
 
 #These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contracts.
@@ -691,39 +692,10 @@ def build_compact_patch_messages(
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     prompt_input_structure = load_prompt_input_json_data_structure(config)
     prompt_instructions_profile, instructions_profile_lines = load_prompt_instructions_profile(config)
-    json_prompt_input = build_compact_prompt_input(
+    prompt_parts = prompt_projection.build_compact_patch_prompt_parts(
         prompt_unit=prompt_unit,
-        structure=prompt_input_structure,
-    )
-    has_editable_headers = bool(json_prompt_input.get("editable_headers"))
-    has_editable_payload = bool(json_prompt_input.get("canonical_regions"))
-    active_instruction_lines = select_prompt_instructions(
+        prompt_input_structure=prompt_input_structure,
         instruction_lines=instructions_profile_lines,
-        has_editable_headers=has_editable_headers,
-        has_editable_payload=has_editable_payload,
-    )
-    json_prompt_input_text = json.dumps(json_prompt_input, indent=2, sort_keys=True)
-    parent_group_id = prompt_unit["parent_group_id"]
-    prompt_unit_id = prompt_unit["prompt_unit_id"]
-    output_skeleton_lines = [
-        "{",
-        f'  "schema_version": "{PATCH_OUTPUT_SCHEMA_VERSION}",',
-        f'  "parent_group_id": "{parent_group_id}",',
-        f'  "prompt_unit_id": "{prompt_unit_id}",',
-    ]
-    if has_editable_payload:
-        output_skeleton_lines.append('  "patches": []' + ("," if has_editable_headers else ""))
-    if has_editable_headers:
-        output_skeleton_lines.append('  "header_edits": []')
-    output_skeleton_lines.append("}")
-    output_skeleton = "\n".join(output_skeleton_lines)
-    content = (
-        "\n".join(active_instruction_lines)
-        + "\n"
-        "Return this JSON object:\n"
-        f"{output_skeleton}\n"
-        "Compact prompt unit:\n"
-        f"{json_prompt_input_text}"
     )
     prompt_template_metadata = {
         "prompt_input_json_data_profile": prompt_input_structure.get("profile"),
@@ -731,7 +703,31 @@ def build_compact_patch_messages(
         "prompt_instructions_profile": prompt_instructions_profile,
         "region_container_name": prompt_input_structure.get("region_container_name", "canonical_regions"),
     }
-    return [{"role": "user", "content": content}], prompt_template_metadata
+    return [{"role": "user", "content": prompt_parts["content"]}], prompt_template_metadata
+
+
+#This function estimates the exact visible prompt text that Step 16 writes to the prompt unit.
+def estimate_prompt_unit_input_tokens(config: dict[str, Any], prompt_unit: dict[str, Any]) -> dict[str, Any]:
+    prompt_input_structure = load_prompt_input_json_data_structure(config)
+    _, instruction_lines = load_prompt_instructions_profile(config)
+    llm_config = config.get("llm", {}) if isinstance(config.get("llm"), dict) else {}
+    pipeline_config = config.get("pipeline", {}) if isinstance(config.get("pipeline"), dict) else {}
+    token_budget = prompt_unit.get("token_budget", {}) if isinstance(prompt_unit.get("token_budget"), dict) else {}
+    chars_per_token_estimate = float(
+        llm_config.get(
+            "chars_per_token_estimate",
+            pipeline_config.get(
+                "chars_per_token_estimate",
+                token_budget.get("chars_per_token_estimate", 3.0),
+            ),
+        )
+    )
+    return prompt_projection.estimate_compact_patch_prompt_tokens(
+        prompt_unit=prompt_unit,
+        prompt_input_structure=prompt_input_structure,
+        instruction_lines=instruction_lines,
+        chars_per_token_estimate=chars_per_token_estimate,
+    )
 
 
 #This function dispatches prompt construction based on llm.prompt_version.
@@ -772,6 +768,7 @@ def build_prompt_unit(
         prompt_version=prompt_version,
         prompt_unit=prompt_unit,
     )
+    token_estimation = estimate_prompt_unit_input_tokens(config, prompt_unit)
     prompt_contract = "patch_output"
     required_top_level_keys = ["schema_version", "parent_group_id", "prompt_unit_id"]
     if has_editable_payload:
@@ -845,7 +842,8 @@ def build_prompt_unit(
             "editable_regions": editable_region_index["regions"],
         },
         "token_budget": prompt_unit.get("token_budget", {}),
-        "estimated_input_tokens": prompt_unit.get("estimated_input_tokens"),
+        "token_estimation": token_estimation,
+        "estimated_input_tokens": int(token_estimation["estimated_input_tokens"]),
         "instructions": {
             "objective": "Modify compact editable regions to reduce Snort 3 detection.",
             "prompt_policy": prompt_version,
@@ -985,6 +983,7 @@ def run_prompt_builder(
                 "prompt_instructions_profile": prompt_unit["prompt_template"]["prompt_instructions_profile"],
                 "editable_region_count": len(prompt_unit["input_traceability"]["editable_regions"]),
                 "estimated_input_tokens": prompt_unit.get("estimated_input_tokens"),
+                "token_estimation": prompt_unit.get("token_estimation"),
             }
         )
 

@@ -9,6 +9,11 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import build_prompts
+from common.prompt_projection import (
+    estimate_compact_patch_prompt_tokens,
+    load_prompt_input_json_data_structure_from_config,
+    load_prompt_instructions_profile_from_config,
+)
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -139,6 +144,24 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
             self.assertNotIn('"patches": []', prompt_text)
             self.assertIn('"canonical_regions": []', prompt_text)
             self.assertEqual(len(prompt_unit["input_traceability"]["editable_regions"]), 6)
+            prompt_input_structure = load_prompt_input_json_data_structure_from_config(
+                json.loads(config_path.read_text(encoding="utf-8"))
+            )
+            _, instruction_lines = load_prompt_instructions_profile_from_config(
+                json.loads(config_path.read_text(encoding="utf-8"))
+            )
+            expected_estimation = estimate_compact_patch_prompt_tokens(
+                prompt_unit=build_v2_modification_unit(),
+                prompt_input_structure=prompt_input_structure,
+                instruction_lines=instruction_lines,
+                chars_per_token_estimate=3.0,
+            )
+            self.assertEqual(prompt_unit["token_estimation"], expected_estimation)
+            self.assertEqual(prompt_unit["estimated_input_tokens"], expected_estimation["estimated_input_tokens"])
+            self.assertEqual(
+                prompt_manifest["prompt_units"][0]["token_estimation"],
+                expected_estimation,
+            )
             self.assertTrue(
                 all(
                     region["identity_type"] == "physical_header_region"
