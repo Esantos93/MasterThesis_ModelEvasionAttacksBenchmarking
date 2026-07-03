@@ -179,6 +179,15 @@ def is_editable_header_field(policy: dict[str, Any], field: str) -> bool:
 
 #This helper returns a nested value from a structured packet header.
 def nested_header_value(header: dict[str, Any], field_name: str) -> Any:
+    if field_name == "flags_fragment_offset" and "flags_fragment_offset" not in header:
+        flags = header.get("flags")
+        if isinstance(flags, dict):
+            return (
+                (bit_value(flags.get("reserved")) << 15)
+                | (bit_value(flags.get("dont_fragment")) << 14)
+                | (bit_value(flags.get("more_fragments")) << 13)
+                | (int(header.get("fragment_offset_units") or 0) & 0x1FFF)
+            )
     current: Any = header
     for part in field_name.split("."):
         if not isinstance(current, dict) or part not in current:
