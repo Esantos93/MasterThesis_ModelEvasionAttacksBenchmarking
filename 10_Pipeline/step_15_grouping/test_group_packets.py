@@ -5,9 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from common.prompt_projection import (
+    estimate_compact_patch_prompt_tokens,
+    load_prompt_input_json_data_structure_from_config,
+    load_prompt_instructions_profile_from_config,
+)
 from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
-from step_15_grouping.group_packets import build_token_estimation_view, estimate_json_tokens, run_grouping
+from step_15_grouping.group_packets import run_grouping
 
 
 # This helper creates the minimum packet record needed by the real Step 14 TCP canonicalizer.
@@ -300,10 +305,18 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
 
         editable_unit = next(unit for unit in units if unit["editable_region_count"] > 0)
+        _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
+        expected_estimation = estimate_compact_patch_prompt_tokens(
+            prompt_unit=editable_unit,
+            prompt_input_structure=load_prompt_input_json_data_structure_from_config(active_config),
+            instruction_lines=instruction_lines,
+            chars_per_token_estimate=3.0,
+        )
         self.assertEqual(
             editable_unit["estimated_input_tokens"],
-            estimate_json_tokens(build_token_estimation_view(editable_unit), 3.0),
+            expected_estimation["estimated_input_tokens"],
         )
+        self.assertEqual(editable_unit["token_estimation"], expected_estimation)
 
     def test_oversized_payload_window_is_split_until_each_editable_unit_fits_budget(self) -> None:
         payload = bytes(index % 251 for index in range(1200))
@@ -344,7 +357,11 @@ class CanonicalStep15Tests(unittest.TestCase):
             for compact_region in unit["packets"]
             for region in compact_region["editable_regions"]
         )
-        self.assertEqual([(0, 512), (512, 1024), (1024, 1200)], editable_intervals)
+        self.assertEqual(0, editable_intervals[0][0])
+        self.assertEqual(len(payload), editable_intervals[-1][1])
+        self.assertTrue(
+            all(previous_end == next_start for (_, previous_end), (next_start, _) in zip(editable_intervals, editable_intervals[1:]))
+        )
 
     def test_step15_rejects_packet_json_v3(self) -> None:
         source = packet_json_v4([tcp_record(1, 1000, b"attack")], include_flow_context=False)

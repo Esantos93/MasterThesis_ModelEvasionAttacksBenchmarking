@@ -25,6 +25,11 @@ from common.header_policy import (
     nested_header_value,
 )
 from common.io_utils import write_json
+from common.prompt_projection import (
+    estimate_compact_patch_prompt_tokens,
+    load_prompt_input_json_data_structure_from_config,
+    load_prompt_instructions_profile_from_config,
+)
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
@@ -527,6 +532,10 @@ def get_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
                 f"Step 15 requires {key!r} in the active config under 'llm' or 'pipeline'. "
                 "This experiment-level budget value has no internal default."
             )
+    token_config["prompt_input_structure"] = load_prompt_input_json_data_structure_from_config(config)
+    instructions_profile, instruction_lines = load_prompt_instructions_profile_from_config(config)
+    token_config["prompt_instructions_profile"] = instructions_profile
+    token_config["prompt_instruction_lines"] = instruction_lines
     return token_config
 
 
@@ -1286,10 +1295,14 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
     prompt_unit["editable_header_region_count"] = header_editable_region_count
     prompt_unit["editable_region_count"] = payload_editable_region_count + header_editable_region_count
     prompt_unit["payload_window_count"] = sum(1 for packet in packets if packet.get("payload_view", {}).get("mode") == "payload_window")
-    prompt_unit["estimated_input_tokens"] = estimate_json_tokens(
-        build_token_estimation_view(prompt_unit),
-        float(token_config["chars_per_token_estimate"]),
+    token_estimation = estimate_compact_patch_prompt_tokens(
+        prompt_unit=prompt_unit,
+        prompt_input_structure=token_config["prompt_input_structure"],
+        instruction_lines=token_config["prompt_instruction_lines"],
+        chars_per_token_estimate=float(token_config["chars_per_token_estimate"]),
     )
+    prompt_unit["token_estimation"] = token_estimation
+    prompt_unit["estimated_input_tokens"] = int(token_estimation["estimated_input_tokens"])
 
 
 #This function marks modification units that still exceed the soft Step 15 budget after all local splitting options.
@@ -1914,6 +1927,7 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         ),
         "payload_window_count": prompt_unit["payload_window_count"],
         "editable_region_count": prompt_unit["editable_region_count"],
+        "token_estimation": prompt_unit.get("token_estimation"),
         "context_truncation": prompt_unit["context_truncation"],
         "modification_unit_file_size_bytes_pretty": prompt_unit_path.stat().st_size,
     }
