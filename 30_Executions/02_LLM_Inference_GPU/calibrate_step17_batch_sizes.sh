@@ -89,7 +89,11 @@ for batch_size in ${BATCH_SIZES}; do
     current_monitor_pid=$!
   fi
 
-  echo "Starting ${batch_label} as ${run_id} at $(date --iso-8601=seconds)."
+  echo -e "\n################################################################################"
+  echo "  STARTING BATCH SIZE: ${batch_size} (${batch_label})"
+  echo "  Run ID: ${run_id}"
+  echo "  Timestamp: $(date --iso-8601=seconds)"
+  echo -e "################################################################################\n"
   set +e
   CLOUD_ROOT="${CLOUD_ROOT}" \
   EXPERIMENT_ID="${EXPERIMENT_ID}" \
