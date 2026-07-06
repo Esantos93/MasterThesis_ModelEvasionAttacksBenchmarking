@@ -49,6 +49,7 @@ VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-${RUNTIME_MAX_MODEL_LEN}}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
+VLLM_KV_CACHE_FP8="${VLLM_KV_CACHE_FP8:-0}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
 SKIP_STEP16="${SKIP_STEP16:-0}"
@@ -363,6 +364,9 @@ if [[ "${SKIP_STEP17}" != "1" ]]; then
     step17_args+=(--vllm-dtype "${VLLM_DTYPE}")
     step17_args+=(--vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}")
     step17_args+=(--vllm-max-model-len "${VLLM_MAX_MODEL_LEN}")
+    if [[ "${VLLM_KV_CACHE_FP8}" == "1" ]]; then
+      step17_args+=(--kv-cache-dtype fp8)
+    fi
     if [[ -n "${VLLM_QUANTIZATION}" ]]; then
       step17_args+=(--vllm-quantization "${VLLM_QUANTIZATION}")
     fi
