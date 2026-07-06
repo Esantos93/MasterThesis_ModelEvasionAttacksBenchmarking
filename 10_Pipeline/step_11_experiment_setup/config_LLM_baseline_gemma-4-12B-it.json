@@ -46,7 +46,7 @@
   },
   "llm": {
     "model_name": "gemma-4-12B-it",
-    "model_path": "/models/gemma-4-12B-it",
+    "model_path": "/models_root/gemma-4-12B-it/",
     "prompt_version": "compact_patch_prompting_v2",
     "prompt_input_json_data_profile": "baseline_minimal_canonical_patch_v1",
     "prompt_instructions_profile": "compact_patch_baseline_v1",
