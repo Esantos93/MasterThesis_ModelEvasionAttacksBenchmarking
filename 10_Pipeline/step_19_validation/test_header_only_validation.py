@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+STEP_ROOT = Path(__file__).resolve().parent
+for path in [PIPELINE_ROOT, STEP_ROOT]:
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 from validate_merged_traffic import read_json, validate_merged_traffic
 
 
-HEADER_POLICY = read_json("step_15_grouping/01_editability_policies/header_v1.json")
+HEADER_POLICY = read_json(PIPELINE_ROOT / "step_15_grouping" / "01_editability_policies" / "header_v1.json")
 
 
 def reference_record() -> dict:
@@ -111,6 +118,35 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         )
         self.assertEqual(1, result["summary"]["error_count"])
         self.assertEqual("payload_edits_present_in_header_only_output", result["root_issues"][0]["reason"])
+
+    def test_preserves_llm_output_failure_packet_for_reconstruction(self) -> None:
+        reference = reference_record()
+        merged = {
+            "group_outcomes": {
+                "accepted_groups": [],
+                "llm_output_failure_groups": [
+                    {
+                        "prompt_unit_id": "group_000001",
+                        "packet_ids": ["packet_000001"],
+                    }
+                ],
+            },
+            "patch_application": {"applied_patches": []},
+            "traffic": [reference_record()],
+        }
+        result = validate_merged_traffic(
+            merged_json=merged,
+            reference_by_packet_id={"packet_000001": reference},
+            header_policy=HEADER_POLICY,
+            immutable_fields=["packet_id"],
+            required_fields=["packet_id", "payload_hex", "payload_length_bytes", "packet_length_bytes"],
+        )
+        self.assertEqual(0, result["summary"]["accepted_packet_count"])
+        self.assertEqual(1, result["summary"]["rejected_packet_count"])
+        self.assertEqual(1, result["summary"]["llm_output_failure_packet_count"])
+        self.assertEqual(1, result["summary"]["llm_output_failure_preserved_packet_count"])
+        self.assertEqual(1, result["summary"]["reconstruction_packet_count"])
+        self.assertEqual([reference], result["reconstruction_packets"])
 
 
 if __name__ == "__main__":

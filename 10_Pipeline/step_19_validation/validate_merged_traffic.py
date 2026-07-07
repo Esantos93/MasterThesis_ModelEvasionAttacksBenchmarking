@@ -5,6 +5,7 @@ import binascii
 import json
 import sys
 import traceback
+from copy import deepcopy
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -716,14 +717,18 @@ def validate_merged_traffic(
 
     packet_results = []
     accepted_packets = []
+    reconstruction_packets = []
     rejected_packets = []
     invalid_traffic_packets = []
     llm_output_failure_packets = []
+    preserved_invalid_traffic_packets = []
+    preserved_llm_output_failure_packets = []
     for item in preliminary_packets:
         record = item["record"]
         group_invalid = item["group_key"] in invalid_group_keys
         packet_id = record.get("packet_id") if isinstance(record, dict) else None
         llm_output_failure = packet_id is not None and str(packet_id) in llm_output_failure_packet_id_set
+        reference_record = reference_by_packet_id.get(str(packet_id)) if packet_id is not None else None
         packet_result = {
             "group_key": item["group_key"],
             "record_index": item["record_index"],
@@ -755,8 +760,17 @@ def validate_merged_traffic(
                 invalid_traffic_packets.append(packet_result)
             if llm_output_failure:
                 llm_output_failure_packets.append(packet_result)
+            if isinstance(reference_record, dict):
+                reconstruction_packets.append(deepcopy(reference_record))
+                if group_invalid:
+                    preserved_invalid_traffic_packets.append(packet_result)
+                elif llm_output_failure:
+                    preserved_llm_output_failure_packets.append(packet_result)
+                else:
+                    raise AssertionError("Rejected packet was neither invalid traffic nor LLM output failure.")
         elif isinstance(record, dict):
             accepted_packets.append(record)
+            reconstruction_packets.append(record)
 
     reference_missing_packet_ids = []
     if reference_by_packet_id:
@@ -814,9 +828,12 @@ def validate_merged_traffic(
         "packet_results": packet_results,
         "group_results": sorted(group_results, key=lambda item: item["group_key"]),
         "accepted_packets": accepted_packets,
+        "reconstruction_packets": reconstruction_packets,
         "rejected_packets": rejected_packets,
         "invalid_traffic_packets": invalid_traffic_packets,
         "llm_output_failure_packets": llm_output_failure_packets,
+        "preserved_invalid_traffic_packets": preserved_invalid_traffic_packets,
+        "preserved_llm_output_failure_packets": preserved_llm_output_failure_packets,
         "invalid_traffic_groups": sorted(
             [group for group in group_results if group["invalid_traffic"]],
             key=lambda item: item["group_key"],
@@ -830,6 +847,7 @@ def validate_merged_traffic(
         "summary": {
             "total_packet_count": len(traffic),
             "accepted_packet_count": len(accepted_packets),
+            "reconstruction_packet_count": len(reconstruction_packets),
             "rejected_packet_count": len(rejected_packets),
             "total_group_count": len(group_results),
             "accepted_group_count": len(group_results) - len(invalid_group_keys) - len(llm_output_failure_group_keys),
@@ -838,6 +856,7 @@ def validate_merged_traffic(
             "llm_output_failure_rejected_group_count": len(llm_output_failure_group_keys),
             "llm_output_failure_packet_count": len(llm_output_failure_packet_id_set),
             "llm_output_failure_rejected_packet_count": len(llm_output_failure_packets),
+            "llm_output_failure_preserved_packet_count": len(preserved_llm_output_failure_packets),
             "error_count": error_count,
             "warning_count": warning_count,
             "duplicate_packet_id_count": len(duplicate_packet_ids),
@@ -846,6 +865,7 @@ def validate_merged_traffic(
             "preserved_non_llm_processed_packets_count": len(preserved_non_llm_processed_packet_ids),
             "unexpectedly_uncovered_packet_count": len(unexpectedly_uncovered_packet_ids),
             "invalid_traffic_packet_count": len(invalid_traffic_packets),
+            "invalid_traffic_preserved_packet_count": len(preserved_invalid_traffic_packets),
             "effective_header_edit_count": sum(len(edits) for edits in header_edits_by_packet.values()),
             "no_effect_edit_count": len(no_effect_edits),
             "payload_edit_count": len(payload_edits),
@@ -855,7 +875,7 @@ def validate_merged_traffic(
 
 
 #This function is the programmatic entry point for Step 19.
-#It loads merged traffic, optionally loads the original reference JSON, writes the validation report, and writes reconstructible traffic only.
+#It loads merged traffic, optionally loads the original reference JSON, writes the validation report, and writes the full POST reconstruction stream.
 def run_validation(
     *,
     config_path: str | Path,
@@ -909,6 +929,12 @@ def run_validation(
                 ],
                 "llm_output_failure_source": "Step 18 maps rejected Step 17 groups to LLM Output Failure.",
                 "invalid_traffic_source": "Step 19 maps validation errors in accepted Step 18 groups to Invalid Traffic.",
+                "post_reconstruction_policy": (
+                    "The Step 19 validated traffic artifact preserves the full POST packet universe for downstream "
+                    "PCAP reconstruction. Packets from LLM Output Failure or Invalid Traffic groups are emitted as "
+                    "original Step 14 no-op records when the reference packet is available, while their failure labels "
+                    "remain in this validation report for model-output and traffic-validity metrics."
+                ),
                 "preserved_non_llm_processed_source": (
                     "Packets absent from Step 17 traceability are classified as preserved without LLM processing only when "
                     "both merged and reference records have an empty payload and the complete records are identical."
@@ -945,12 +971,14 @@ def run_validation(
             "source_merged_json": str(input_path),
             "validation_report": str(report_path),
             "accepted_packet_count": validation["summary"]["accepted_packet_count"],
+            "reconstruction_packet_count": validation["summary"]["reconstruction_packet_count"],
             "rejected_packet_count": validation["summary"]["rejected_packet_count"],
             "accepted_group_count": validation["summary"]["accepted_group_count"],
             "invalid_traffic_group_count": validation["summary"]["invalid_traffic_group_count"],
             "llm_output_failure_group_count": validation["summary"]["llm_output_failure_group_count"],
+            "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_failed_or_invalid_groups",
         },
-        "traffic": validation["accepted_packets"],
+        "traffic": validation["reconstruction_packets"],
     }
     write_json(report_path, report)
     write_json(valid_output_path, valid_output)
@@ -1005,10 +1033,13 @@ def main() -> None:
             raise SystemExit(1)
 
         print(f"Accepted packets: {result['accepted_packet_count']}")
+        print(f"POST reconstruction packets: {result['reconstruction_packet_count']}")
         print(f"Rejected packets: {result['rejected_packet_count']}")
         print(f"Accepted groups: {result['accepted_group_count']}")
         print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
         print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
+        print(f"Preserved LLM Output Failure packets: {result['llm_output_failure_preserved_packet_count']}")
+        print(f"Preserved Invalid Traffic packets: {result['invalid_traffic_preserved_packet_count']}")
         print(f"Preserved non-LLM-processed packets: {result['preserved_non_llm_processed_packets_count']}")
         print(f"Unexpectedly uncovered packets: {result['unexpectedly_uncovered_packet_count']}")
         print(f"Effective header edits: {result['effective_header_edit_count']}")
