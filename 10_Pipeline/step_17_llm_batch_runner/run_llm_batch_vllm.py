@@ -21,6 +21,7 @@ VLLM_DTYPE: str = "auto"
 VLLM_GPU_MEMORY_UTILIZATION: float = 0.90
 VLLM_MAX_MODEL_LEN: int | None = None
 VLLM_TRUST_REMOTE_CODE: bool = False
+VLLM_CHAT_TEMPLATE_KWARGS: dict[str, Any] | None = None
 
 
 #This function checks whether a local directory looks like a vLLM-loadable model directory.
@@ -70,7 +71,14 @@ class VllmChatCompletionAdapter:
             top_p=top_p,
             max_tokens=max_tokens,
         )
-        outputs = self.llm.chat(messages=messages, sampling_params=sampling_params, use_tqdm=False)
+        chat_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "sampling_params": sampling_params,
+            "use_tqdm": False,
+        }
+        if VLLM_CHAT_TEMPLATE_KWARGS:
+            chat_kwargs["chat_template_kwargs"] = VLLM_CHAT_TEMPLATE_KWARGS
+        outputs = self.llm.chat(**chat_kwargs)
         text = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
         if not stream:
             return {"choices": [{"message": {"content": text}}]}
@@ -93,11 +101,14 @@ class VllmChatCompletionAdapter:
             )
             for generation_params in generation_params_batch
         ]
-        outputs = self.llm.chat(
-            messages=messages_batch,
-            sampling_params=sampling_params_batch,
-            use_tqdm=False,
-        )
+        chat_kwargs: dict[str, Any] = {
+            "messages": messages_batch,
+            "sampling_params": sampling_params_batch,
+            "use_tqdm": False,
+        }
+        if VLLM_CHAT_TEMPLATE_KWARGS:
+            chat_kwargs["chat_template_kwargs"] = VLLM_CHAT_TEMPLATE_KWARGS
+        outputs = self.llm.chat(**chat_kwargs)
         return [output.outputs[0].text if output.outputs else "" for output in outputs]
 
 
@@ -160,11 +171,14 @@ def run_vllm_per_request_sampling_probe(args: argparse.Namespace) -> None:
     print(f"Probe model: {model_path}")
     print(f"Probe max_model_len: {max_model_len}")
     print("Probe request max_tokens: [1, 8]")
-    outputs = adapter.llm.chat(
-        messages=messages_batch,
-        sampling_params=sampling_params_batch,
-        use_tqdm=False,
-    )
+    chat_kwargs: dict[str, Any] = {
+        "messages": messages_batch,
+        "sampling_params": sampling_params_batch,
+        "use_tqdm": False,
+    }
+    if VLLM_CHAT_TEMPLATE_KWARGS:
+        chat_kwargs["chat_template_kwargs"] = VLLM_CHAT_TEMPLATE_KWARGS
+    outputs = adapter.llm.chat(**chat_kwargs)
     print(f"Probe outputs returned: {len(outputs)}")
     for index, output in enumerate(outputs):
         text = output.outputs[0].text if output.outputs else ""
@@ -184,6 +198,11 @@ def parse_rise_cloud_args() -> argparse.Namespace:
     extra_parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     extra_parser.add_argument("--vllm-max-model-len", type=int)
     extra_parser.add_argument("--trust-remote-code", action="store_true")
+    extra_parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Pass enable_thinking=False to chat templates that support thinking/non-thinking modes, such as Qwen3.",
+    )
     extra_parser.add_argument(
         "--probe-vllm-per-request-sampling",
         action="store_true",
@@ -210,6 +229,7 @@ def main() -> None:
     global VLLM_GPU_MEMORY_UTILIZATION
     global VLLM_MAX_MODEL_LEN
     global VLLM_TRUST_REMOTE_CODE
+    global VLLM_CHAT_TEMPLATE_KWARGS
 
     args = parse_rise_cloud_args()
     VLLM_MODEL_IDS = args.hf_model_id
@@ -217,6 +237,7 @@ def main() -> None:
     VLLM_GPU_MEMORY_UTILIZATION = args.vllm_gpu_memory_utilization
     VLLM_MAX_MODEL_LEN = args.vllm_max_model_len
     VLLM_TRUST_REMOTE_CODE = args.trust_remote_code
+    VLLM_CHAT_TEMPLATE_KWARGS = {"enable_thinking": False} if args.disable_thinking else None
     if args.probe_vllm_per_request_sampling:
         run_vllm_per_request_sampling_probe(args)
         return
