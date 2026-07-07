@@ -583,10 +583,18 @@ def start_generation_heartbeat(
     return stop_event, thread
 
 
-#This function parses the model response as strict JSON.
-#Text before or after the JSON object is rejected by json.loads.
-def parse_strict_json(raw_text: str) -> Any:
-    return json.loads(raw_text)
+FENCED_JSON_RE = re.compile(r"\A\s*```(?:json|JSON)?[^\n]*\n(?P<body>.*?)\n?```\s*\Z", re.DOTALL)
+
+
+#This function parses the model response as JSON, allowing only a whole-response JSON code fence fallback.
+def parse_model_json(raw_text: str) -> Any:
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        match = FENCED_JSON_RE.match(raw_text)
+        if not match:
+            raise
+        return json.loads(match.group("body"))
 
 
 #This function builds a lookup for editable regions declared by Step 16.
@@ -1243,7 +1251,7 @@ def run_single_prompt(
             "stream_expected_packet_ids": progress_state["total_packet_count"],
         }
 
-        parsed_output = parse_strict_json(raw_text)
+        parsed_output = parse_model_json(raw_text)
         validation_result = validate_patch_output(parsed_output, prompt_package)
         if validation_result["accepted"]:
             write_json(parsed_path, parsed_output)
@@ -1368,7 +1376,7 @@ def write_generated_prompt_outputs(
     try:
         write_text(context["raw_path"], raw_text)
         output_paths["raw"] = str(context["raw_path"])
-        parsed_output = parse_strict_json(raw_text)
+        parsed_output = parse_model_json(raw_text)
         validation_result = validate_patch_output(parsed_output, prompt_package)
         if validation_result["accepted"]:
             write_json(context["parsed_path"], parsed_output)

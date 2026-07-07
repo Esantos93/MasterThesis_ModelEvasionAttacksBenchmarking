@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -99,6 +100,38 @@ def build_header_prompt_package() -> dict:
             ],
         },
     }
+
+
+#This test case covers Step 17 response JSON parsing before contract validation.
+class ModelJsonParsingTest(unittest.TestCase):
+    def test_strict_json_response_is_parsed(self) -> None:
+        parsed = run_llm_batch.parse_model_json('{"schema_version": "patch_output_v1"}')
+
+        self.assertEqual(parsed["schema_version"], "patch_output_v1")
+
+    def test_fenced_json_response_is_recovered(self) -> None:
+        raw_text = """```json
+{
+  "schema_version": "patch_output_v1",
+  "parent_group_id": "parent_001",
+  "prompt_unit_id": "unit_header_001",
+  "header_edits": []
+}
+```"""
+
+        parsed = run_llm_batch.parse_model_json(raw_text)
+
+        self.assertEqual(parsed["schema_version"], "patch_output_v1")
+        self.assertEqual(parsed["header_edits"], [])
+
+    def test_fenced_json_with_extra_text_is_rejected(self) -> None:
+        raw_text = """Here is the JSON:
+```json
+{"schema_version": "patch_output_v1"}
+```"""
+
+        with self.assertRaises(json.JSONDecodeError):
+            run_llm_batch.parse_model_json(raw_text)
 
 
 #This test case covers Step 17 patch-output validation against prompt traceability.
