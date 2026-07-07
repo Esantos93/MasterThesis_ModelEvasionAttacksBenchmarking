@@ -51,7 +51,6 @@ HF_MODEL_ID
 BATCH_SIZE
 LIMIT_PROMPTS_S16
 LIMIT_PROMPTS_S17
-STEP17_BACKEND
 SKIP_STEP16
 SKIP_STEP17
 COMPRESS_STEP16
@@ -106,7 +105,6 @@ EXPERIMENT_ID="exp_cicids2017_thursday_baseline_003" \
 GROUPING_LABEL="fixed_packet_count_size_006" \
 RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_baseline003_fixed006_hybrid_500prompts_batch168" \
 CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_003.json" \
-STEP17_BACKEND="vllm" \
 BATCH_SIZE="168" \
 LIMIT_PROMPTS_S17="500" \
 /tf/thesis_Santos/04_Steps/run_step16_17.sh
@@ -123,7 +121,6 @@ RUN_ID="run_$(date -u +%Y%m%d_%H%M%S)_rise_h100_baseline003_fixed006_hybrid_smok
 CONFIG_PATH="/tf/thesis_Santos/04_Steps/setups/config_LLM_baseline_003.json" \
 PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/exp_cicids2017_thursday_baseline_003/06_prompts/fixed_packet_count_size_006/<prompt_run_id>" \
 SKIP_STEP16=1 \
-STEP17_BACKEND="vllm" \
 BATCH_SIZE="168" \
 LIMIT_PROMPTS_S17="100" \
 /tf/thesis_Santos/04_Steps/run_step16_17.sh
@@ -158,10 +155,9 @@ launcher duration. The terminal log ends with `Run duration`, while
 Runtime note:
 
 ```text
-The H100 path should use STEP17_BACKEND=vllm, which calls
-Step17/run_llm_batch_vllm.py. This is the renamed active vLLM adapter from the
-former Google Cloud path. It keeps the Step 17 validation/output logic from
-run_llm_batch.py but loads Hugging Face model directories or ids with vLLM.
+The H100 path uses Step17/run_llm_batch_vllm.py. This is the active vLLM
+adapter. It keeps the Step 17 validation/output logic from run_llm_batch.py
+but loads Hugging Face model directories or ids with vLLM.
 ```
 
 For a Step 16-only validation:

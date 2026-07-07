@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 
-#This vLLM runner keeps the original Step 17 validation/output logic, but replaces llama-cpp-python with vLLM.
-#It is meant for modern GPU instances such as NVIDIA L4/H100 where Hugging Face models are preferable to GGUF files.
+#This vLLM runner keeps the shared Step 17 validation/output logic and provides the active model backend.
+#It is meant for modern GPU instances such as NVIDIA L4/H100 where Hugging Face model directories are used directly.
 
 STEP17_DIR = Path(__file__).resolve().parent
 if str(STEP17_DIR) not in sys.path:
@@ -18,11 +18,9 @@ import run_llm_batch as base_step17  # noqa: E402
 
 VLLM_MODEL_IDS: list[str] | None = None
 VLLM_DTYPE: str = "auto"
-VLLM_QUANTIZATION: str | None = None
 VLLM_GPU_MEMORY_UTILIZATION: float = 0.90
 VLLM_MAX_MODEL_LEN: int | None = None
 VLLM_TRUST_REMOTE_CODE: bool = False
-VLLM_KV_CACHE_DTYPE: str = "auto"
 
 
 #This function checks whether a local directory looks like a vLLM-loadable model directory.
@@ -32,7 +30,7 @@ def is_local_vllm_model_dir(path: Path) -> bool:
     )
 
 
-#This class adapts vLLM's chat API to the Step 17 llama-cpp-style interface.
+#This class adapts vLLM's chat API to the shared Step 17 model interface.
 class VllmChatCompletionAdapter:
     #This method loads one Hugging Face/vLLM model with the configured runtime options.
     def __init__(self, model_id: str, max_model_len: int | None) -> None:
@@ -43,10 +41,7 @@ class VllmChatCompletionAdapter:
             "dtype": VLLM_DTYPE,
             "gpu_memory_utilization": VLLM_GPU_MEMORY_UTILIZATION,
             "trust_remote_code": VLLM_TRUST_REMOTE_CODE,
-            "kv_cache_dtype": VLLM_KV_CACHE_DTYPE,
         }
-        if VLLM_QUANTIZATION:
-            kwargs["quantization"] = VLLM_QUANTIZATION
         if max_model_len:
             kwargs["max_model_len"] = max_model_len
         self.model_id = model_id
@@ -58,7 +53,7 @@ class VllmChatCompletionAdapter:
         decoded_text = text.decode("utf-8") if isinstance(text, bytes) else text
         return tokenizer.encode(decoded_text, add_special_tokens=add_bos)
 
-    #This method runs one chat completion and returns a llama-cpp-compatible response object.
+    #This method runs one chat completion and returns the response shape expected by shared Step 17 code.
     def create_chat_completion(
         self,
         *,
@@ -186,11 +181,9 @@ def parse_rise_cloud_args() -> argparse.Namespace:
     extra_parser = argparse.ArgumentParser(add_help=False)
     extra_parser.add_argument("--hf-model-id", action="append", help="Hugging Face model id to load with vLLM. Can be repeated.")
     extra_parser.add_argument("--vllm-dtype", default="auto", help="vLLM dtype, for example auto, half, bfloat16, or float16.")
-    extra_parser.add_argument("--vllm-quantization", help="vLLM quantization method, for example awq, gptq, or bitsandbytes.")
     extra_parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     extra_parser.add_argument("--vllm-max-model-len", type=int)
     extra_parser.add_argument("--trust-remote-code", action="store_true")
-    extra_parser.add_argument("--kv-cache-dtype", default="auto", help="vLLM KV Cache storage precision (auto or fp8).")
     extra_parser.add_argument(
         "--probe-vllm-per-request-sampling",
         action="store_true",
@@ -214,26 +207,22 @@ def parse_rise_cloud_args() -> argparse.Namespace:
 def main() -> None:
     global VLLM_MODEL_IDS
     global VLLM_DTYPE
-    global VLLM_QUANTIZATION
     global VLLM_GPU_MEMORY_UTILIZATION
     global VLLM_MAX_MODEL_LEN
     global VLLM_TRUST_REMOTE_CODE
-    global VLLM_KV_CACHE_DTYPE
 
     args = parse_rise_cloud_args()
     VLLM_MODEL_IDS = args.hf_model_id
     VLLM_DTYPE = args.vllm_dtype
-    VLLM_QUANTIZATION = args.vllm_quantization
     VLLM_GPU_MEMORY_UTILIZATION = args.vllm_gpu_memory_utilization
     VLLM_MAX_MODEL_LEN = args.vllm_max_model_len
     VLLM_TRUST_REMOTE_CODE = args.trust_remote_code
-    VLLM_KV_CACHE_DTYPE = args.kv_cache_dtype
     if args.probe_vllm_per_request_sampling:
         run_vllm_per_request_sampling_probe(args)
         return
 
     base_step17.collect_model_paths = collect_vllm_model_paths
-    base_step17.load_llama_model = load_vllm_model
+    base_step17.load_model = load_vllm_model
 
     summary = base_step17.run_llm_batch(args)
     print("Step 17 vLLM batch finished.")

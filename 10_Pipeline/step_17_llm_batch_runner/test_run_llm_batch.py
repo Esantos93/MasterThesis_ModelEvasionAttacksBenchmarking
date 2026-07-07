@@ -390,7 +390,7 @@ class OutputBudgetPolicyTest(unittest.TestCase):
 
         desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
             prompt_package=prompt_package,
-            legacy_output_token_cap=1536,
+            output_token_cap=1536,
         )
 
         self.assertEqual(desired_tokens, 1536)
@@ -403,7 +403,7 @@ class OutputBudgetPolicyTest(unittest.TestCase):
 
         desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
             prompt_package=prompt_package,
-            legacy_output_token_cap=1536,
+            output_token_cap=1536,
         )
 
         self.assertEqual(desired_tokens, 1280)
@@ -416,7 +416,7 @@ class OutputBudgetPolicyTest(unittest.TestCase):
 
         desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
             prompt_package=prompt_package,
-            legacy_output_token_cap=1536,
+            output_token_cap=1536,
         )
 
         self.assertEqual(desired_tokens, 1536)

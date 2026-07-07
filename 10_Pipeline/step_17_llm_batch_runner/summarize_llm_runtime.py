@@ -191,9 +191,11 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
     if isinstance(validation_result, dict):
         patch_count = validation_result.get("patch_count")
         validation_reason = validation_result.get("reason")
-    llama_response_metadata = metadata.get("llama_response_metadata")
-    if not isinstance(llama_response_metadata, dict):
-        llama_response_metadata = {}
+    generation_response_metadata = metadata.get("generation_response_metadata")
+    if not isinstance(generation_response_metadata, dict):
+        generation_response_metadata = metadata.get("llama_response_metadata")
+    if not isinstance(generation_response_metadata, dict):
+        generation_response_metadata = {}
 
     row = {
         "metadata_file": str(metadata_path),
@@ -215,10 +217,10 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "patch_count": patch_count,
         "started_at_utc": metadata.get("started_at_utc"),
         "finished_at_utc": metadata.get("finished_at_utc"),
-        "generation_batch_index": llama_response_metadata.get("batch_index"),
-        "generation_batch_size": llama_response_metadata.get("batch_size"),
-        "generation_batch_limit": llama_response_metadata.get("batch_limit"),
-        "generation_batch_runtime_seconds": llama_response_metadata.get("batch_runtime_seconds"),
+        "generation_batch_index": generation_response_metadata.get("batch_index"),
+        "generation_batch_size": generation_response_metadata.get("batch_size"),
+        "generation_batch_limit": generation_response_metadata.get("batch_limit"),
+        "generation_batch_runtime_seconds": generation_response_metadata.get("batch_runtime_seconds"),
         **counts,
     }
     row["seconds_per_packet"] = safe_rate(runtime_seconds, row["packet_count"])

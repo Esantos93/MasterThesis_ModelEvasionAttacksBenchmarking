@@ -191,44 +191,19 @@ def build_default_run_id(run_label: str | None) -> str:
     return f"run_{timestamp}"
 
 
-#This function discovers GGUF models in the configured model directory.
-def discover_model_paths(model_dir: Path) -> list[Path]:
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
-    model_paths = sorted(model_dir.glob("*.gguf"))
-    if not model_paths:
-        raise FileNotFoundError(f"No .gguf models found in model directory: {model_dir}")
-    return model_paths
-
-
 #This function resolves the model paths selected for this run.
-#By default it runs all GGUF models found in the model directory, which should be the two benchmark models.
 def collect_model_paths(
     *,
     model_dir: Path,
     explicit_model_paths: list[str] | None,
     model_filters: list[str] | None,
 ) -> list[Path]:
-    if explicit_model_paths:
-        model_paths = [Path(path).expanduser() for path in explicit_model_paths]
-    else:
-        model_paths = discover_model_paths(model_dir)
+    raise RuntimeError("Step 17 no longer supports direct model discovery in run_llm_batch.py. Use run_llm_batch_vllm.py.")
 
-    if model_filters:
-        lowered_filters = [model_filter.lower() for model_filter in model_filters]
-        model_paths = [
-            model_path
-            for model_path in model_paths
-            if any(model_filter in str(model_path).lower() for model_filter in lowered_filters)
-        ]
 
-    missing_paths = [str(model_path) for model_path in model_paths if not model_path.exists()]
-    if missing_paths:
-        joined = "\n".join(missing_paths)
-        raise FileNotFoundError(f"Selected model path(s) do not exist:\n{joined}")
-    if not model_paths:
-        raise ValueError("No models selected. Check --model-path, --model-dir, or --model-filter.")
-    return model_paths
+#This function loads the selected model backend. The vLLM runner replaces this function before execution.
+def load_model(model_path: Path, generation_params: dict[str, Any]) -> Any:
+    raise RuntimeError("Step 17 no longer supports direct model loading in run_llm_batch.py. Use run_llm_batch_vllm.py.")
 
 
 #This function creates the output folders for a model and run.
@@ -240,7 +215,7 @@ def prepare_model_output_dirs(output_root: Path, model_name: str, run_id: str) -
     return paths
 
 
-#This function returns the generation parameters used by llama-cpp-python.
+#This function returns the generation parameters used by the active Step 17 backend.
 def build_generation_params(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     llm_config = config.get("llm", {})
     runtime_max_model_len = (
@@ -277,8 +252,6 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
             if args.chars_per_token_estimate is not None
             else float(llm_config.get("chars_per_token_estimate", 3.0))
         ),
-        "n_gpu_layers": args.n_gpu_layers,
-        "n_threads": args.n_threads,
     }
 
 
@@ -294,7 +267,7 @@ def messages_to_estimation_text(messages: list[dict[str, Any]]) -> str:
 
 
 #This function estimates token count from text length before the model is loaded.
-#It mirrors the old Ping Mallory prototype and is only used for choosing an initial n_ctx.
+#It is only used for context preflight before the vLLM model is loaded.
 def estimate_tokens_from_char_count(text: str, chars_per_token_estimate: float) -> int:
     if chars_per_token_estimate <= 0:
         raise ValueError("--chars-per-token-estimate must be greater than zero.")
@@ -309,7 +282,7 @@ def next_power_of_two(value: int) -> int:
 
 
 #This function estimates the context window required by all selected prompts before model loading.
-#A single n_ctx is selected for the whole run because llama-cpp-python fixes n_ctx when the model is loaded.
+#A single model context length is selected for the whole run before the backend is loaded.
 def estimate_dynamic_n_ctx(prompt_paths: list[Path], generation_params: dict[str, Any]) -> dict[str, Any]:
     if generation_params["n_ctx"] is not None:
         return {
@@ -402,7 +375,7 @@ def summarize_editable_regions_for_output_budget(prompt_package: dict[str, Any])
         "payload_editable_region_count": 0,
         "header_editable_region_count": 0,
         "payload_editable_bytes": 0,
-        "prompt_class": "no_editable_regions",
+        "prompt_class": None,
     }
     if not isinstance(editable_regions, list):
         return summary
@@ -438,14 +411,13 @@ def estimate_payload_output_budget(payload_editable_bytes: int) -> tuple[int, st
 def estimate_desired_output_tokens(
     *,
     prompt_package: dict[str, Any],
-    legacy_output_token_cap: int,
+    output_token_cap: int,
 ) -> tuple[int, dict[str, Any]]:
     region_summary = summarize_editable_regions_for_output_budget(prompt_package)
     prompt_class = region_summary["prompt_class"]
-    if prompt_class == "no_editable_regions":
-        estimated_output_tokens = 0
-        budget_tier = "no_editable_regions"
-    elif prompt_class == "header_only":
+    if prompt_class is None:
+        raise ValueError("Step 17 supports only header_only or payload_involved prompt units.")
+    if prompt_class == "header_only":
         estimated_output_tokens = HEADER_ONLY_OUTPUT_BUDGET
         budget_tier = "header_only"
     else:
@@ -456,7 +428,7 @@ def estimate_desired_output_tokens(
             estimated_output_tokens = MIXED_HEADER_OUTPUT_BUDGET_FLOOR
             budget_tier = f"{budget_tier}_mixed_header_floor"
 
-    desired_output_tokens = min(estimated_output_tokens, legacy_output_token_cap)
+    desired_output_tokens = min(estimated_output_tokens, output_token_cap)
     policy_details = {
         "policy": OUTPUT_BUDGET_POLICY_NAME,
         "editable_region_count": region_summary["editable_region_count"],
@@ -466,8 +438,8 @@ def estimate_desired_output_tokens(
         "prompt_class": prompt_class,
         "budget_tier": budget_tier,
         "estimated_output_tokens": estimated_output_tokens,
-        "legacy_output_token_cap": legacy_output_token_cap,
-        "was_capped_by_legacy_output_token_cap": desired_output_tokens < estimated_output_tokens,
+        "output_token_cap": output_token_cap,
+        "was_capped_by_output_token_cap": desired_output_tokens < estimated_output_tokens,
     }
     return desired_output_tokens, policy_details
 
@@ -487,10 +459,10 @@ def build_prompt_generation_params(
     else:
         estimation_error_ratio = None
 
-    legacy_expected_output_patch_tokens = int(base_generation_params["expected_output_patch_tokens"])
+    output_token_cap = int(base_generation_params["expected_output_patch_tokens"])
     desired_max_tokens, output_budget_policy = estimate_desired_output_tokens(
         prompt_package=prompt_package,
-        legacy_output_token_cap=legacy_expected_output_patch_tokens,
+        output_token_cap=output_token_cap,
     )
     available_context_tokens = (
         int(base_generation_params["n_ctx"])
@@ -517,7 +489,7 @@ def build_prompt_generation_params(
         "desired_max_tokens": desired_max_tokens,
         "max_tokens": max_tokens,
         "expected_output_patch_tokens": base_generation_params["expected_output_patch_tokens"],
-        "legacy_expected_output_patch_tokens": legacy_expected_output_patch_tokens,
+        "output_token_cap": output_token_cap,
         "dynamic_output_budget_policy": output_budget_policy,
         "editable_region_count": output_budget_policy["editable_region_count"],
         "payload_editable_region_count": output_budget_policy["payload_editable_region_count"],
@@ -531,23 +503,23 @@ def build_prompt_generation_params(
     return prompt_generation_params, token_plan
 
 
-#This function extracts the text response from the llama-cpp-python chat completion response.
+#This function extracts the text response from the model chat completion response.
 def extract_response_text(response: dict[str, Any]) -> str:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise ValueError("llama-cpp-python response did not contain choices.")
+        raise ValueError("Model response did not contain choices.")
     first_choice = choices[0]
     if not isinstance(first_choice, dict):
-        raise ValueError("llama-cpp-python first choice is not an object.")
+        raise ValueError("Model response first choice is not an object.")
     message = first_choice.get("message")
     if isinstance(message, dict) and isinstance(message.get("content"), str):
         return message["content"]
     if isinstance(first_choice.get("text"), str):
         return first_choice["text"]
-    raise ValueError("llama-cpp-python response did not contain message content.")
+    raise ValueError("Model response did not contain message content.")
 
 
-#This function extracts generated text from one streamed llama-cpp-python chunk.
+#This function extracts generated text from one streamed model chunk.
 def extract_stream_chunk_text(chunk: dict[str, Any]) -> str:
     choices = chunk.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -569,20 +541,7 @@ def expected_packet_ids_from_traceability(prompt_package: dict[str, Any]) -> lis
     packet_ids = traceability.get("packet_ids")
     if isinstance(packet_ids, list):
         return [str(packet_id) for packet_id in packet_ids]
-
-    # Legacy fallback for prompt packages produced before input_traceability.packet_ids existed.
-    trace_records = traceability.get("records", [])
-    legacy_packet_ids = []
-    if not isinstance(trace_records, list):
-        return legacy_packet_ids
-
-    for trace_record in trace_records:
-        if not isinstance(trace_record, dict):
-            continue
-        identity = trace_record.get("immutable_identity", {})
-        if isinstance(identity, dict) and identity.get("packet_id") is not None:
-            legacy_packet_ids.append(str(identity["packet_id"]))
-    return legacy_packet_ids
+    return []
 
 
 #This function estimates packet-level output progress by counting expected packet ids already visible in generated text.
@@ -1092,7 +1051,7 @@ def build_run_metadata(
     runtime_seconds: float,
     output_paths: dict[str, str],
     validation_result: dict[str, Any] | None,
-    llama_response_metadata: dict[str, Any] | None,
+    generation_response_metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -1117,7 +1076,7 @@ def build_run_metadata(
         "runtime_seconds": runtime_seconds,
         "output_paths": output_paths,
         "validation_result": validation_result,
-        "llama_response_metadata": llama_response_metadata,
+        "generation_response_metadata": generation_response_metadata,
     }
 
 
@@ -1168,7 +1127,7 @@ def run_single_prompt(
     validation_result = None
     raw_text = ""
     parsed_output = None
-    llama_response_metadata = None
+    generation_response_metadata = None
     token_plan = None
     output_paths: dict[str, str] = {}
 
@@ -1177,32 +1136,32 @@ def run_single_prompt(
     editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
     editable_region_count = get_editable_region_count(prompt_package)
 
-    if editable_region_count == 0 and editable_packet_count > 0:
+    if editable_region_count == 0:
         parsed_output = {
             "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
             "parent_group_id": prompt_package.get("parent_group_id"),
             "prompt_unit_id": prompt_package.get("prompt_unit_id"),
             "patches": [],
         }
-        failure_reason = "editable_packet_ids_present_but_no_editable_regions"
+        failure_reason = "no_editable_regions_not_supported"
         validation_result = {"accepted": False, "reason": failure_reason, "patch_count": 0}
         token_plan = {
-            "mode": "invalid_traceability_no_editable_regions",
+            "mode": "invalid_no_editable_regions",
             "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
             "real_input_tokens": 0,
             "runtime_max_model_len": generation_params["runtime_max_model_len"],
             "desired_max_tokens": 0,
             "max_tokens": 0,
             "expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "legacy_expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
+            "output_token_cap": generation_params["expected_output_patch_tokens"],
             "dynamic_output_budget_policy": {
                 "policy": OUTPUT_BUDGET_POLICY_NAME,
                 "editable_region_count": editable_region_count,
                 "editable_packet_count": editable_packet_count,
-                "budget_tier": "invalid_traceability_no_editable_regions",
+                "budget_tier": "invalid_no_editable_regions",
                 "estimated_output_tokens": 0,
-                "legacy_output_token_cap": generation_params["expected_output_patch_tokens"],
-                "was_capped_by_legacy_output_token_cap": False,
+                "output_token_cap": generation_params["expected_output_patch_tokens"],
+                "was_capped_by_output_token_cap": False,
             },
             "editable_region_count": editable_region_count,
             "editable_packet_count": editable_packet_count,
@@ -1214,7 +1173,7 @@ def run_single_prompt(
         output_paths["parsed"] = str(parsed_path)
         output_paths["metadata"] = str(metadata_path)
         metadata = build_run_metadata(
-            status="invalid_traceability_no_editable_regions",
+            status="failed",
             failure_reason=failure_reason,
             prompt_package=prompt_package,
             prompt_path=prompt_path,
@@ -1227,52 +1186,7 @@ def run_single_prompt(
             output_paths=output_paths,
             validation_result=validation_result,
             token_plan=token_plan,
-            llama_response_metadata=None,
-        )
-        write_json(metadata_path, metadata)
-        return metadata
-
-    if editable_region_count == 0:
-        parsed_output = {
-            "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
-            "parent_group_id": prompt_package.get("parent_group_id"),
-            "prompt_unit_id": prompt_package.get("prompt_unit_id"),
-            "patches": [],
-        }
-        validation_result = {"accepted": True, "reason": "auto_empty_no_editable_regions", "patch_count": 0}
-        token_plan = {
-            "mode": "auto_empty_no_editable_regions",
-            "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
-            "real_input_tokens": 0,
-            "runtime_max_model_len": generation_params["runtime_max_model_len"],
-            "desired_max_tokens": 0,
-            "max_tokens": 0,
-            "expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "legacy_expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "editable_region_count": editable_region_count,
-            "editable_packet_count": editable_packet_count,
-            "context_reserve_tokens": generation_params["context_reserve_tokens"],
-            "available_context_tokens": generation_params["runtime_max_model_len"],
-            "was_capped_by_context": False,
-        }
-        write_json(parsed_path, parsed_output)
-        output_paths["parsed"] = str(parsed_path)
-        output_paths["metadata"] = str(metadata_path)
-        metadata = build_run_metadata(
-            status="auto_empty_no_editable_regions",
-            failure_reason=None,
-            prompt_package=prompt_package,
-            prompt_path=prompt_path,
-            model_path=model_path,
-            model_name=model_name,
-            generation_params=generation_params,
-            started_at_utc=started_at_utc,
-            finished_at_utc=started_at_utc,
-            runtime_seconds=0.0,
-            output_paths=output_paths,
-            validation_result=validation_result,
-            token_plan=token_plan,
-            llama_response_metadata=None,
+            generation_response_metadata=None,
         )
         write_json(metadata_path, metadata)
         return metadata
@@ -1323,7 +1237,7 @@ def run_single_prompt(
 
         write_text(raw_path, raw_text)
         output_paths["raw"] = str(raw_path)
-        llama_response_metadata = {
+        generation_response_metadata = {
             "stream": True,
             "stream_visible_packet_ids": progress_state["visible_packet_count"],
             "stream_expected_packet_ids": progress_state["total_packet_count"],
@@ -1393,7 +1307,7 @@ def run_single_prompt(
         output_paths=output_paths,
         validation_result=validation_result,
         token_plan=token_plan,
-        llama_response_metadata=llama_response_metadata,
+        generation_response_metadata=generation_response_metadata,
     )
     write_json(metadata_path, metadata)
     return metadata
@@ -1499,7 +1413,7 @@ def write_generated_prompt_outputs(
 
     finished_at_utc = datetime.now(timezone.utc).isoformat()
     output_paths["metadata"] = str(context["metadata_path"])
-    llama_response_metadata = {
+    generation_response_metadata = {
         "stream": False,
         "batch_index": batch_index,
         "batch_size": batch_size,
@@ -1522,7 +1436,7 @@ def write_generated_prompt_outputs(
         output_paths=output_paths,
         validation_result=validation_result,
         token_plan=token_plan,
-        llama_response_metadata=llama_response_metadata,
+        generation_response_metadata=generation_response_metadata,
     )
     write_json(context["metadata_path"], metadata)
     return metadata
@@ -1585,21 +1499,6 @@ def run_prompt_generation_batch(
     return metadata_rows
 
 
-#This function loads one GGUF model through llama-cpp-python.
-def load_llama_model(model_path: Path, generation_params: dict[str, Any]) -> Any:
-    from llama_cpp import Llama
-
-    llama_kwargs = {
-        "model_path": str(model_path),
-        "n_ctx": generation_params["n_ctx"],
-        "n_gpu_layers": generation_params["n_gpu_layers"],
-        "verbose": False,
-    }
-    if generation_params.get("n_threads") is not None:
-        llama_kwargs["n_threads"] = generation_params["n_threads"]
-    return Llama(**llama_kwargs)
-
-
 #This function runs all selected prompts for one selected model.
 def run_model_batch(
     *,
@@ -1615,11 +1514,11 @@ def run_model_batch(
     model_name = safe_model_name(model_path)
     output_dirs = prepare_model_output_dirs(output_root, model_name, run_id)
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Loading model: {model_name}")
-    llm = load_llama_model(model_path, generation_params)
+    llm = load_model(model_path, generation_params)
 
     accepted_count = 0
     failed_count = 0
-    invalid_traceability_count = 0
+    unsupported_no_editable_count = 0
     total_prompts = len(prompt_paths)
     model_start = time.perf_counter()
     pending_batch: list[dict[str, Any]] = []
@@ -1629,11 +1528,12 @@ def run_model_batch(
     def record_metadata(metadata: dict[str, Any]) -> None:
         nonlocal accepted_count
         nonlocal failed_count
-        nonlocal invalid_traceability_count
-        if metadata["status"] in {"accepted", "auto_empty_no_editable_regions"}:
+        nonlocal unsupported_no_editable_count
+        if metadata["status"] == "accepted":
             accepted_count += 1
-        elif metadata["status"] == "invalid_traceability_no_editable_regions":
-            invalid_traceability_count += 1
+        elif metadata.get("failure_reason") == "no_editable_regions_not_supported":
+            unsupported_no_editable_count += 1
+            failed_count += 1
         else:
             failed_count += 1
 
@@ -1662,7 +1562,7 @@ def run_model_batch(
             f"{model_name}: generation batch {generation_batch_index} finished "
             f"(items={len(metadata_rows)}, last_batch={time.perf_counter() - batch_started:.1f}s, "
             f"processed={prompt_index}/{total_prompts}, accepted={accepted_count}, "
-            f"failed={failed_count}, invalid_traceability={invalid_traceability_count})"
+            f"failed={failed_count}, unsupported_no_editable={unsupported_no_editable_count})"
         )
 
     for prompt_index, prompt_path in enumerate(prompt_paths, start=1):
@@ -1682,8 +1582,6 @@ def run_model_batch(
             record_metadata(metadata)
         else:
             prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
-            editable_packet_ids = prompt_package["input_traceability"].get("editable_packet_ids", [])
-            editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
             editable_region_count = get_editable_region_count(prompt_package)
             if editable_region_count == 0:
                 metadata = run_single_prompt(
@@ -1729,7 +1627,7 @@ def run_model_batch(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
                 f"{model_name}: {prompt_index}/{total_prompts} prompts processed "
                 f"(accepted={accepted_count}, failed={failed_count}, "
-                f"invalid_traceability={invalid_traceability_count}, "
+                f"unsupported_no_editable={unsupported_no_editable_count}, "
                 f"last={last_runtime:.1f}s, elapsed={elapsed:.1f}s)"
             )
 
@@ -1742,7 +1640,7 @@ def run_model_batch(
         "prompt_count": total_prompts,
         "accepted_count": accepted_count,
         "failed_count": failed_count,
-        "invalid_traceability_count": invalid_traceability_count,
+        "unsupported_no_editable_count": unsupported_no_editable_count,
         "llm_batch_size": llm_batch_size,
         "runtime_seconds": time.perf_counter() - model_start,
     }
@@ -1845,8 +1743,8 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--prompt-dir", help="Directory containing Step 16 prompt_unit.prompt.json files.")
     parser.add_argument("--output-root", help="Directory where Step 17 model outputs will be written.")
     parser.add_argument("--cloud-root", default=str(DEFAULT_CLOUD_ROOT), help="RISE cloud root for default paths.")
-    parser.add_argument("--model-dir", help="Directory containing GGUF model files.")
-    parser.add_argument("--model-path", action="append", help="Specific GGUF model path to run. Can be repeated.")
+    parser.add_argument("--model-dir", help="Directory containing vLLM-loadable local model directories.")
+    parser.add_argument("--model-path", action="append", help="Specific vLLM-loadable model path to run. Can be repeated.")
     parser.add_argument(
         "--model-filter",
         action="append",
@@ -1887,7 +1785,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--runtime-max-model-len",
         type=int,
-        help="Hard backend context cap used by llama.cpp n_ctx or vLLM max_model_len.",
+        help="Hard backend context cap used by vLLM max_model_len.",
     )
     parser.add_argument(
         "--expected-output-patch-tokens",
@@ -1909,8 +1807,6 @@ def parse_cli_args() -> argparse.Namespace:
         type=float,
         help="Override llm.chars_per_token_estimate for dynamic n_ctx preflight before model loading.",
     )
-    parser.add_argument("--n-gpu-layers", type=int, default=-1, help="llama-cpp-python GPU layer count.")
-    parser.add_argument("--n-threads", type=int, help="CPU thread count passed to llama-cpp-python.")
     parser.add_argument("--llm-batch-size", type=int, default=1, help="Maximum number of real LLM prompt units per generation batch.")
     return parser.parse_args()
 
