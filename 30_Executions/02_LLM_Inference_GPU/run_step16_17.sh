@@ -48,8 +48,6 @@ HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-30}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-${RUNTIME_MAX_MODEL_LEN}}"
-VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
-VLLM_KV_CACHE_FP8="${VLLM_KV_CACHE_FP8:-0}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
 SKIP_STEP16="${SKIP_STEP16:-0}"
@@ -209,16 +207,13 @@ fi
 
 require_file "${CONFIG_PATH}"
 require_file "${STEP16_DIR}/build_prompts.py"
-require_file "${STEP17_DIR}/run_llm_batch.py"
-if [[ "${STEP17_BACKEND}" == "vllm" ]]; then
-  STEP17_RUNNER="${STEP17_DIR}/run_llm_batch_vllm.py"
-  require_file "${STEP17_RUNNER}"
-elif [[ "${STEP17_BACKEND}" == "llama-cpp" ]]; then
-  STEP17_RUNNER="${STEP17_DIR}/run_llm_batch.py"
-else
-  echo "Unsupported STEP17_BACKEND=${STEP17_BACKEND}. Use vllm or llama-cpp."
+if [[ "${STEP17_BACKEND}" != "vllm" ]]; then
+  echo "Unsupported STEP17_BACKEND=${STEP17_BACKEND}. Step 17 now supports vllm only."
   exit 1
 fi
+require_file "${STEP17_DIR}/run_llm_batch.py"
+STEP17_RUNNER="${STEP17_DIR}/run_llm_batch_vllm.py"
+require_file "${STEP17_RUNNER}"
 require_file "${STEP17_DIR}/summarize_llm_runtime.py"
 if [[ "${SKIP_STEP16}" != "1" && "${COMPRESS_STEP16}" == "1" ]]; then
   require_file "${STEP16_COMPRESSION_SCRIPT}"
@@ -230,8 +225,7 @@ require_dir "${GROUP_DIR}"
 require_dir "${MODEL_DIR}"
 
 if [[ "${SKIP_STEP17}" != "1" ]]; then
-  if [[ "${STEP17_BACKEND}" == "vllm" ]]; then
-    python3 - <<'PY'
+  python3 - <<'PY'
 import torch
 from vllm import LLM
 
@@ -239,16 +233,6 @@ if not torch.cuda.is_available():
     raise SystemExit("PyTorch cannot access CUDA.")
 print(f"vLLM runtime import check: OK; GPU={torch.cuda.get_device_name(0)}")
 PY
-  else
-    python3 - <<'PY'
-import importlib.util
-import sys
-
-if importlib.util.find_spec("llama_cpp") is None:
-    sys.exit("Required Python package not found: llama_cpp")
-print("llama_cpp import check: OK")
-PY
-  fi
 fi
 
 if [[ "${ALLOW_EXISTING_RUN}" != "1" ]]; then
@@ -364,12 +348,6 @@ if [[ "${SKIP_STEP17}" != "1" ]]; then
     step17_args+=(--vllm-dtype "${VLLM_DTYPE}")
     step17_args+=(--vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}")
     step17_args+=(--vllm-max-model-len "${VLLM_MAX_MODEL_LEN}")
-    if [[ "${VLLM_KV_CACHE_FP8}" == "1" ]]; then
-      step17_args+=(--kv-cache-dtype fp8)
-    fi
-    if [[ -n "${VLLM_QUANTIZATION}" ]]; then
-      step17_args+=(--vllm-quantization "${VLLM_QUANTIZATION}")
-    fi
     if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
       step17_args+=(--trust-remote-code)
     fi
