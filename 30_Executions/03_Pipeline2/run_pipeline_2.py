@@ -48,6 +48,78 @@ def check_exists(path: Path, description: str) -> None:
         raise SystemExit(f"Missing {description}: {path}")
 
 
+def has_prompt_packages(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if (path / "prompt_manifest.json").is_file():
+        return True
+    return any(path.glob("*.prompt.json")) or any(path.rglob("*.prompt.json"))
+
+
+def has_step17_outputs(path: Path) -> bool:
+    if not path.exists():
+        return False
+    expected_dirs = ["metadata", "parsed", "raw", "failures"]
+    expected_files = ["runtime_summary.json", "runtime_summary.md", "runtime_summary.csv"]
+    return any((path / name).exists() for name in expected_dirs + expected_files)
+
+
+def first_matching_path(candidates: list[Path], description: str, predicate) -> Path:
+    for candidate in candidates:
+        if predicate(candidate):
+            return candidate
+    formatted = "\n".join(f"  - {candidate}" for candidate in candidates)
+    raise SystemExit(f"Missing {description}. Tried:\n{formatted}")
+
+
+def resolve_step16_prompt_root(
+    *,
+    experiment_root: Path,
+    grouping_policy: str,
+    step16_run_id: str,
+) -> Path:
+    """Resolve Step 16 prompts across canonical and RISE tarball layouts."""
+
+    base = experiment_root / "06_prompts"
+    candidates = [
+        # Canonical local/orchestrator layout.
+        base / grouping_policy / step16_run_id,
+        base / grouping_policy,
+        # RISE tarball extracted under experiment/06_prompts/<run_id>/.
+        base / step16_run_id / "06_prompts" / grouping_policy / step16_run_id,
+        base / step16_run_id / "06_prompts" / grouping_policy,
+        base / step16_run_id / "06_prompts",
+        base / step16_run_id,
+        # Broad fallback. Step 18 can search recursively by prompt filename.
+        base,
+    ]
+    return first_matching_path(candidates, "Step 16 prompt root", has_prompt_packages)
+
+
+def resolve_step17_model_root(
+    *,
+    experiment_root: Path,
+    grouping_policy: str,
+    model: str,
+    step17_run_id: str,
+) -> Path:
+    """Resolve Step 17 model output root across canonical and RISE tarball layouts."""
+
+    base = experiment_root / "07_llm_outputs"
+    candidates = [
+        # Canonical local/orchestrator layouts observed during earlier runs.
+        base / grouping_policy / model / step17_run_id,
+        base / grouping_policy / model,
+        # RISE tarball extracted under experiment/07_llm_outputs/<run_id>/.
+        base / step17_run_id / "07_llm_outputs" / grouping_policy / model / step17_run_id,
+        base / step17_run_id / "07_llm_outputs" / grouping_policy / model,
+        base / step17_run_id / "07_llm_outputs" / grouping_policy,
+        base / step17_run_id / "07_llm_outputs" / model,
+        base / step17_run_id,
+    ]
+    return first_matching_path(candidates, "Step 17 model output root", has_step17_outputs)
+
+
 def load_pipeline_config() -> dict:
     sys.path.insert(0, str(PIPELINE_ROOT))
     from common.config import load_json_config
@@ -122,13 +194,16 @@ def main() -> None:
     model = llm["model_name"]
 
     reference_json = experiment_root / "04_packet_json" / "selected_packet_records.json"
-    prompt_root = experiment_root / "06_prompts"
-    step17_run_root = (
-        experiment_root
-        / "07_llm_outputs"
-        / grouping_policy
-        / model
-        / STEP17_RUN_ID
+    prompt_root = resolve_step16_prompt_root(
+        experiment_root=experiment_root,
+        grouping_policy=grouping_policy,
+        step16_run_id=STEP16_RUN_ID,
+    )
+    step17_run_root = resolve_step17_model_root(
+        experiment_root=experiment_root,
+        grouping_policy=grouping_policy,
+        model=model,
+        step17_run_id=STEP17_RUN_ID,
     )
     merged_traffic = (
         experiment_root
@@ -151,6 +226,7 @@ def main() -> None:
     print(f"Experiment config label: {experiment_config_label}")
     print(f"Grouping output label: {grouping_policy}")
     print(f"Model: {model}")
+    print(f"Step 16 prompt root: {prompt_root}")
     print(f"Step 17 run root: {step17_run_root}")
     print(f"Steps: {START_STEP}-{END_STEP}")
     print(f"Dry run: {DRY_RUN}")
