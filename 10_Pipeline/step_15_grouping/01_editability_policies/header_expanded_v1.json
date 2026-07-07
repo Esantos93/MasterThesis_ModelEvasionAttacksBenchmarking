@@ -19,21 +19,25 @@
     "rfc_791_ipv4": {
       "type": "normative_protocol_standards",
       "title": "RFC 791 - Internet Protocol",
+      "public_url": "https://www.rfc-editor.org/rfc/rfc791",
       "relevance": "Defines IPv4 header fields, TTL, identification, fragmentation, protocol, addresses, total length and header checksum."
     },
     "rfc_6864_ipv4_id": {
       "type": "normative_protocol_standards",
       "title": "RFC 6864 - Updated Specification of the IPv4 ID Field",
+      "public_url": "https://www.rfc-editor.org/rfc/rfc6864",
       "relevance": "Clarifies IPv4 Identification semantics, especially for non-fragmented datagrams."
     },
     "rfc_793_tcp": {
       "type": "normative_protocol_standards",
       "title": "RFC 793 - Transmission Control Protocol",
+      "public_url": "https://www.rfc-editor.org/rfc/rfc793",
       "relevance": "Defines TCP ports, sequence and acknowledgement numbers, flags, window, checksum and urgent pointer."
     },
     "rfc_9293_tcp": {
       "type": "normative_protocol_standards",
       "title": "RFC 9293 - Transmission Control Protocol",
+      "public_url": "https://www.rfc-editor.org/rfc/rfc9293",
       "relevance": "Current TCP functional specification used to justify conservative treatment of TCP state fields."
     },
     "snort_3_pipeline": {
