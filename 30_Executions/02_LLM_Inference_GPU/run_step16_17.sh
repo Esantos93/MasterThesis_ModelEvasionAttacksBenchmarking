@@ -42,13 +42,14 @@ LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-}"
 if [[ -z "${RUNTIME_MAX_MODEL_LEN+x}" ]]; then
   RUNTIME_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-12288}"
 fi
-EXPECTED_OUTPUT_PATCH_TOKENS="${EXPECTED_OUTPUT_PATCH_TOKENS:-1536}"
+EXPECTED_OUTPUT_PATCH_TOKENS="${EXPECTED_OUTPUT_PATCH_TOKENS:-}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-30}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-${RUNTIME_MAX_MODEL_LEN}}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
+DISABLE_THINKING="${DISABLE_THINKING:-0}"
 
 SKIP_STEP16="${SKIP_STEP16:-0}"
 SKIP_STEP17="${SKIP_STEP17:-0}"
@@ -266,6 +267,8 @@ echo "Step 17 runner: ${STEP17_RUNNER:-<skipped>}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Runtime max model len: ${RUNTIME_MAX_MODEL_LEN}"
 echo "vLLM max model len: ${VLLM_MAX_MODEL_LEN}"
+echo "Expected output patch tokens override: ${EXPECTED_OUTPUT_PATCH_TOKENS:-<config>}"
+echo "Disable thinking: ${DISABLE_THINKING}"
 echo "Limit Step 16: ${LIMIT_PROMPTS_S16:-<none>}"
 echo "Limit Step 17: ${LIMIT_PROMPTS_S17:-<none>}"
 echo "Compress Step 16: ${COMPRESS_STEP16}"
@@ -342,14 +345,19 @@ if [[ "${SKIP_STEP17}" != "1" ]]; then
     --output-root "${STEP17_OUTPUT_ROOT}"
     --run-id "${RUN_ID}"
     --runtime-max-model-len "${RUNTIME_MAX_MODEL_LEN}"
-    --expected-output-patch-tokens "${EXPECTED_OUTPUT_PATCH_TOKENS}"
   )
+  if [[ -n "${EXPECTED_OUTPUT_PATCH_TOKENS}" ]]; then
+    step17_args+=(--expected-output-patch-tokens "${EXPECTED_OUTPUT_PATCH_TOKENS}")
+  fi
   if [[ "${STEP17_BACKEND}" == "vllm" ]]; then
     step17_args+=(--vllm-dtype "${VLLM_DTYPE}")
     step17_args+=(--vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}")
     step17_args+=(--vllm-max-model-len "${VLLM_MAX_MODEL_LEN}")
     if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
       step17_args+=(--trust-remote-code)
+    fi
+    if [[ "${DISABLE_THINKING}" == "1" ]]; then
+      step17_args+=(--disable-thinking)
     fi
   fi
   if [[ -n "${LIMIT_PROMPTS_S17}" ]]; then

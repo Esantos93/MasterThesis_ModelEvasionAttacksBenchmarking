@@ -49,6 +49,8 @@ MODEL_DIR
 MODEL_PATH
 HF_MODEL_ID
 BATCH_SIZE
+EXPECTED_OUTPUT_PATCH_TOKENS
+DISABLE_THINKING
 LIMIT_PROMPTS_S16
 LIMIT_PROMPTS_S17
 SKIP_STEP16
@@ -58,6 +60,13 @@ COMPRESS_STEP17
 STEP16_ARCHIVE
 STEP17_ARCHIVE
 ```
+
+`EXPECTED_OUTPUT_PATCH_TOKENS` is an explicit Step 17 override. Leave it unset
+to use `llm.expected_output_patch_tokens` from the selected config file.
+
+`DISABLE_THINKING=1` forwards `--disable-thinking` to the vLLM Step 17 runner.
+Use it for models such as Qwen3 when the experiment requires non-thinking mode
+and compact JSON outputs.
 
 Wide Step 17 batch calibration on one fixed 1,500-prompt sample:
 
