@@ -240,7 +240,8 @@ def build_metrics(
         )
 
     signature_mutation_weight = signature_mutation_weight_from_config(config)
-    weighted_success = successful_evasion_count + (signature_mutation_weight * alert_mutation_count)
+    partial_credit_candidate_count = alert_mutation_count + tcp_conversation_displaced_detection_count
+    weighted_success = successful_evasion_count + (signature_mutation_weight * partial_credit_candidate_count)
     signature_breakdowns = summarize_signature_rows(signature_summary)
     return {
         "pre_alert_count": pre_alert_count,
@@ -253,6 +254,7 @@ def build_metrics(
         "post_only_unmatched_count": post_only_unmatched_count,
         "same_signature_match_count": same_signature_match_count,
         "different_signature_replacements": different_signature_replacements,
+        "partial_credit_candidate_count": partial_credit_candidate_count,
         "signature_mutation_weight": signature_mutation_weight,
         "weighted_successful_evasion_count": weighted_success,
         "signature_evasion_rate": safe_rate(weighted_success, pre_alert_count),
@@ -285,6 +287,7 @@ def write_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "post_only_unmatched_count",
         "same_signature_match_count",
         "different_signature_replacements",
+        "partial_credit_candidate_count",
         "signature_mutation_weight",
         "weighted_successful_evasion_count",
         "signature_evasion_rate",
@@ -442,7 +445,9 @@ def compute_metrics(
         "source_alert_comparison": str(alert_comparison_path),
         "source_signature_summary": str(signature_summary_path),
         "metric_policy": {
-            "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * alert_mutation_count) / pre_alert_count",
+            "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * (alert_mutation_count + tcp_conversation_displaced_detection_count)) / pre_alert_count",
+            "current_policy": "With signature_mutation_weight = 0, only successful_evasion_count contributes to SER.",
+            "partial_credit_candidate_policy": "If partial credit is enabled later, Alert Mutation and TCP-Conversation Displaced Detection are the weighted candidate categories.",
             "signature_mutation_weight_source": "pipeline.signature_mutation_weight",
             "zero_pre_alert_policy": "fail clearly because SER is undefined without PRE detections.",
             "tcp_conversation_displaced_detection_policy": "reported separately and not counted as evasion.",

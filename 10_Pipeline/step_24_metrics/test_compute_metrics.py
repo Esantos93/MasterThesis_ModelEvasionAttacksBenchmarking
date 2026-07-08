@@ -144,6 +144,23 @@ class Step24MetricsTests(unittest.TestCase):
             result = compute_metrics(config_path=config)
             self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.2)
 
+    def test_partial_credit_weight_includes_mutation_and_displaced_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_fixture(
+                root,
+                pre_count=10,
+                post_count=10,
+                failed=4,
+                successful=1,
+                mutation=2,
+                displaced=3,
+                weight=0.5,
+            )
+            result = compute_metrics(config_path=config)
+            self.assertEqual(result["metrics"]["partial_credit_candidate_count"], 5)
+            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.35)
+
     def test_induced_alert_reported_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
