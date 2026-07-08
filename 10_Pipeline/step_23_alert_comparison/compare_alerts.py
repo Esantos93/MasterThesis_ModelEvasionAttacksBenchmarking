@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import traceback
-from collections import Counter, defaultdict, deque
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,9 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
-COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v1"
+COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v4"
+DEFAULT_MATCHING_POLICY = "packet_tcp_conversation"
+SUPPORTED_MATCHING_POLICIES = {"packet", "packet_tcp_conversation"}
 
 
 # This function reads a JSON file and returns the parsed Python value.
@@ -143,6 +145,11 @@ def alert_ref(alert: dict[str, Any] | None) -> dict[str, Any] | None:
         "action": alert.get("action"),
         "proto": alert.get("proto"),
         "pkt_num": alert.get("pkt_num"),
+        "packet_id": alert.get("packet_id"),
+        "original_packet_number": alert.get("original_packet_number"),
+        "reduced_packet_index": alert.get("reduced_packet_index"),
+        "tcp_connection_id": alert.get("tcp_connection_id"),
+        "tcp_stream_id": alert.get("tcp_stream_id"),
         "timestamp": alert.get("timestamp"),
         "src_addr": alert.get("src_addr"),
         "src_port": alert.get("src_port"),
@@ -151,99 +158,277 @@ def alert_ref(alert: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-# This function compares PRE and POST alerts as multisets of Snort signatures.
-# Exact same-signature POST alerts are consumed first and classified as Failed Evasion.
-# Disappeared PRE alerts can then consume remaining different POST alerts as Alert Mutation.
-# If no replacement POST alert remains, the PRE alert is classified as Successful Evasion.
-def compare_alert_multisets(pre_alerts: list[dict[str, Any]], post_alerts: list[dict[str, Any]]) -> dict[str, Any]:
-    post_by_signature: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
-    for alert in post_alerts:
-        post_by_signature[alert["signature_key"]].append(alert)
+def comparable_unit_key(alert: dict[str, Any], traffic_side: str, matching_policy: str) -> str:
+    if matching_policy in {"packet", "packet_tcp_conversation"}:
+        packet_id = alert.get("packet_id")
+        if isinstance(packet_id, str) and packet_id.strip():
+            return f"packet_id:{packet_id}"
+        pkt_num = alert.get("pkt_num")
+        if isinstance(pkt_num, int):
+            return f"pkt_num:{pkt_num}"
+        alert_id = alert.get("normalized_alert_id") or "unknown-alert"
+        return f"{traffic_side}:missing-pkt-num:{alert_id}"
+    raise ValueError(f"Unsupported matching policy: {matching_policy}")
+
+
+def comparable_unit_type(matching_policy: str) -> str:
+    if matching_policy in {"packet", "packet_tcp_conversation"}:
+        return "packet"
+    raise ValueError(f"Unsupported matching policy: {matching_policy}")
+
+
+def comparable_unit_field(matching_policy: str) -> str:
+    if matching_policy == "packet":
+        return "packet_id_or_pkt_num"
+    if matching_policy == "packet_tcp_conversation":
+        return "packet_id_or_pkt_num + tcp_connection_id"
+    raise ValueError(f"Unsupported matching policy: {matching_policy}")
+
+
+def packet_anchor(alert: dict[str, Any]) -> str | None:
+    packet_id = alert.get("packet_id")
+    if isinstance(packet_id, str) and packet_id.strip():
+        return packet_id
+    pkt_num = alert.get("pkt_num")
+    if isinstance(pkt_num, int):
+        return f"pkt_num:{pkt_num}"
+    return None
+
+
+def tcp_conversation_anchor(alert: dict[str, Any]) -> str | None:
+    connection_id = alert.get("tcp_connection_id")
+    if isinstance(connection_id, str) and connection_id.strip():
+        return connection_id
+    return None
+
+
+def alert_sort_key(alert: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        packet_anchor(alert) or "",
+        tcp_conversation_anchor(alert) or "",
+        str(alert.get("signature_key") or ""),
+        int(alert.get("alert_index") or 0),
+        str(alert.get("normalized_alert_id") or ""),
+    )
+
+
+def conversation_compatible(pre_alert: dict[str, Any], post_alert: dict[str, Any], matching_policy: str) -> bool:
+    if matching_policy == "packet":
+        return True
+    pre_connection = tcp_conversation_anchor(pre_alert)
+    post_connection = tcp_conversation_anchor(post_alert)
+    if pre_connection is None or post_connection is None:
+        return True
+    return pre_connection == post_connection
+
+
+def same_packet(pre_alert: dict[str, Any], post_alert: dict[str, Any], matching_policy: str) -> bool:
+    return packet_anchor(pre_alert) == packet_anchor(post_alert) and conversation_compatible(pre_alert, post_alert, matching_policy)
+
+
+def same_tcp_conversation(pre_alert: dict[str, Any], post_alert: dict[str, Any]) -> bool:
+    pre_connection = tcp_conversation_anchor(pre_alert)
+    post_connection = tcp_conversation_anchor(post_alert)
+    return pre_connection is not None and pre_connection == post_connection
+
+
+def pop_first_matching(
+    candidates: list[dict[str, Any]],
+    predicate: Any,
+) -> dict[str, Any] | None:
+    for index, candidate in enumerate(candidates):
+        if predicate(candidate):
+            return candidates.pop(index)
+    return None
+
+
+def make_comparison_record(
+    *,
+    comparison_index: int,
+    classification: str,
+    match_type: str,
+    matching_phase: int,
+    matching_policy: str,
+    pre_alert: dict[str, Any],
+    post_alert: dict[str, Any] | None,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "comparison_id": f"cmp-{comparison_index:06d}",
+        "classification": classification,
+        "match_type": match_type,
+        "matching_phase": matching_phase,
+        "matching_policy": matching_policy,
+        "comparable_unit_key": comparable_unit_key(pre_alert, "pre", matching_policy),
+        "comparable_unit_type": comparable_unit_type(matching_policy),
+        "packet_anchor": packet_anchor(pre_alert),
+        "tcp_conversation_anchor": tcp_conversation_anchor(pre_alert),
+        "pre_alert": alert_ref(pre_alert),
+        "post_alert": alert_ref(post_alert),
+        "reason": reason,
+    }
+
+
+# This function compares PRE and POST through the packet -> alert -> signature/rule chain.
+# The primary unit is packet identity, with tcp_connection_id used to catch displaced detections.
+def compare_alerts_by_comparable_unit(
+    pre_alerts: list[dict[str, Any]],
+    post_alerts: list[dict[str, Any]],
+    matching_policy: str,
+) -> dict[str, Any]:
+    if matching_policy not in SUPPORTED_MATCHING_POLICIES:
+        raise ValueError(f"Unsupported matching policy: {matching_policy}")
 
     comparison_records = []
-    same_signature_matches = 0
-    for pre_alert in pre_alerts:
-        key = pre_alert["signature_key"]
-        matching_post = post_by_signature[key].popleft() if post_by_signature[key] else None
-        if matching_post is not None:
-            same_signature_matches += 1
-            comparison_records.append(
-                {
-                    "comparison_id": f"cmp-{len(comparison_records) + 1:06d}",
-                    "classification": "Failed Evasion",
-                    "match_type": "same_signature",
-                    "pre_alert": alert_ref(pre_alert),
-                    "post_alert": alert_ref(matching_post),
-                    "reason": "The original PRE Snort signature is still present in POST alerts.",
-                }
-            )
-        else:
-            comparison_records.append(
-                {
-                    "comparison_id": f"cmp-{len(comparison_records) + 1:06d}",
-                    "classification": "pending_disappeared_pre",
-                    "match_type": "none_yet",
-                    "pre_alert": alert_ref(pre_alert),
-                    "post_alert": None,
-                    "reason": "No same-signature POST alert was available for this PRE alert.",
-                }
-            )
+    induced_alerts = []
+    remaining_pre = sorted(pre_alerts, key=alert_sort_key)
+    remaining_post = sorted(post_alerts, key=alert_sort_key)
 
-    remaining_post_alerts = []
-    for key in sorted(post_by_signature):
-        remaining_post_alerts.extend(post_by_signature[key])
-    remaining_post_queue = deque(remaining_post_alerts)
+    def append_record(classification: str, match_type: str, phase: int, pre_alert: dict[str, Any], post_alert: dict[str, Any] | None, reason: str) -> None:
+        comparison_records.append(
+            make_comparison_record(
+                comparison_index=len(comparison_records) + 1,
+                classification=classification,
+                match_type=match_type,
+                matching_phase=phase,
+                matching_policy=matching_policy,
+                pre_alert=pre_alert,
+                post_alert=post_alert,
+                reason=reason,
+            )
+        )
 
-    mutation_matches = 0
-    successful_evasions = 0
-    for record in comparison_records:
-        if record["classification"] != "pending_disappeared_pre":
+    next_remaining_pre = []
+    for pre_alert in remaining_pre:
+        matching_post = pop_first_matching(
+            remaining_post,
+            lambda post_alert, pre_alert=pre_alert: (
+                same_packet(pre_alert, post_alert, matching_policy)
+                and post_alert["signature_key"] == pre_alert["signature_key"]
+            ),
+        )
+        if matching_post is None:
+            next_remaining_pre.append(pre_alert)
             continue
-        replacement_post = remaining_post_queue.popleft() if remaining_post_queue else None
-        if replacement_post is not None:
-            mutation_matches += 1
-            record["classification"] = "Alert Mutation"
-            record["match_type"] = "different_signature_replacement"
-            record["post_alert"] = alert_ref(replacement_post)
-            record["reason"] = "The original PRE signature disappeared and a different POST alert remained available."
-        else:
-            successful_evasions += 1
-            record["classification"] = "Successful Evasion"
-            record["match_type"] = "no_replacement_alert"
-            record["reason"] = "The original PRE signature disappeared and no POST replacement alert remained available."
+        append_record(
+            "Failed Evasion",
+            "same_packet_same_tcp_conversation_same_signature",
+            1,
+            pre_alert,
+            matching_post,
+            "The same packet anchor still generated the same Snort signature in POST.",
+        )
+    remaining_pre = next_remaining_pre
 
-    post_only_records = []
-    for post_alert in remaining_post_queue:
-        post_only_records.append(
+    next_remaining_pre = []
+    for pre_alert in remaining_pre:
+        matching_post = pop_first_matching(
+            remaining_post,
+            lambda post_alert, pre_alert=pre_alert: (
+                same_packet(pre_alert, post_alert, matching_policy)
+                and post_alert["signature_key"] != pre_alert["signature_key"]
+            ),
+        )
+        if matching_post is None:
+            next_remaining_pre.append(pre_alert)
+            continue
+        append_record(
+            "Alert Mutation",
+            "same_packet_same_tcp_conversation_different_signature",
+            2,
+            pre_alert,
+            matching_post,
+            "The same packet anchor no longer generated the PRE signature, but it generated a different POST alert.",
+        )
+    remaining_pre = next_remaining_pre
+
+    next_remaining_pre = []
+    for pre_alert in remaining_pre:
+        matching_post = pop_first_matching(
+            remaining_post,
+            lambda post_alert, pre_alert=pre_alert: (
+                same_tcp_conversation(pre_alert, post_alert)
+                and packet_anchor(pre_alert) != packet_anchor(post_alert)
+                and post_alert["signature_key"] == pre_alert["signature_key"]
+            ),
+        )
+        if matching_post is None:
+            next_remaining_pre.append(pre_alert)
+            continue
+        append_record(
+            "TCP-Conversation Displaced Detection",
+            "same_tcp_conversation_same_signature_different_packet",
+            3,
+            pre_alert,
+            matching_post,
+            "The same signature remained inside the same TCP conversation, but the alert emission anchor moved to a different packet.",
+        )
+    remaining_pre = next_remaining_pre
+
+    for pre_alert in remaining_pre:
+        append_record(
+            "Successful Evasion",
+            "no_unconsumed_post_alert_in_packet_or_tcp_conversation",
+            4,
+            pre_alert,
+            None,
+            "No unconsumed POST alert matched the same packet, and the same signature did not remain in the same TCP conversation.",
+        )
+
+    for post_alert in remaining_post:
+        induced_alerts.append(
             {
+                "matching_policy": matching_policy,
+                "matching_phase": 5,
+                "comparable_unit_key": comparable_unit_key(post_alert, "post", matching_policy),
+                "comparable_unit_type": comparable_unit_type(matching_policy),
+                "packet_anchor": packet_anchor(post_alert),
+                "tcp_conversation_anchor": tcp_conversation_anchor(post_alert),
                 "post_alert": alert_ref(post_alert),
-                "status": "post_only_unmatched",
-                "reason": "This POST alert was not needed to explain a disappeared PRE alert; no standalone Induced Alert category is used.",
+                "classification": "Induced Alert",
+                "status": "induced_alert",
+                "reason": "This POST alert was not consumed by any stronger PRE/POST match.",
             }
         )
 
     classification_counts = Counter(record["classification"] for record in comparison_records)
+    if induced_alerts:
+        classification_counts["Induced Alert"] = len(induced_alerts)
     pre_signature_counts = Counter(alert["signature_key"] for alert in pre_alerts)
     post_signature_counts = Counter(alert["signature_key"] for alert in post_alerts)
     pre_detector_source_counts = Counter(str(alert.get("detector_source")) for alert in pre_alerts)
     post_detector_source_counts = Counter(str(alert.get("detector_source")) for alert in post_alerts)
+    pre_unit_keys = {comparable_unit_key(alert, "pre", matching_policy) for alert in pre_alerts}
+    post_unit_keys = {comparable_unit_key(alert, "post", matching_policy) for alert in post_alerts}
+    tcp_displaced_count = sum(record["classification"] == "TCP-Conversation Displaced Detection" for record in comparison_records)
+    alert_mutation_count = sum(record["classification"] == "Alert Mutation" for record in comparison_records)
+    failed_evasion_count = sum(record["classification"] == "Failed Evasion" for record in comparison_records)
+    successful_evasion_count = sum(record["classification"] == "Successful Evasion" for record in comparison_records)
     return {
         "records": comparison_records,
-        "post_only_unmatched_alerts": post_only_records,
+        "induced_alerts": induced_alerts,
         "summary": {
+            "matching_policy": matching_policy,
+            "comparable_unit_type": comparable_unit_type(matching_policy),
+            "comparable_unit_field": comparable_unit_field(matching_policy),
             "pre_alert_count": len(pre_alerts),
             "post_alert_count": len(post_alerts),
             "pre_unique_signature_count": len(pre_signature_counts),
             "post_unique_signature_count": len(post_signature_counts),
+            "pre_comparable_unit_count": len(pre_unit_keys),
+            "post_comparable_unit_count": len(post_unit_keys),
+            "compared_comparable_unit_count": len(set(pre_unit_keys) | set(post_unit_keys)),
             "pre_detector_source_counts": dict(sorted(pre_detector_source_counts.items())),
             "post_detector_source_counts": dict(sorted(post_detector_source_counts.items())),
-            "same_signature_matches": same_signature_matches,
-            "different_signature_replacements": mutation_matches,
-            "post_only_unmatched_count": len(post_only_records),
+            "same_signature_matches": failed_evasion_count,
+            "different_signature_replacements": alert_mutation_count,
+            "tcp_conversation_displaced_detection_count": tcp_displaced_count,
+            "induced_alert_count": len(induced_alerts),
+            "post_only_unmatched_count": len(induced_alerts),
             "classification_counts": dict(sorted(classification_counts.items())),
-            "successful_evasion_count": successful_evasions,
-            "alert_mutation_count": mutation_matches,
-            "failed_evasion_count": same_signature_matches,
+            "successful_evasion_count": successful_evasion_count,
+            "alert_mutation_count": alert_mutation_count,
+            "failed_evasion_count": failed_evasion_count,
         },
     }
 
@@ -292,6 +477,7 @@ def compare_normalized_alerts(
     pre_normalized: str | Path | None,
     post_normalized: str | Path | None,
     output_dir: str | Path | None,
+    matching_policy: str,
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
@@ -315,7 +501,7 @@ def compare_normalized_alerts(
         artifact_path=post_path,
         expected_detector_policy_label=detector_policy_label,
     )
-    comparison = compare_alert_multisets(pre_alerts, post_alerts)
+    comparison = compare_alerts_by_comparable_unit(pre_alerts, post_alerts, matching_policy)
     per_signature_summary = summarize_by_signature(pre_alerts, post_alerts)
     comparison_dir.mkdir(parents=True, exist_ok=True)
 
@@ -333,10 +519,28 @@ def compare_normalized_alerts(
         "source_pre_normalized_alerts": str(pre_path),
         "source_post_normalized_alerts": str(post_path),
         "comparison_policy": {
-            "matching_basis": "Snort signature multiset using normalized signature_key gid:sid:rev.",
+            "matching_basis": "Packet -> alert -> signature/rule, with tcp_connection_id used for TCP-conversation displaced detections.",
+            "causal_chain": "packet_id/pkt_num -> normalized alert -> signature_key (gid:sid:rev)",
+            "tcp_conversation_anchor": "tcp_connection_id",
+            "matching_policy": matching_policy,
+            "comparable_unit_type": comparable_unit_type(matching_policy),
+            "comparable_unit_field": comparable_unit_field(matching_policy),
             "detection_evidence": "Any normalized alert record counts as detection evidence, regardless of action value.",
-            "classification_labels": ["Successful Evasion", "Alert Mutation", "Failed Evasion"],
-            "new_post_alert_policy": "No standalone Induced Alert category. Unmatched POST-only alerts are reported as post_only_unmatched.",
+            "classification_labels": [
+                "Failed Evasion",
+                "Alert Mutation",
+                "TCP-Conversation Displaced Detection",
+                "Successful Evasion",
+                "Induced Alert",
+            ],
+            "phase_order": [
+                "Phase 1: same packet + same TCP conversation + same signature -> Failed Evasion",
+                "Phase 2: same packet + same TCP conversation + different signature -> Alert Mutation",
+                "Phase 3: same tcp_connection_id + same signature + different packet -> TCP-Conversation Displaced Detection",
+                "Phase 4: unconsumed PRE alerts -> Successful Evasion",
+                "Phase 5: unconsumed POST alerts -> Induced Alert",
+            ],
+            "new_post_alert_policy": "Unconsumed POST alerts after phased matching are reported as Induced Alert.",
             "invalid_or_llm_output_failure_policy": "Invalid Traffic and LLM Output Failure come from previous pipeline stages, not from Snort comparison alone.",
         },
         "pre_normalization_metadata": pre_artifact.get("metadata", {}),
@@ -352,7 +556,8 @@ def compare_normalized_alerts(
         "metadata": metadata,
         "summary": comparison["summary"],
         "comparison_records": comparison["records"],
-        "post_only_unmatched_alerts": comparison["post_only_unmatched_alerts"],
+        "induced_alerts": comparison["induced_alerts"],
+        "post_only_unmatched_alerts": comparison["induced_alerts"],
     }
     signature_artifact = {
         "metadata": metadata,
@@ -371,6 +576,12 @@ def compare_normalized_alerts(
         "post_alert_count": comparison["summary"]["post_alert_count"],
         "pre_unique_signature_count": comparison["summary"]["pre_unique_signature_count"],
         "post_unique_signature_count": comparison["summary"]["post_unique_signature_count"],
+        "matching_policy": comparison["summary"]["matching_policy"],
+        "comparable_unit_type": comparison["summary"]["comparable_unit_type"],
+        "comparable_unit_field": comparison["summary"]["comparable_unit_field"],
+        "pre_comparable_unit_count": comparison["summary"]["pre_comparable_unit_count"],
+        "post_comparable_unit_count": comparison["summary"]["post_comparable_unit_count"],
+        "compared_comparable_unit_count": comparison["summary"]["compared_comparable_unit_count"],
         "pre_detector_source_counts": comparison["summary"]["pre_detector_source_counts"],
         "post_detector_source_counts": comparison["summary"]["post_detector_source_counts"],
         "detector_policy_label": detector_policy_label,
@@ -379,6 +590,8 @@ def compare_normalized_alerts(
         "successful_evasion_count": comparison["summary"]["successful_evasion_count"],
         "alert_mutation_count": comparison["summary"]["alert_mutation_count"],
         "failed_evasion_count": comparison["summary"]["failed_evasion_count"],
+        "tcp_conversation_displaced_detection_count": comparison["summary"]["tcp_conversation_displaced_detection_count"],
+        "induced_alert_count": comparison["summary"]["induced_alert_count"],
         "post_only_unmatched_count": comparison["summary"]["post_only_unmatched_count"],
         "alert_comparison": str(comparison_path),
         "signature_comparison_summary": str(signature_summary_path),
@@ -411,6 +624,12 @@ def parse_cli_args() -> argparse.Namespace:
     add("--pre-normalized", help="Explicit normalized PRE alert artifact.")
     add("--post-normalized", help="Explicit normalized POST alert artifact.")
     add("--output-dir", help="Explicit Step 23 output directory.")
+    add(
+        "--matching-policy",
+        choices=sorted(SUPPORTED_MATCHING_POLICIES),
+        default=DEFAULT_MATCHING_POLICY,
+        help="Comparable-unit matching policy used before classifying alert outcomes.",
+    )
     add("--log-file", help="Optional explicit terminal log file path.")
     return parser.parse_args()
 
@@ -427,6 +646,7 @@ def main() -> None:
                 pre_normalized=args.pre_normalized,
                 post_normalized=args.post_normalized,
                 output_dir=args.output_dir,
+                matching_policy=args.matching_policy,
             )
         except Exception:
             print("Step 23 failed. Traceback follows:", file=sys.stderr)
@@ -437,6 +657,13 @@ def main() -> None:
         print(f"POST alerts: {result['post_alert_count']}")
         print(f"Detector policy: {result['detector_policy_label']}")
         print(f"Rules policy path: {result['rules_policy_path'] or 'none'}")
+        print(
+            f"Matching policy: {result['matching_policy']} "
+            f"({result['comparable_unit_type']} via {result['comparable_unit_field']})"
+        )
+        print(f"PRE comparable units: {result['pre_comparable_unit_count']}")
+        print(f"POST comparable units: {result['post_comparable_unit_count']}")
+        print(f"Compared comparable units: {result['compared_comparable_unit_count']}")
         print(f"PRE unique signatures: {result['pre_unique_signature_count']}")
         print(f"POST unique signatures: {result['post_unique_signature_count']}")
         print(f"PRE detector sources: {result['pre_detector_source_counts']}")
@@ -444,8 +671,9 @@ def main() -> None:
         print(f"Classifications: {result['classification_counts']}")
         print(f"Successful evasion: {result['successful_evasion_count']}")
         print(f"Alert mutation: {result['alert_mutation_count']}")
+        print(f"TCP-conversation displaced detection: {result['tcp_conversation_displaced_detection_count']}")
         print(f"Failed evasion: {result['failed_evasion_count']}")
-        print(f"POST-only unmatched: {result['post_only_unmatched_count']}")
+        print(f"Induced alert: {result['induced_alert_count']}")
         print(f"Alert comparison: {result['alert_comparison']}")
         print(f"Signature summary: {result['signature_comparison_summary']}")
 

@@ -223,7 +223,11 @@ def build_metrics(
     failed_evasion_count = require_int(comparison_summary, "failed_evasion_count")
     successful_evasion_count = require_int(comparison_summary, "successful_evasion_count")
     alert_mutation_count = require_int(comparison_summary, "alert_mutation_count")
-    post_only_unmatched_count = require_int(comparison_summary, "post_only_unmatched_count")
+    tcp_conversation_displaced_detection_count = int(comparison_summary.get("tcp_conversation_displaced_detection_count", 0) or 0)
+    induced_alert_count = int(
+        comparison_summary.get("induced_alert_count", comparison_summary.get("post_only_unmatched_count", 0)) or 0
+    )
+    post_only_unmatched_count = induced_alert_count
     same_signature_match_count = require_int(comparison_summary, "same_signature_matches")
     different_signature_replacements = require_int(comparison_summary, "different_signature_replacements")
     pre_unique_signature_count = require_int(comparison_summary, "pre_unique_signature_count")
@@ -244,6 +248,8 @@ def build_metrics(
         "failed_evasion_count": failed_evasion_count,
         "successful_evasion_count": successful_evasion_count,
         "alert_mutation_count": alert_mutation_count,
+        "tcp_conversation_displaced_detection_count": tcp_conversation_displaced_detection_count,
+        "induced_alert_count": induced_alert_count,
         "post_only_unmatched_count": post_only_unmatched_count,
         "same_signature_match_count": same_signature_match_count,
         "different_signature_replacements": different_signature_replacements,
@@ -253,8 +259,10 @@ def build_metrics(
         "successful_evasion_rate_raw": safe_rate(successful_evasion_count, pre_alert_count),
         "failed_evasion_rate": safe_rate(failed_evasion_count, pre_alert_count),
         "alert_mutation_rate_raw": safe_rate(alert_mutation_count, pre_alert_count),
+        "tcp_conversation_displaced_detection_rate": safe_rate(tcp_conversation_displaced_detection_count, pre_alert_count),
         "post_alert_retention_rate": safe_rate(post_alert_count, pre_alert_count),
-        "post_only_unmatched_rate_vs_pre": safe_rate(post_only_unmatched_count, pre_alert_count),
+        "induced_alert_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
+        "post_only_unmatched_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
         "unique_pre_signature_count": pre_unique_signature_count,
         "unique_post_signature_count": post_unique_signature_count,
         **signature_breakdowns,
@@ -272,6 +280,8 @@ def write_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "failed_evasion_count",
         "successful_evasion_count",
         "alert_mutation_count",
+        "tcp_conversation_displaced_detection_count",
+        "induced_alert_count",
         "post_only_unmatched_count",
         "same_signature_match_count",
         "different_signature_replacements",
@@ -281,7 +291,9 @@ def write_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "successful_evasion_rate_raw",
         "failed_evasion_rate",
         "alert_mutation_rate_raw",
+        "tcp_conversation_displaced_detection_rate",
         "post_alert_retention_rate",
+        "induced_alert_rate_vs_pre",
         "post_only_unmatched_rate_vs_pre",
         "unique_pre_signature_count",
         "unique_post_signature_count",
@@ -329,7 +341,8 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"| Failed Evasion | {metrics['failed_evasion_count']} |",
         f"| Successful Evasion | {metrics['successful_evasion_count']} |",
         f"| Alert Mutation | {metrics['alert_mutation_count']} |",
-        f"| POST-only unmatched | {metrics['post_only_unmatched_count']} |",
+        f"| TCP-Conversation Displaced Detection | {metrics['tcp_conversation_displaced_detection_count']} |",
+        f"| Induced Alert | {metrics['induced_alert_count']} |",
         "",
         "## Supporting Rates",
         "",
@@ -338,6 +351,8 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"| Successful evasion rate raw | {percentage(metrics['successful_evasion_rate_raw'])} |",
         f"| Failed evasion rate | {percentage(metrics['failed_evasion_rate'])} |",
         f"| Alert mutation rate raw | {percentage(metrics['alert_mutation_rate_raw'])} |",
+        f"| TCP-conversation displaced detection rate | {percentage(metrics['tcp_conversation_displaced_detection_rate'])} |",
+        f"| Induced alert rate vs PRE | {percentage(metrics['induced_alert_rate_vs_pre'])} |",
         f"| POST alert retention rate | {percentage(metrics['post_alert_retention_rate'])} |",
         "",
         "## Signature Summary",
@@ -430,7 +445,9 @@ def compute_metrics(
             "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * alert_mutation_count) / pre_alert_count",
             "signature_mutation_weight_source": "pipeline.signature_mutation_weight",
             "zero_pre_alert_policy": "fail clearly because SER is undefined without PRE detections.",
-            "post_only_unmatched_policy": "reported separately and not counted as evasion.",
+            "tcp_conversation_displaced_detection_policy": "reported separately and not counted as evasion.",
+            "induced_alert_policy": "reported separately and not counted as evasion.",
+            "post_only_unmatched_policy": "legacy alias for induced_alert_count.",
         },
         "metrics": metrics,
         "artifacts": {
@@ -505,8 +522,9 @@ def main() -> None:
         print(f"POST alerts: {metrics['post_alert_count']}")
         print(f"Successful evasion: {metrics['successful_evasion_count']}")
         print(f"Alert mutation: {metrics['alert_mutation_count']}")
+        print(f"TCP-conversation displaced detection: {metrics['tcp_conversation_displaced_detection_count']}")
         print(f"Failed evasion: {metrics['failed_evasion_count']}")
-        print(f"POST-only unmatched: {metrics['post_only_unmatched_count']}")
+        print(f"Induced alert: {metrics['induced_alert_count']}")
         print(f"Signature mutation weight: {metrics['signature_mutation_weight']}")
         print(f"Signature Evasion Rate: {metrics['signature_evasion_rate']:.12f}")
         print(f"POST alert retention rate: {metrics['post_alert_retention_rate']:.12f}")

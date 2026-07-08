@@ -27,7 +27,8 @@ class Step24MetricsTests(unittest.TestCase):
         failed: int,
         successful: int,
         mutation: int,
-        post_only: int = 0,
+        induced: int = 0,
+        displaced: int = 0,
         weight: float = 0.0,
         detector_policy: str = "security-ips",
         signatures: list[dict] | None = None,
@@ -75,11 +76,15 @@ class Step24MetricsTests(unittest.TestCase):
             "post_detector_source_counts": {"ruleset_text": post_count},
             "same_signature_matches": failed,
             "different_signature_replacements": mutation,
-            "post_only_unmatched_count": post_only,
+            "tcp_conversation_displaced_detection_count": displaced,
+            "induced_alert_count": induced,
+            "post_only_unmatched_count": induced,
             "classification_counts": {
                 "Alert Mutation": mutation,
                 "Failed Evasion": failed,
+                "Induced Alert": induced,
                 "Successful Evasion": successful,
+                "TCP-Conversation Displaced Detection": displaced,
             },
             "successful_evasion_count": successful,
             "alert_mutation_count": mutation,
@@ -139,12 +144,21 @@ class Step24MetricsTests(unittest.TestCase):
             result = compute_metrics(config_path=config)
             self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.2)
 
-    def test_post_only_unmatched_reported_separately(self) -> None:
+    def test_induced_alert_reported_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=12, failed=10, successful=0, mutation=0, post_only=2)
+            config = self.make_fixture(root, pre_count=10, post_count=12, failed=10, successful=0, mutation=0, induced=2)
             result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["post_only_unmatched_count"], 2)
+            self.assertEqual(result["metrics"]["induced_alert_count"], 2)
+            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
+
+    def test_tcp_conversation_displaced_detection_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_fixture(root, pre_count=10, post_count=10, failed=8, successful=0, mutation=0, displaced=2)
+            result = compute_metrics(config_path=config)
+            self.assertEqual(result["metrics"]["tcp_conversation_displaced_detection_count"], 2)
+            self.assertEqual(result["metrics"]["tcp_conversation_displaced_detection_rate"], 0.2)
             self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
 
     def test_zero_pre_alerts_fails(self) -> None:

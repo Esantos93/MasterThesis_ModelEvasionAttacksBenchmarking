@@ -20,7 +20,7 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import terminal_log
 
 
-NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v1"
+NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v2"
 PRE_COMMON_EXPERIMENT_LABEL = "PRE-modification-traffic"
 
 
@@ -106,6 +106,38 @@ def default_normalized_output_dir(
     return detector_root / "post" / experiment_config_label
 
 
+def default_packet_trace_path(config: dict[str, Any], experiment_root_override: str | Path | None = None) -> Path:
+    experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
+    return experiment_root / "04_packet_json" / "selected_packet_records.json"
+
+
+def packet_trace_by_reduced_index(packet_json_path: Path) -> dict[int, dict[str, Any]]:
+    packet_json = read_json(packet_json_path)
+    if not isinstance(packet_json, dict):
+        raise ValueError(f"Step 14 packet JSON must be an object: {packet_json_path}")
+    traffic = packet_json.get("traffic")
+    if not isinstance(traffic, list):
+        raise ValueError(f"Step 14 packet JSON must contain a traffic list: {packet_json_path}")
+    trace_by_index: dict[int, dict[str, Any]] = {}
+    for packet in traffic:
+        if not isinstance(packet, dict):
+            continue
+        reduced_index = optional_int(packet.get("reduced_packet_index"))
+        if reduced_index is None:
+            continue
+        trace_by_index[reduced_index] = {
+            "packet_id": packet.get("packet_id"),
+            "original_packet_number": packet.get("original_packet_number"),
+            "reduced_packet_index": reduced_index,
+            "tcp_connection_id": packet.get("tcp_connection_id"),
+            "tcp_stream_id": packet.get("tcp_stream_id"),
+            "assigned_flow_ids": (packet.get("flow_context") or {}).get("assigned_flow_ids", []),
+            "candidate_flow_ids": (packet.get("flow_context") or {}).get("candidate_flow_ids", []),
+            "packet_mapping_status": (packet.get("flow_context") or {}).get("packet_mapping_status"),
+        }
+    return trace_by_index
+
+
 # This function finds the converted Step 21 alert JSON file in a Snort raw output directory.
 # execution_metadata.json is preferred because it records the exact converted file chosen by Step 21.
 def resolve_converted_alert_json(input_dir: Path, execution_metadata: dict[str, Any]) -> Path:
@@ -163,12 +195,15 @@ def normalize_one_alert(
     alert_index: int,
     traffic_version: str,
     experiment_config_label: str | None,
+    packet_trace: dict[str, Any] | None,
 ) -> dict[str, Any]:
     gid = optional_int(raw_alert.get("gid"))
     sid = optional_int(raw_alert.get("sid"))
     rev = optional_int(raw_alert.get("rev"))
     key = signature_key(gid, sid, rev)
     detector_source = detector_source_from_gid(gid)
+    pkt_num = optional_int(raw_alert.get("pkt_num"))
+    trace = packet_trace or {}
     return {
         "normalized_alert_id": f"{traffic_version}-{alert_index:06d}",
         "alert_index": alert_index,
@@ -187,7 +222,16 @@ def normalize_one_alert(
         "src_port": optional_int(raw_alert.get("src_port")),
         "dst_addr": raw_alert.get("dst_addr"),
         "dst_port": optional_int(raw_alert.get("dst_port")),
-        "pkt_num": optional_int(raw_alert.get("pkt_num")),
+        "pkt_num": pkt_num,
+        "packet_id": trace.get("packet_id"),
+        "original_packet_number": trace.get("original_packet_number"),
+        "reduced_packet_index": trace.get("reduced_packet_index"),
+        "tcp_connection_id": trace.get("tcp_connection_id"),
+        "tcp_stream_id": trace.get("tcp_stream_id"),
+        "assigned_flow_ids": trace.get("assigned_flow_ids", []),
+        "candidate_flow_ids": trace.get("candidate_flow_ids", []),
+        "packet_mapping_status": trace.get("packet_mapping_status"),
+        "packet_trace_status": "matched_step14_packet" if packet_trace else "missing_step14_packet_trace",
         "timestamp": raw_alert.get("timestamp"),
         "pkt_len": optional_int(raw_alert.get("pkt_len")),
         "raw_alert": raw_alert,
@@ -201,6 +245,8 @@ def summarize_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
     detector_source_counts = Counter(str(alert.get("detector_source")) for alert in alerts)
     action_counts = Counter(str(alert.get("action")) for alert in alerts)
     proto_counts = Counter(str(alert.get("proto")) for alert in alerts)
+    packet_trace_status_counts = Counter(str(alert.get("packet_trace_status")) for alert in alerts)
+    tcp_connection_count = len({alert.get("tcp_connection_id") for alert in alerts if alert.get("tcp_connection_id")})
     signatures = []
     for key, count in sorted(signature_counts.items()):
         first = next(alert for alert in alerts if alert["signature_key"] == key)
@@ -224,6 +270,8 @@ def summarize_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
         "detector_source_counts": dict(sorted(detector_source_counts.items())),
         "action_counts": dict(sorted(action_counts.items())),
         "proto_counts": dict(sorted(proto_counts.items())),
+        "packet_trace_status_counts": dict(sorted(packet_trace_status_counts.items())),
+        "tcp_connection_count": tcp_connection_count,
         "signatures": signatures,
     }
 
@@ -239,6 +287,8 @@ def normalize_one_traffic_version(
     input_dir: Path,
     output_dir: Path,
     input_alert_json: Path | None,
+    packet_trace_index: dict[int, dict[str, Any]],
+    packet_trace_path: Path,
 ) -> dict[str, Any]:
     metadata_path = input_dir / "execution_metadata.json"
     if not metadata_path.exists():
@@ -280,7 +330,17 @@ def normalize_one_traffic_version(
     for alert_index, raw_alert in enumerate(raw_alerts, start=1):
         if not isinstance(raw_alert, dict):
             raise ValueError(f"Alert record {alert_index} is not a JSON object in: {alert_json_path}")
-        normalized_alerts.append(normalize_one_alert(raw_alert, alert_index, traffic_version, normalized_experiment_config_label))
+        pkt_num = optional_int(raw_alert.get("pkt_num"))
+        packet_trace = packet_trace_index.get(pkt_num) if pkt_num is not None else None
+        normalized_alerts.append(
+            normalize_one_alert(
+                raw_alert,
+                alert_index,
+                traffic_version,
+                normalized_experiment_config_label,
+                packet_trace,
+            )
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if traffic_version == "pre":
@@ -313,6 +373,13 @@ def normalize_one_traffic_version(
             "normalization_policy": {
                 "detection_evidence": "Any Snort alert_json record counts as detection evidence, regardless of action value.",
                 "signature_key": "gid:sid:rev",
+                "packet_traceability": {
+                    "source_step_14_packet_json": str(packet_trace_path),
+                    "mapping": "Snort pkt_num is mapped to Step 14 reduced_packet_index.",
+                    "packet_anchor": "packet_id",
+                    "tcp_conversation_anchor": "tcp_connection_id",
+                    "tcp_stream_anchor": "tcp_stream_id",
+                },
                 "detector_source": {
                     "basis": "Inferred from Snort gid because alert_json has no explicit source field.",
                     "gid_1": "ruleset_text",
@@ -345,6 +412,7 @@ def normalize_one_traffic_version(
         "source_alert_json": str(alert_json_path),
         "source_execution_metadata": str(metadata_path),
         "source_step_21_metadata": execution_metadata,
+        "source_step_14_packet_json": str(packet_trace_path),
         "output_normalized_alerts": str(normalized_path),
         "summary": summary,
     }
@@ -357,6 +425,7 @@ def normalize_one_traffic_version(
         "alert_count": summary["alert_count"],
         "unique_signature_count": summary["unique_signature_count"],
         "detector_source_counts": summary["detector_source_counts"],
+        "packet_trace_status_counts": summary["packet_trace_status_counts"],
         "normalized_alerts": str(normalized_path),
         "normalization_metadata": str(metadata_output_path),
     }
@@ -378,6 +447,8 @@ def normalize_alerts(
     experiment_config_label = experiment_config_label_from_config(config)
     detector_policy_label = detector_policy_label_from_config(config)
     rules_policy_path = rules_policy_path_from_config(config)
+    packet_trace_path = default_packet_trace_path(config, experiment_root)
+    packet_trace_index = packet_trace_by_reduced_index(packet_trace_path)
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
     if (input_dir or output_dir or input_alert_json) and len(selected_versions) != 1:
         raise ValueError("--input-dir, --output-dir, and --input-alert-json overrides are only valid for one traffic version.")
@@ -416,6 +487,8 @@ def normalize_alerts(
                 input_dir=resolved_input_dir,
                 output_dir=resolved_output_dir,
                 input_alert_json=resolved_input_alert_json,
+                packet_trace_index=packet_trace_index,
+                packet_trace_path=packet_trace_path,
             )
         )
     return results
@@ -491,6 +564,7 @@ def main() -> None:
             )
             print(f"{result['traffic_version']} {result['detector_policy_label']}: rules_policy_path={result['rules_policy_path'] or 'none'}")
             print(f"{result['traffic_version']} {result['detector_policy_label']}: detector_sources={result['detector_source_counts']}")
+            print(f"{result['traffic_version']} {result['detector_policy_label']}: packet_trace={result['packet_trace_status_counts']}")
 
 
 if __name__ == "__main__":
