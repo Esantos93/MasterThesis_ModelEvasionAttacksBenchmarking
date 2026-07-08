@@ -1,7 +1,7 @@
 {
   "experiment": {
     "experiment_id": "03_exp_cicids2017_expanded_header_editability",
-    "description": "Final experiment 03: header-only CICIDS2017 run using six-physical-packet parent groups and an expanded header editability policy. Payload bytes remain non-editable.",
+    "description": "Historical expanded-header config for the extended/aggressive header-modification candidate now parked under Valid Traffic vs Invalid Traffic. It uses six-physical-packet parent groups, keeps payload bytes non-editable, and exposes the expanded header editability policy.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {

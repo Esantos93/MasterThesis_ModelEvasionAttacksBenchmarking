@@ -1,8 +1,8 @@
 {
   "schema_version": "header_editability_policy_v1",
   "policy_id": "expanded_header_editability_v1",
-  "description": "Expanded header-only policy for final experiment 03. It keeps payload bytes non-editable and exposes a deliberately broader IPv4/TCP header surface than the conservative Baseline, including experimental fragmentation and TCP control-flag fields, while keeping lengths, checksums, parser-selection fields, flow identity fields, TCP sequence/acknowledgement state, and TCP NS/ACK ownership under pipeline or immutable ownership.",
-  "justification_document": "20_Notes/28_Experimentos_Finales/03_expanded_header_editability_experiment.md",
+  "description": "Extended/aggressive header-only policy for the parked Valid Traffic vs Invalid Traffic experiment candidate described in the Experiments Diary. It keeps payload bytes non-editable and exposes a deliberately broader IPv4/TCP header surface than the conservative Baseline, including experimental fragmentation and TCP control-flag fields, while keeping lengths, checksums, parser-selection fields, flow identity fields, TCP sequence/acknowledgement state, and TCP NS/ACK ownership under pipeline or immutable ownership.",
+  "justification_document": "20_Notes/Experiments Diary.md",
   "default_classification": "immutable_field",
   "source_priority": [
     "pipeline_diary",
@@ -356,7 +356,7 @@
         ],
         "experimental_risk": "meaningful_only_with_tcp_urg_flag"
       },
-      "rationale": "The urgent pointer is exposed with the URG flag in the expanded experiment so inconsistent combinations can be observed and rejected or reported by downstream validation.",
+      "rationale": "The urgent pointer is exposed with the URG flag in the extended/aggressive header-modification candidate so inconsistent combinations can be observed and rejected or reported by downstream validation.",
       "source_refs": [
         "rfc_793_tcp",
         "rfc_9293_tcp",
