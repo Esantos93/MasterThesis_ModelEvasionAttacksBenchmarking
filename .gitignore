@@ -9,3 +9,6 @@ __pycache__/
 90_Testing/
 *.txt
 _tmp*
+
+!README.txt
+!README.md
