@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import run_llm_batch
+import summarize_llm_runtime
 
 
 #This function reads JSON using the shared Step 17 helper.
@@ -143,7 +144,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-dir", action="append", default=[], help="Prompt directory fallback. Can be repeated.")
     parser.add_argument("--include-accepted", action="store_true", help="Also reparse outputs whose metadata status is already accepted.")
     parser.add_argument("--write", action="store_true", help="Rewrite parsed/metadata/failure artifacts. Without this, only reports changes.")
+    parser.add_argument("--skip-summary", action="store_true", help="Do not regenerate runtime_summary files after --write.")
     return parser.parse_args()
+
+
+#This function removes stale runtime summary artifacts before writing a fresh summary.
+def remove_existing_runtime_summaries(run_dir: Path) -> list[Path]:
+    removed_paths = []
+    for suffix in [".json", ".csv", ".md"]:
+        summary_path = (run_dir / "runtime_summary").with_suffix(suffix)
+        if summary_path.exists():
+            summary_path.unlink()
+            removed_paths.append(summary_path)
+    return removed_paths
 
 
 #This is the CLI entry point.
@@ -183,6 +196,17 @@ def main() -> None:
     print(f"Mode: {'write' if args.write else 'dry-run'}")
     print(f"Raw outputs considered: {len(results)}")
     print(f"Result counts: {counts}")
+
+    if args.write and not args.skip_summary:
+        removed_paths = remove_existing_runtime_summaries(run_dir)
+        if removed_paths:
+            print("Removed stale runtime summaries:")
+            for removed_path in removed_paths:
+                print(f"  - {removed_path}")
+        summarize_llm_runtime.summarize_run(
+            run_dir=run_dir,
+            prompt_dirs=prompt_dirs,
+        )
 
 
 if __name__ == "__main__":

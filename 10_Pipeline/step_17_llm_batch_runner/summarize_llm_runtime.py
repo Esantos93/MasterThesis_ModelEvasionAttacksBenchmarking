@@ -605,12 +605,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# This is the command-line entry point.
-def main() -> None:
-    args = parse_args()
-    run_dir = Path(args.run_dir).expanduser()
-    metadata_dir = resolve_metadata_dir(run_dir, args.metadata_dir)
-    prompt_dirs = [Path(path).expanduser() for path in args.prompt_dir]
+# This function builds and writes the runtime summary artifacts for one Step 17 run directory.
+def summarize_run(
+    *,
+    run_dir: Path,
+    metadata_dir: Path | None = None,
+    prompt_dirs: list[Path] | None = None,
+    output_prefix: Path | None = None,
+) -> dict[str, Path]:
+    run_dir = run_dir.expanduser()
+    metadata_dir = resolve_metadata_dir(run_dir, str(metadata_dir)) if metadata_dir is not None else resolve_metadata_dir(run_dir, None)
+    prompt_dirs = [path.expanduser() for path in (prompt_dirs or [])]
     metadata_files = sorted(metadata_dir.glob("*.metadata.json"))
     if not metadata_files:
         raise FileNotFoundError(f"No *.metadata.json files found in: {metadata_dir}")
@@ -661,7 +666,7 @@ def main() -> None:
         "per_prompt": rows,
     }
 
-    output_prefix = Path(args.output_prefix).expanduser() if args.output_prefix else run_dir / "runtime_summary"
+    output_prefix = output_prefix.expanduser() if output_prefix is not None else run_dir / "runtime_summary"
     json_path = output_prefix.with_suffix(".json")
     csv_path = output_prefix.with_suffix(".csv")
     md_path = output_prefix.with_suffix(".md")
@@ -672,6 +677,22 @@ def main() -> None:
     print(f"Runtime summary JSON: {json_path}")
     print(f"Runtime summary CSV: {csv_path}")
     print(f"Runtime summary MD: {md_path}")
+    return {"json": json_path, "csv": csv_path, "md": md_path}
+
+
+# This is the command-line entry point.
+def main() -> None:
+    args = parse_args()
+    run_dir = Path(args.run_dir).expanduser()
+    metadata_dir = Path(args.metadata_dir).expanduser() if args.metadata_dir else None
+    prompt_dirs = [Path(path).expanduser() for path in args.prompt_dir]
+    output_prefix = Path(args.output_prefix).expanduser() if args.output_prefix else None
+    summarize_run(
+        run_dir=run_dir,
+        metadata_dir=metadata_dir,
+        prompt_dirs=prompt_dirs,
+        output_prefix=output_prefix,
+    )
 
 
 if __name__ == "__main__":
