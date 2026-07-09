@@ -106,18 +106,53 @@ def resolve_step17_model_root(
     """Resolve Step 17 model output root across canonical and RISE tarball layouts."""
 
     base = experiment_root / "07_llm_outputs"
-    candidates = [
-        # Canonical local/orchestrator layouts observed during earlier runs.
-        base / grouping_policy / model / step17_run_id,
-        base / grouping_policy / model,
-        # RISE tarball extracted under experiment/07_llm_outputs/<run_id>/.
-        base / step17_run_id / "07_llm_outputs" / grouping_policy / model / step17_run_id,
-        base / step17_run_id / "07_llm_outputs" / grouping_policy / model,
-        base / step17_run_id / "07_llm_outputs" / grouping_policy,
-        base / step17_run_id / "07_llm_outputs" / model,
-        base / step17_run_id,
-    ]
-    return first_matching_path(candidates, "Step 17 model output root", has_step17_outputs)
+    model_names = list(dict.fromkeys([model, Path(model).name, model.replace("/", "-")]))
+    candidates: list[Path] = []
+    for model_name in model_names:
+        candidates.extend(
+            [
+                # Canonical local/orchestrator layouts observed during earlier runs.
+                base / grouping_policy / model_name / step17_run_id,
+                base / grouping_policy / model_name,
+                # RISE tarball extracted under experiment/07_llm_outputs/<run_id>/.
+                base
+                / step17_run_id
+                / "07_llm_outputs"
+                / grouping_policy
+                / model_name
+                / step17_run_id,
+                base / step17_run_id / "07_llm_outputs" / grouping_policy / model_name,
+                base / step17_run_id / "07_llm_outputs" / model_name,
+            ]
+        )
+    candidates.extend(
+        [
+            base / step17_run_id / "07_llm_outputs" / grouping_policy,
+            base / step17_run_id,
+        ]
+    )
+
+    for candidate in candidates:
+        if has_step17_outputs(candidate):
+            return candidate
+
+    # Final fallback for provider-specific model directory names. Resolve only
+    # when the extracted run contains exactly one Step 17 output directory.
+    run_root = base / step17_run_id
+    discovered = {
+        summary.parent
+        for summary in run_root.rglob("runtime_summary.json")
+        if has_step17_outputs(summary.parent)
+    }
+    if len(discovered) == 1:
+        return discovered.pop()
+
+    formatted = "\n".join(f"  - {candidate}" for candidate in candidates)
+    if discovered:
+        formatted += "\nDiscovered ambiguous output roots:\n" + "\n".join(
+            f"  - {path}" for path in sorted(discovered)
+        )
+    raise SystemExit(f"Missing Step 17 model output root. Tried:\n{formatted}")
 
 
 def load_pipeline_config() -> dict:
