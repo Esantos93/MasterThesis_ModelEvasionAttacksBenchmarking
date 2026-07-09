@@ -141,6 +141,11 @@ def reparse_one_raw_output(
         metadata["failure_reason"] = new_failure_reason
         metadata["output_paths"] = output_paths
         metadata["validation_result"] = validation_result
+        metadata["output_normalization"] = (
+            validation_result.get("output_normalization")
+            if isinstance(validation_result, dict)
+            else None
+        )
         metadata["reparse"] = {
             "parser": "fenced_json_recovery_v1",
             "reparsed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -157,6 +162,11 @@ def reparse_one_raw_output(
         "new_status": new_status,
         "new_failure_reason": new_failure_reason,
         "prompt_file": str(prompt_path),
+        "output_normalization": (
+            validation_result.get("output_normalization")
+            if isinstance(validation_result, dict)
+            else None
+        ),
     }
 
 
@@ -195,6 +205,32 @@ def main() -> None:
         raise FileNotFoundError(f"Missing metadata directory: {metadata_dir}")
 
     results = []
+    original_status_counts: dict[str, int] = {}
+    accepted_with_stale_failure_artifacts = 0
+    cleaned_stale_failure_artifacts = 0
+    for metadata_path in sorted(metadata_dir.glob("*.metadata.json")):
+        metadata = read_json(metadata_path)
+        status = str(metadata.get("status") or "unknown")
+        original_status_counts[status] = original_status_counts.get(status, 0) + 1
+        if status == "accepted":
+            output_stem = metadata_path.name.removesuffix(".metadata.json")
+            failure_path = run_dir / "failures" / f"{output_stem}.failure.json"
+            rejected_path = run_dir / "failures" / f"{output_stem}.rejected.json"
+            output_paths = dict(metadata.get("output_paths") or {})
+            stale_paths_present = failure_path.exists() or rejected_path.exists()
+            stale_metadata_paths_present = "failure" in output_paths or "rejected_json" in output_paths
+            if stale_paths_present or stale_metadata_paths_present:
+                accepted_with_stale_failure_artifacts += 1
+                if args.write:
+                    removed_paths = remove_superseded_failure_artifacts(
+                        failure_path=failure_path,
+                        rejected_path=rejected_path,
+                        output_paths=output_paths,
+                    )
+                    cleaned_stale_failure_artifacts += len(removed_paths)
+                    metadata["output_paths"] = output_paths
+                    run_llm_batch.write_json(metadata_path, metadata)
+
     for raw_path in sorted(raw_dir.glob("*.raw.txt")):
         metadata_path = metadata_dir / f"{raw_path.name.removesuffix('.raw.txt')}.metadata.json"
         if metadata_path.exists() and not args.include_accepted:
@@ -215,10 +251,37 @@ def main() -> None:
         key = str(result.get("new_status") or result.get("reason") or result.get("status"))
         counts[key] = counts.get(key, 0) + 1
 
+    projected_status_counts = dict(original_status_counts)
+    normalized_output_count = 0
+    normalized_edit_count = 0
+    remaining_failure_reasons: dict[str, int] = {}
+    for result in results:
+        original_status = result.get("original_status")
+        new_status = result.get("new_status")
+        if original_status != new_status and isinstance(original_status, str) and isinstance(new_status, str):
+            projected_status_counts[original_status] = projected_status_counts.get(original_status, 0) - 1
+            projected_status_counts[new_status] = projected_status_counts.get(new_status, 0) + 1
+        normalization = result.get("output_normalization")
+        alias_details = normalization.get("region_id_field_alias") if isinstance(normalization, dict) else None
+        if isinstance(alias_details, dict) and alias_details.get("applied"):
+            normalized_output_count += 1
+            normalized_edit_count += int(alias_details.get("normalized_edit_count") or 0)
+        if new_status == "failed":
+            reason = str(result.get("new_failure_reason") or "unknown")
+            remaining_failure_reasons[reason] = remaining_failure_reasons.get(reason, 0) + 1
+
     print(f"Run dir: {run_dir}")
     print(f"Mode: {'write' if args.write else 'dry-run'}")
     print(f"Raw outputs considered: {len(results)}")
     print(f"Result counts: {counts}")
+    print(f"Status counts before: {original_status_counts}")
+    print(f"Status counts after: {projected_status_counts}")
+    print(f"Outputs normalized: {normalized_output_count}")
+    print(f"Header edits normalized: {normalized_edit_count}")
+    print(f"Remaining failures by reason: {remaining_failure_reasons}")
+    print(f"Accepted outputs with stale failure artifacts: {accepted_with_stale_failure_artifacts}")
+    if args.write:
+        print(f"Stale failure artifacts removed from pre-existing accepted outputs: {cleaned_stale_failure_artifacts}")
 
     if args.write and not args.skip_summary:
         removed_paths = remove_existing_runtime_summaries(run_dir)

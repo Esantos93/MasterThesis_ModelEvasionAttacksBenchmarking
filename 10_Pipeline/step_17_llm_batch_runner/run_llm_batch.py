@@ -768,21 +768,39 @@ def validate_uint_replacement(
     return None
 
 
+#This function builds metadata for strict header region-id alias normalization.
+def build_header_alias_normalization(normalized_edit_count: int) -> dict[str, Any]:
+    return {
+        "region_id_field_alias": {
+            "applied": normalized_edit_count > 0,
+            "normalized_edit_count": normalized_edit_count,
+            "parser": "strict_header_region_id_alias_v1",
+        }
+    }
+
+
 #This function expands compact header_edits into normal replace_uint patches before validation.
-def expand_compact_header_edits(parsed_output: dict[str, Any], prompt_package: dict[str, Any]) -> dict[str, Any] | None:
+def expand_compact_header_edits(
+    parsed_output: dict[str, Any],
+    prompt_package: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     header_edits = parsed_output.get("header_edits")
     if header_edits is None:
-        return None
+        return None, None
     if not isinstance(header_edits, list):
-        return {"accepted": False, "reason": "header_edits_not_list"}
+        return {"accepted": False, "reason": "header_edits_not_list"}, None
 
-    editable_lookup = build_editable_region_lookup(prompt_package)
+    editable_regions = [
+        region
+        for region in prompt_package.get("input_traceability", {}).get("editable_regions", [])
+        if isinstance(region, dict)
+    ]
     patches = parsed_output.get("patches")
     if patches is None:
         patches = []
         parsed_output["patches"] = patches
     if not isinstance(patches, list):
-        return {"accepted": False, "reason": "patches_not_list"}
+        return {"accepted": False, "reason": "patches_not_list"}, None
     parsed_output["patches"] = [
         patch
         for patch in patches
@@ -793,6 +811,7 @@ def expand_compact_header_edits(parsed_output: dict[str, Any], prompt_package: d
         )
     ]
     patches = parsed_output["patches"]
+    normalized_edit_count = 0
 
     for edit_index, header_edit in enumerate(header_edits, start=1):
         if not isinstance(header_edit, list) or len(header_edit) != 3:
@@ -800,38 +819,92 @@ def expand_compact_header_edits(parsed_output: dict[str, Any], prompt_package: d
                 "accepted": False,
                 "reason": "header_edit_invalid_shape",
                 "header_edit_index": edit_index,
-            }
+            }, build_header_alias_normalization(normalized_edit_count)
         packet_id, field, replacement = header_edit
         if not isinstance(packet_id, str):
             return {
                 "accepted": False,
                 "reason": "header_edit_packet_id_not_string",
                 "header_edit_index": edit_index,
-            }
+            }, build_header_alias_normalization(normalized_edit_count)
         if not isinstance(field, str):
             return {
                 "accepted": False,
                 "reason": "header_edit_field_not_string",
                 "header_edit_index": edit_index,
-            }
+            }, build_header_alias_normalization(normalized_edit_count)
         packet_id_text = str(packet_id)
         matching_regions = [
             region
-            for (lookup_packet_id, _lookup_region_id), region in editable_lookup.items()
-            if lookup_packet_id == packet_id_text
+            for region in editable_regions
+            if str(region.get("packet_id")) == packet_id_text
             and region.get("identity_type") == "physical_header_region"
+            and region.get("region_type") == "header_field"
+            and "replace_uint" in (region.get("allowed_operations") or [])
             and region.get("field") == field
         ]
+        used_region_id_alias = False
+        if len(matching_regions) == 0:
+            alias_regions = [
+                region
+                for region in editable_regions
+                if region.get("region_id") == field
+                and region.get("identity_type") == "physical_header_region"
+                and region.get("region_type") == "header_field"
+                and "replace_uint" in (region.get("allowed_operations") or [])
+            ]
+            if len(alias_regions) > 1:
+                return {
+                    "accepted": False,
+                    "reason": "header_edit_region_id_alias_ambiguous",
+                    "header_edit_index": edit_index,
+                    "region_id": field,
+                }, build_header_alias_normalization(normalized_edit_count)
+            if len(alias_regions) == 1 and str(alias_regions[0].get("packet_id")) != packet_id_text:
+                return {
+                    "accepted": False,
+                    "reason": "header_edit_region_id_alias_packet_mismatch",
+                    "header_edit_index": edit_index,
+                    "packet_id": packet_id_text,
+                    "region_id": field,
+                    "region_packet_id": str(alias_regions[0].get("packet_id")),
+                }, build_header_alias_normalization(normalized_edit_count)
+            matching_regions = alias_regions
+            used_region_id_alias = len(matching_regions) == 1
         if len(matching_regions) != 1:
+            reason = (
+                "header_edit_field_ambiguous"
+                if len(matching_regions) > 1
+                else "header_edit_references_unknown_or_non_editable_region"
+            )
             return {
                 "accepted": False,
-                "reason": "header_edit_references_unknown_or_non_editable_region",
+                "reason": reason,
                 "header_edit_index": edit_index,
                 "packet_id": packet_id_text,
                 "field": field,
-            }
+            }, build_header_alias_normalization(normalized_edit_count)
         region = matching_regions[0]
         region_id = str(region["region_id"])
+        canonical_field = region.get("field")
+        if not isinstance(canonical_field, str):
+            return {
+                "accepted": False,
+                "reason": "editable_header_region_missing_field",
+                "header_edit_index": edit_index,
+                "region_id": region_id,
+            }, build_header_alias_normalization(normalized_edit_count)
+        replacement_error = validate_uint_replacement(
+            patch={"replacement_format": "uint", "replacement": replacement},
+            region=region,
+            patch_index=edit_index,
+        )
+        if replacement_error:
+            replacement_error["header_edit_index"] = edit_index
+            return replacement_error, build_header_alias_normalization(normalized_edit_count)
+        if used_region_id_alias:
+            header_edits[edit_index - 1] = [packet_id_text, canonical_field, replacement]
+            normalized_edit_count += 1
         patches.append(
             {
                 "packet_id": packet_id_text,
@@ -842,7 +915,8 @@ def expand_compact_header_edits(parsed_output: dict[str, Any], prompt_package: d
                 "replacement": replacement,
             }
         )
-    return None
+    normalization = build_header_alias_normalization(normalized_edit_count)
+    return None, normalization if normalized_edit_count > 0 else None
 
 
 #This function validates the patch_output_v1 contract using the Step 16 editable-region index.
@@ -874,8 +948,10 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
             "actual_prompt_unit_id": parsed_output.get("prompt_unit_id"),
         }
 
-    compact_header_edit_error = expand_compact_header_edits(parsed_output, prompt_package)
+    compact_header_edit_error, output_normalization = expand_compact_header_edits(parsed_output, prompt_package)
     if compact_header_edit_error:
+        if output_normalization is not None:
+            compact_header_edit_error["output_normalization"] = output_normalization
         return compact_header_edit_error
 
     patches = parsed_output.get("patches")
@@ -1036,11 +1112,14 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "operation": operation,
             }
 
-    return {
+    result = {
         "accepted": True,
         "reason": "accepted",
         "patch_count": len(patches),
     }
+    if output_normalization is not None:
+        result["output_normalization"] = output_normalization
+    return result
 
 
 #This function builds the metadata object written for every attempted model/prompt run.
@@ -1084,6 +1163,7 @@ def build_run_metadata(
         "runtime_seconds": runtime_seconds,
         "output_paths": output_paths,
         "validation_result": validation_result,
+        "output_normalization": validation_result.get("output_normalization") if validation_result else None,
         "generation_response_metadata": generation_response_metadata,
     }
 

@@ -321,6 +321,136 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertEqual(len(parsed_output["patches"]), 1)
         self.assertEqual(parsed_output["patches"][0]["region_id"], "packet_000001:ipv4.ttl")
 
+    def test_compact_header_edit_region_id_alias_is_canonicalized(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+        self.assertEqual(
+            result["output_normalization"]["region_id_field_alias"],
+            {
+                "applied": True,
+                "normalized_edit_count": 1,
+                "parser": "strict_header_region_id_alias_v1",
+            },
+        )
+
+    def test_compact_header_edit_region_id_alias_rejects_other_packet(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000002", "packet_000001:ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_region_id_alias_packet_mismatch")
+
+    def test_compact_header_edit_region_id_alias_rejects_unknown_region(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:ipv4.unknown", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_references_unknown_or_non_editable_region")
+
+    def test_compact_header_edit_region_id_alias_rejects_non_header_region(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["input_traceability"]["editable_regions"].append(
+            {
+                "identity_type": "canonical_payload_region",
+                "packet_id": "packet_000001",
+                "region_id": "packet_000001:payload",
+                "region_type": "payload_byte_range",
+                "field": "payload",
+                "allowed_operations": ["replace_byte_range"],
+            }
+        )
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:payload", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, prompt_package)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_references_unknown_or_non_editable_region")
+
+    def test_compact_header_edit_region_id_alias_rejects_ambiguous_mapping(self) -> None:
+        prompt_package = build_header_prompt_package()
+        duplicate_region = dict(prompt_package["input_traceability"]["editable_regions"][0])
+        duplicate_region["field"] = "ipv4.tos"
+        prompt_package["input_traceability"]["editable_regions"].append(duplicate_region)
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, prompt_package)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_region_id_alias_ambiguous")
+
+    def test_compact_header_edit_region_id_alias_rejects_out_of_range_value(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", 0]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "replacement_uint_below_min")
+
+    def test_compact_header_edit_unchanged_value_remains_accepted(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", 64]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 64]])
+
+    def test_fenced_json_header_region_id_alias_is_recovered_and_canonicalized(self) -> None:
+        raw_text = """```json
+{
+  "schema_version": "patch_output_v1",
+  "parent_group_id": "parent_001",
+  "prompt_unit_id": "unit_header_001",
+  "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", 128]]
+}
+```"""
+
+        parsed_output = run_llm_batch.parse_model_json(raw_text)
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+
     def test_compact_header_edits_reject_unknown_region(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
