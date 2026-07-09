@@ -10,6 +10,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_llm_batch
 import run_llm_batch_vllm
+import reparse_llm_outputs
+
+
+class ReparseArtifactCleanupTest(unittest.TestCase):
+    def test_accepted_reparse_removes_superseded_failure_artifacts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            failures_dir = Path(temp_dir)
+            failure_path = failures_dir / "unit.failure.json"
+            rejected_path = failures_dir / "unit.rejected.json"
+            failure_path.write_text("{}\n", encoding="utf-8")
+            rejected_path.write_text("{}\n", encoding="utf-8")
+            output_paths = {
+                "raw": "unit.raw.txt",
+                "failure": str(failure_path),
+                "rejected_json": str(rejected_path),
+            }
+
+            removed_paths = reparse_llm_outputs.remove_superseded_failure_artifacts(
+                failure_path=failure_path,
+                rejected_path=rejected_path,
+                output_paths=output_paths,
+            )
+
+            self.assertEqual(removed_paths, [failure_path, rejected_path])
+            self.assertFalse(failure_path.exists())
+            self.assertFalse(rejected_path.exists())
+            self.assertNotIn("failure", output_paths)
+            self.assertNotIn("rejected_json", output_paths)
+            self.assertEqual(output_paths["raw"], "unit.raw.txt")
 
 
 #This function builds a minimal payload-only prompt package for validation tests.

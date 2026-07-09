@@ -35,6 +35,24 @@ def resolve_prompt_path(metadata: dict[str, Any], prompt_dirs: list[Path]) -> Pa
     return None
 
 
+#This function removes failure artifacts and metadata paths superseded by an accepted reparse.
+def remove_superseded_failure_artifacts(
+    *,
+    failure_path: Path,
+    rejected_path: Path,
+    output_paths: dict[str, Any],
+) -> list[Path]:
+    output_paths.pop("failure", None)
+    output_paths.pop("rejected_json", None)
+
+    removed_paths = []
+    for stale_path in [failure_path, rejected_path]:
+        if stale_path.exists():
+            stale_path.unlink()
+            removed_paths.append(stale_path)
+    return removed_paths
+
+
 #This function reparses one raw output and optionally rewrites parsed/metadata/failure artifacts.
 def reparse_one_raw_output(
     *,
@@ -74,6 +92,11 @@ def reparse_one_raw_output(
             output_paths["metadata"] = str(metadata_path)
             if write:
                 run_llm_batch.write_json(parsed_path, parsed_output)
+                remove_superseded_failure_artifacts(
+                    failure_path=failure_path,
+                    rejected_path=rejected_path,
+                    output_paths=output_paths,
+                )
         else:
             new_status = "failed"
             new_failure_reason = validation_result["reason"]
