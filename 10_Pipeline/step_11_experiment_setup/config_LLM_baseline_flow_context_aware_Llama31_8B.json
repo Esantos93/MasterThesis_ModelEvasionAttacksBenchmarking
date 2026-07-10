@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "03_exp_cicids2017_expanded_header_editability",
-    "description": "Historical expanded-header config for the extended/aggressive header-modification candidate now parked under Valid Traffic vs Invalid Traffic. It uses six-physical-packet parent groups, keeps payload bytes non-editable, and exposes the expanded header editability policy.",
+    "experiment_id": "exp_cicids2017_baseline_flow_context_aware_Llama31_8B",
+    "description": "Header-only CICIDS2017 baseline using the Flow-context-aware grouping policy and the conservative header editability policy. Model used Llama-3.1-8B-Instruct.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -19,8 +19,8 @@
     "config_path": "/usr/local/etc/snort/snort.lua",
     "enable_ruleset": true,
     "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
-    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
-    "detector_policy_label": "security-ips",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states",
+    "detector_policy_label": "max-detect-ips",
     "detection_policy_options": [
       {
         "label": "connectivity-ips",
@@ -68,15 +68,14 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "expanded_header_editability_fixed_size_6",
+    "experiment_config_label": "baseline_flow_context_aware_Llama31_8B",
     "experiment_config_label_options": [
-      "expanded_header_editability_fixed_size_6"
+      "baseline_flow_context_aware_Llama31_8B"
     ],
-    "grouping_policy": "fixed_packet_count",
+    "grouping_policy": "flow_context_aware",
     "grouping_unit": "physical_packet",
-    "group_size_packets": 6,
     "modification_strategy": "header_only_strategy_v1",
-    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_expanded_v1.json",
+    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_v1.json",
     "traffic_selection_policy": "conservative_v1",
     "validation_policy": "reject_invalid",
     "signature_mutation_weight": 0.0

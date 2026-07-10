@@ -15,6 +15,8 @@ from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 from common.paths import create_experiment_dirs
 
+SUPPORTED_GROUPING_POLICIES = {"fixed_packet_count", "flow_context_aware"}
+
 #This function constructs the root directory path for the experiment based on the provided configuration. 
 #It retrieves the experiment ID and output root from the configuration, expands any user home directory references in the output root path, 
 #and then combines them to form the full path to the experiment root directory.
@@ -39,7 +41,14 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
     require_keys(
         config["pipeline"],
-        ["target_os", "experiment_config_label", "grouping_policy", "traffic_selection_policy", "validation_policy"],
+        [
+            "target_os",
+            "experiment_config_label",
+            "experiment_config_label_options",
+            "grouping_policy",
+            "traffic_selection_policy",
+            "validation_policy",
+        ],
         "pipeline",
     )
     if not isinstance(config["snort"]["enable_builtin_rules"], bool):
@@ -54,15 +63,18 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         raise ValueError("snort.daq_dir must be set because Snort needs the DAQ directory for this benchmark setup.")
     if not isinstance(config["snort"].get("rules_policy_path", ""), str):
         raise ValueError("snort.rules_policy_path must be a string when provided.")
+    grouping_policy = config["pipeline"]["grouping_policy"]
+    if grouping_policy not in SUPPORTED_GROUPING_POLICIES:
+        supported = ", ".join(sorted(SUPPORTED_GROUPING_POLICIES))
+        raise ValueError(f"pipeline.grouping_policy must be one of: {supported}.")
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
-    label_options = config["pipeline"].get("experiment_config_label_options")
-    if label_options is not None:
-        if not isinstance(label_options, list) or not all(isinstance(item, str) for item in label_options):
-            raise ValueError("pipeline.experiment_config_label_options must be a list of strings when provided.")
-        if experiment_config_label not in label_options:
-            raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
+    label_options = config["pipeline"]["experiment_config_label_options"]
+    if not isinstance(label_options, list) or not all(isinstance(item, str) for item in label_options):
+        raise ValueError("pipeline.experiment_config_label_options must be a list of strings.")
+    if experiment_config_label not in label_options:
+        raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
 
 
 #If the previous functions are responsible for validating keys in the configuration, 
