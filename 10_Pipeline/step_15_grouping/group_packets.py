@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import string
 import sys
 import time
@@ -45,9 +44,9 @@ HEADER_ONLY_MODIFICATION_STRATEGY = "header_only_strategy_v1"
 SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
 GROUPING_UNIT = "physical_packet"
 
-#This list records the grouping policies that the current draft knows how to execute.
+#This list records the grouping policies that the current code knows how to execute.
 #When a future grouping policy is implemented, it should be added here and in group_records_by_policy().
-SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_based"]
+SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_context_aware"]
 SUPPORTED_MODIFICATION_STRATEGIES = [HYBRID_MODIFICATION_STRATEGY, HEADER_ONLY_MODIFICATION_STRATEGY]
 
 #These defaults implement Step 15 planning heuristics from the cross-step redesign.
@@ -178,15 +177,23 @@ def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["pipeline"], ["grouping_policy", "grouping_unit"], "pipeline")
-    get_modification_strategy(config)
+    modification_strategy = get_modification_strategy(config)
     grouping_unit = str(config["pipeline"]["grouping_unit"]).strip()
     if grouping_unit != GROUPING_UNIT:
         raise ValueError(f"Step 15 requires pipeline.grouping_unit={GROUPING_UNIT!r}.")
     grouping_policy = str(config["pipeline"]["grouping_policy"]).strip()
+    if grouping_policy not in SUPPORTED_GROUPING_POLICIES:
+        raise ValueError(
+            f"Unsupported Step 15 grouping policy {grouping_policy!r}. "
+            f"Supported policies are: {SUPPORTED_GROUPING_POLICIES!r}."
+        )
     if grouping_policy == "fixed_packet_count":
         require_keys(config["pipeline"], ["group_size_packets"], "pipeline")
-    if grouping_policy == "flow_based":
-        require_keys(config["pipeline"], ["flow_payload_slide_window_overlap_units"], "pipeline")
+    if grouping_policy == "flow_context_aware" and modification_strategy != HEADER_ONLY_MODIFICATION_STRATEGY:
+        raise ValueError(
+            "Step 15 flow_context_aware currently requires "
+            "pipeline.modification_strategy='header_only_strategy_v1'."
+        )
 
 
 #This function validates the hybrid packet JSON contract required by the active third optimization.
@@ -405,7 +412,7 @@ def write_header_classification_artifacts(
     }
 
 
-#This function resolves packet aliases and flow context for every canonical TCP region.
+#This function resolves packet aliases for every canonical TCP region.
 def build_canonical_region_records(packet_json: dict[str, Any]) -> list[dict[str, Any]]:
     packets_by_id = {str(packet["packet_id"]): packet for packet in packet_json["traffic"]}
     representations_by_region: dict[str, list[dict[str, Any]]] = {}
@@ -450,31 +457,6 @@ def build_canonical_region_records(packet_json: dict[str, Any]) -> list[dict[str
         if declared_alias_ids != resolved_alias_ids:
             raise ValueError(f"Canonical region {region_id!r} physical aliases do not match the Step 14 table.")
 
-        assigned_flow_ids = unique_strings(
-            [
-                flow_id
-                for packet in alias_packets
-                for flow_id in (packet.get("flow_context") or {}).get("assigned_flow_ids", [])
-            ]
-        )
-        candidate_flow_ids = unique_strings(
-            [
-                flow_id
-                for packet in alias_packets
-                for flow_id in (packet.get("flow_context") or {}).get("candidate_flow_ids", [])
-            ]
-        )
-        mapping_statuses = [
-            str((packet.get("flow_context") or {}).get("packet_mapping_status", "unknown") or "unknown")
-            for packet in alias_packets
-        ]
-        for packet in alias_packets:
-            packet_assigned_flow_ids = (packet.get("flow_context") or {}).get("assigned_flow_ids", [])
-            if len(packet_assigned_flow_ids) > 1:
-                raise ValueError(
-                    "flow_based grouping expects at most one assigned_flow_id per physical packet. "
-                    f"Packet {packet.get('packet_id')!r} has assigned_flow_ids={packet_assigned_flow_ids!r}."
-                )
         payload_hex = str(region.get("payload_hex", "") or "")
         declared_length = int(region.get("length") or 0)
         if len(payload_hex) // 2 != declared_length:
@@ -496,14 +478,6 @@ def build_canonical_region_records(packet_json: dict[str, Any]) -> list[dict[str
                 "src_port": representative_packet.get("src_port"),
                 "dst_port": representative_packet.get("dst_port"),
                 "transport_protocol": "TCP",
-                "flow_context": {
-                    "assigned_flow_ids": assigned_flow_ids,
-                    "candidate_flow_ids": candidate_flow_ids,
-                    "packet_mapping_status": (
-                        mapping_statuses[0] if len(set(mapping_statuses)) == 1 else "mixed_alias_mapping_statuses"
-                    ),
-                    "packet_mapping_status_counts": dict(sorted(Counter(mapping_statuses).items())),
-                },
             }
         )
 
@@ -550,16 +524,6 @@ def compute_input_token_budget(token_config: dict[str, Any]) -> int:
     return max(1, int(available * float(token_config["token_budget_safety_factor"])))
 
 
-#This function reads the flow/payload overlap setting used by flow-based Step 15 prompt-unit planning.
-def get_flow_payload_slide_window_overlap_units(config: dict[str, Any], grouping_policy: str) -> int:
-    if grouping_policy != "flow_based":
-        return 0
-    overlap_units = int(config["pipeline"]["flow_payload_slide_window_overlap_units"])
-    if overlap_units < 0:
-        raise ValueError("pipeline.flow_payload_slide_window_overlap_units must be zero or a positive integer.")
-    return overlap_units
-
-
 #This function implements the baseline parent grouping policy over physical packets.
 def group_fixed_packet_count(records: list[Any], group_size: int) -> list[dict[str, Any]]:
     if group_size <= 0:
@@ -578,77 +542,121 @@ def group_fixed_packet_count(records: list[Any], group_size: int) -> list[dict[s
     return groups
 
 
-#This function extracts aggregated flow context from a canonical region record.
-def get_record_flow_context(record: dict[str, Any]) -> dict[str, Any]:
-    flow_context = record.get("flow_context")
-    if not isinstance(flow_context, dict):
-        region_id = record.get("canonical_region_id", "<unknown>")
-        raise ValueError(
-            "The flow_based grouping policy requires flow context resolved from physical packet aliases. "
-            f"Canonical region without flow_context: {region_id!r}."
-        )
-    return flow_context
+#This helper defines deterministic capture-relative ordering inside one reconstructed TCP connection.
+def packet_capture_order_key(packet: dict[str, Any]) -> tuple[Any, ...]:
+    reduced_packet_index = packet.get("reduced_packet_index")
+    return (
+        int(reduced_packet_index) if reduced_packet_index is not None else sys.maxsize,
+        str(packet.get("tcp_direction", "")),
+        str(packet.get("tcp_stream_id", "")),
+        str(packet.get("packet_id", "")),
+    )
 
 
-#This function chooses one deterministic flow-group key for a canonical region.
-def flow_group_key(record: dict[str, Any]) -> str:
-    flow_context = get_record_flow_context(record)
-    assigned_flow_ids = [str(flow_id) for flow_id in flow_context.get("assigned_flow_ids", [])]
-    candidate_flow_ids = [str(flow_id) for flow_id in flow_context.get("candidate_flow_ids", [])]
-    mapping_status = str(flow_context.get("packet_mapping_status", "unknown") or "unknown")
-    if len(assigned_flow_ids) > 1:
-        return "unresolved_multiple_assigned_flow_ids_across_aliases"
-    if len(assigned_flow_ids) == 1:
-        return assigned_flow_ids[0]
-    if len(candidate_flow_ids) == 1:
-        return candidate_flow_ids[0]
-    return f"unresolved_{mapping_status}"
+#This function builds the bounded non-editable summary shared by all fragments of one flow parent group.
+def build_flow_summary(
+    *,
+    tcp_connection_id: str,
+    packets: list[dict[str, Any]],
+    connection: dict[str, Any],
+) -> dict[str, Any]:
+    for field in ["endpoint_a", "endpoint_b", "TCP_handshake", "TCP_closure"]:
+        if field not in connection:
+            raise ValueError(
+                f"Step 14 tcp_connections entry {tcp_connection_id!r} lacks required field {field!r}."
+            )
+    return {
+        "flow_id": tcp_connection_id,
+        "tcp_connection_id": tcp_connection_id,
+        "endpoint_a": connection["endpoint_a"],
+        "endpoint_b": connection["endpoint_b"],
+        "packet_count": len(packets),
+        "total_bytes": sum(int(packet.get("packet_length_bytes") or 0) for packet in packets),
+        "total_tcp_payload_bytes": sum(int(packet.get("payload_length_bytes") or 0) for packet in packets),
+        "TCP_handshake": connection["TCP_handshake"],
+        "TCP_closure": connection["TCP_closure"],
+        "flow_packet_first_index": 1,
+        "flow_packet_last_packet_index": len(packets),
+    }
 
 
-#This function groups physical packets by CICIDS flow context and orders each group in capture/TCP coordinates.
-def group_flow_based(records: list[Any]) -> list[dict[str, Any]]:
-    groups_by_key: dict[str, list[Any]] = {}
-    for record in records:
-        if not isinstance(record, dict):
-            raise ValueError("flow_based grouping expects every physical packet record to be a JSON object.")
-        key = flow_group_key(record)
-        groups_by_key.setdefault(key, []).append(record)
+#This function creates one deterministic parent group per Step 14 tcp_connection_id.
+def group_flow_context_aware(
+    records: list[Any],
+    tcp_connections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    connections_by_id: dict[str, dict[str, Any]] = {}
+    for connection in tcp_connections:
+        connection_id = str(connection.get("tcp_connection_id", "")).strip()
+        if not connection_id:
+            raise ValueError("Step 14 tcp_connections contains an entry without tcp_connection_id.")
+        if connection_id in connections_by_id:
+            raise ValueError(f"Duplicate Step 14 tcp_connection_id {connection_id!r}.")
+        connections_by_id[connection_id] = connection
+
+    packets_by_connection: dict[str, list[dict[str, Any]]] = {}
+    for packet in records:
+        if not isinstance(packet, dict):
+            raise ValueError("Flow-context-aware grouping requires physical packet objects.")
+        connection_id = str(packet.get("tcp_connection_id", "")).strip()
+        if not connection_id:
+            raise ValueError(
+                f"Flow-context-aware grouping cannot assign packet {packet.get('packet_id')!r}: "
+                "tcp_connection_id is missing."
+            )
+        if connection_id not in connections_by_id:
+            raise ValueError(
+                f"Packet {packet.get('packet_id')!r} references tcp_connection_id {connection_id!r}, "
+                "but Step 14 tcp_connections has no matching entry."
+            )
+        packets_by_connection.setdefault(connection_id, []).append(packet)
+
+    ordered_flows = []
+    for connection_id, packets in packets_by_connection.items():
+        ordered_packets = sorted(packets, key=packet_capture_order_key)
+        ordered_flows.append((packet_capture_order_key(ordered_packets[0]), connection_id, ordered_packets))
+    ordered_flows.sort(key=lambda item: (item[0], item[1]))
 
     groups = []
-    for group_index, key in enumerate(sorted(groups_by_key), start=1):
-        safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key).strip("_") or f"flow_group_{group_index:06d}"
-        parent_group_id = safe_key if safe_key.startswith(("flow_", "unresolved_")) else f"flow_{safe_key}"
-        unit_type = "unresolved" if parent_group_id.startswith("unresolved_") else "flow"
-        ordered_records = sorted(
-            groups_by_key[key],
-            key=lambda record: (
-                int(record.get("reduced_packet_index") or 0),
-                str(record.get("tcp_connection_id", "")),
-                str(record.get("tcp_stream_id", "")),
-                int(record.get("stream_start") or 0),
-                str(record.get("packet_id", "")),
-            ),
-        )
+    for group_index, (_, connection_id, packets) in enumerate(ordered_flows, start=1):
+        connection = connections_by_id[connection_id]
+        declared_packet_count = int(connection.get("packet_count") or 0)
+        if declared_packet_count != len(packets):
+            raise ValueError(
+                f"TCP connection {connection_id!r} declares packet_count={declared_packet_count}, "
+                f"but flow-context-aware grouping found {len(packets)} packets."
+            )
         groups.append(
             {
-                "parent_group_id": parent_group_id,
+                "parent_group_id": f"flow_group_{group_index:06d}",
                 "group_index": group_index,
-                "unit_type": unit_type,
-                "physical_packets": ordered_records,
+                "unit_type": "flow_context_aware_physical_packet_group",
+                "physical_packets": packets,
                 "records": [],
+                "parent_flow_summary": build_flow_summary(
+                    tcp_connection_id=connection_id,
+                    packets=packets,
+                    connection=connection,
+                ),
             }
         )
     return groups
 
 
 #This function selects the concrete grouping function based on pipeline.grouping_policy.
-def group_records_by_policy(*, records: list[Any], grouping_policy: str, group_size_packets: int | None) -> list[dict[str, Any]]:
+def group_records_by_policy(
+    *,
+    records: list[Any],
+    grouping_policy: str,
+    group_size_packets: int | None,
+    tcp_connections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     if grouping_policy == "fixed_packet_count":
         if group_size_packets is None:
             raise ValueError("group_size_packets is required when grouping_policy is fixed_packet_count.")
         return group_fixed_packet_count(records, group_size_packets)
-    if grouping_policy == "flow_based":
-        return group_flow_based(records)
+    if grouping_policy == "flow_context_aware":
+        return group_flow_context_aware(records, tcp_connections)
     raise ValueError(
         f"The selected grouping policy ({grouping_policy!r}) is not supported.\n"
         f"The supported policies are: {SUPPORTED_GROUPING_POLICIES!r}."
@@ -699,8 +707,8 @@ def policy_output_subdir(grouping_policy: str, group_size_packets: int | None) -
         if group_size_packets is None:
             raise ValueError("group_size_packets is required when grouping_policy is fixed_packet_count.")
         return f"fixed_packet_count_size_{group_size_packets:03d}"
-    if grouping_policy == "flow_based":
-        return "flow_based"
+    if grouping_policy == "flow_context_aware":
+        return "flow_context_aware"
     raise ValueError(
         f"The selected grouping policy ({grouping_policy!r}) is not supported.\n"
         f"The supported policies are: {SUPPORTED_GROUPING_POLICIES!r}."
@@ -725,7 +733,7 @@ def median_from_sorted(values: list[int]) -> int | float | None:
     return round((values[middle - 1] + values[middle]) / 2, 4)
 
 
-#This function summarizes parent-group sizes so flow-based experiments can be compared with fixed-size baselines.
+#This function summarizes parent-group sizes for manifest diagnostics.
 def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[str, Any]:
     sizes = sorted(len(group.get("physical_packets", group.get("records", []))) for group in parent_groups)
     canonical_sizes = sorted(len(group.get("records", [])) for group in parent_groups)
@@ -1128,9 +1136,6 @@ def build_compact_packet(packet: dict[str, Any], payload_plan: dict[str, Any], e
         "payload_view": payload_plan["payload_view"],
         "editable_regions": payload_plan["editable_regions"] if editable else [],
     }
-    if "flow_context" in packet:
-        flow_context = packet.get("flow_context") or {}
-        compact_packet["packet_mapping_status"] = flow_context.get("packet_mapping_status")
     return compact_packet
 
 
@@ -1148,8 +1153,17 @@ def build_group_metadata(
     timestamp_records = physical_packets or records
     first_timestamps = [record.get("timestamp_epoch_pcap", record.get("first_timestamp_epoch_pcap")) for record in timestamp_records]
     last_timestamps = [record.get("timestamp_epoch_pcap", record.get("last_timestamp_epoch_pcap")) for record in timestamp_records]
-    connections = {str(record.get("tcp_connection_id")) for record in records}
-    streams = {str(record.get("tcp_stream_id")) for record in records}
+    identity_records = physical_packets or records
+    connections = {
+        str(record["tcp_connection_id"])
+        for record in identity_records
+        if record.get("tcp_connection_id") is not None
+    }
+    streams = {
+        str(record["tcp_stream_id"])
+        for record in identity_records
+        if record.get("tcp_stream_id") is not None
+    }
     metadata = {
         "parent_group_id": parent_group_id,
         "group_index": group_index,
@@ -1172,11 +1186,6 @@ def build_group_metadata(
         "tcp_connection_count": len(connections),
         "tcp_stream_count": len(streams),
     }
-    if grouping_policy == "flow_based":
-        mapping_status_counts: Counter[str] = Counter()
-        for record in records:
-            mapping_status_counts.update(get_record_flow_context(record).get("packet_mapping_status_counts", {}))
-        metadata["packet_mapping_status_counts"] = dict(sorted(mapping_status_counts.items()))
     return metadata
 
 
@@ -1195,6 +1204,8 @@ def build_prompt_unit(
     input_token_budget: int,
     context_truncation: dict[str, Any] | None,
     modification_strategy: str,
+    fragment_flow_context: dict[str, Any] | None = None,
+    fragment_compact_unit_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload_enabled = editable_payload_regions_enabled(modification_strategy)
     prompt_unit = {
@@ -1228,6 +1239,10 @@ def build_prompt_unit(
         "packets": packets,
         "context_truncation": context_truncation,
     }
+    if fragment_flow_context is not None:
+        prompt_unit["fragment_flow_context"] = fragment_flow_context
+    if fragment_compact_unit_context is not None:
+        prompt_unit["fragment_compact_unit_context"] = fragment_compact_unit_context
     refresh_prompt_unit_counts(prompt_unit, token_config)
     if (
         prompt_unit["estimated_input_tokens"] > input_token_budget
@@ -1244,36 +1259,6 @@ def build_prompt_unit(
         }
         refresh_prompt_unit_counts(prompt_unit, token_config)
     return prompt_unit
-
-
-#This function records flow-window provenance without duplicating packet id lists already stored at prompt-unit level.
-def build_flow_packet_window_metadata(
-    *,
-    chunk_index: int,
-    chunk_count: int,
-    policy: str,
-    core_packet_count: int,
-    overlap_context_packet_count: int,
-    flow_payload_slide_window_overlap_units: int,
-    source_chunk_index: int | None = None,
-    sub_chunk_index: int | None = None,
-    sub_chunk_count: int | None = None,
-) -> dict[str, Any]:
-    metadata = {
-        "chunk_index": chunk_index,
-        "chunk_count": chunk_count,
-        "policy": policy,
-        "core_packet_count": core_packet_count,
-        "overlap_context_packet_count": overlap_context_packet_count,
-        "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
-    }
-    if source_chunk_index is not None:
-        metadata["source_chunk_index"] = source_chunk_index
-    if sub_chunk_index is not None:
-        metadata["sub_chunk_index"] = sub_chunk_index
-    if sub_chunk_count is not None:
-        metadata["sub_chunk_count"] = sub_chunk_count
-    return metadata
 
 
 #This function refreshes canonical ownership, compatibility aliases, counts, and token estimates after planning changes.
@@ -1360,43 +1345,18 @@ def build_token_aware_packet_chunks(
     return chunks
 
 
-#This function adds previous-packet context overlap to token-aware flow chunks.
-def add_flow_chunk_context_overlap(
-    *,
-    chunks: list[dict[str, Any]],
-    overlap_packets: int,
-) -> list[dict[str, Any]]:
-    if overlap_packets <= 0:
-        for chunk in chunks:
-            chunk["packets"] = chunk["core_packets"]
-            chunk["overlap_context_packet_ids"] = []
-        return chunks
-
-    for chunk_index, chunk in enumerate(chunks):
-        previous_core = [
-            packet
-            for previous_chunk in chunks[:chunk_index]
-            for packet in previous_chunk["core_packets"]
-        ]
-        overlap_context = [as_context_packet(packet) for packet in previous_core[-overlap_packets:]]
-        chunk["packets"] = overlap_context + chunk["core_packets"]
-        chunk["overlap_context_packet_ids"] = [str(packet["canonical_region_id"]) for packet in overlap_context]
+def add_chunk_packets(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for chunk in chunks:
+        chunk["packets"] = chunk["core_packets"]
     return chunks
 
 
 #This function selects local packet context for one payload-window prompt unit.
 def payload_window_context_indexes(
     *,
-    source_index: int,
     record_count: int,
-    grouping_policy: str,
-    overlap_units: int,
 ) -> range:
-    if grouping_policy != "flow_based":
-        return range(0, record_count)
-    start_index = max(0, source_index - overlap_units)
-    end_index = min(record_count, source_index + overlap_units + 1)
-    return range(start_index, end_index)
+    return range(0, record_count)
 
 
 #This function builds one payload-window prompt unit for a selected editable byte window.
@@ -1412,8 +1372,6 @@ def build_payload_window_prompt_unit(
     records: list[dict[str, Any]],
     payload_plans: list[dict[str, Any]],
     payload_window: dict[str, Any],
-    grouping_policy: str,
-    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     modification_strategy: str,
@@ -1424,10 +1382,7 @@ def build_payload_window_prompt_unit(
     }
     window_packets = []
     for context_index in payload_window_context_indexes(
-        source_index=source_index,
         record_count=len(records),
-        grouping_policy=grouping_policy,
-        overlap_units=flow_payload_slide_window_overlap_units,
     ):
         context_record = records[context_index]
         context_plan = payload_plans[context_index]
@@ -1464,8 +1419,6 @@ def build_budgeted_payload_window_prompt_units(
     records: list[dict[str, Any]],
     payload_plans: list[dict[str, Any]],
     payload_window: dict[str, Any],
-    grouping_policy: str,
-    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     modification_strategy: str,
@@ -1504,8 +1457,6 @@ def build_budgeted_payload_window_prompt_units(
             records=records,
             payload_plans=payload_plans,
             payload_window=candidate_window,
-            grouping_policy=grouping_policy,
-            flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
             token_config=token_config,
             input_token_budget=input_token_budget,
             modification_strategy=modification_strategy,
@@ -1525,7 +1476,7 @@ def build_budgeted_payload_window_prompt_units(
     return prompt_units, prompt_unit_index
 
 
-#This function creates base prompt units from compact packets, splitting large flows into packet windows when needed.
+#This function creates base prompt units from compact packets, splitting oversized groups into token-aware packet windows when needed.
 def build_base_prompt_units(
     *,
     experiment_id: str,
@@ -1536,8 +1487,6 @@ def build_base_prompt_units(
     unit_type: str,
     base_packets: list[dict[str, Any]],
     physical_packets: list[dict[str, Any]],
-    grouping_policy: str,
-    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     modification_strategy: str,
@@ -1579,28 +1528,13 @@ def build_base_prompt_units(
         token_config=token_config,
         input_token_budget=input_token_budget,
     )
-    if grouping_policy == "flow_based":
-        chunks = add_flow_chunk_context_overlap(
-            chunks=chunks,
-            overlap_packets=flow_payload_slide_window_overlap_units,
-        )
-    else:
-        chunks = add_flow_chunk_context_overlap(chunks=chunks, overlap_packets=0)
+    chunks = add_chunk_packets(chunks)
 
     prompt_units = []
     chunk_count = len(chunks)
     for chunk_index, chunk in enumerate(chunks, start=1):
         prompt_unit_id = parent_group_id if chunk_count == 1 else f"{parent_group_id}_chunk_{chunk_index:04d}"
         chunk_metadata = dict(group_metadata)
-        if chunk_count > 1:
-            chunk_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
-                chunk_index=chunk_index,
-                chunk_count=chunk_count,
-                policy="token_aware_packet_window",
-                core_packet_count=len(chunk["core_packets"]),
-                overlap_context_packet_count=len(chunk["overlap_context_packet_ids"]),
-                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
-            )
         prompt_unit = build_prompt_unit(
             experiment_id=experiment_id,
             source_packet_json=source_packet_json,
@@ -1627,21 +1561,11 @@ def build_base_prompt_units(
         current_fallback_chunk: list[dict[str, Any]] = []
         for packet in chunk["core_packets"]:
             candidate_packets = current_fallback_chunk + [packet]
-            candidate_metadata = dict(group_metadata)
-            candidate_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
-                chunk_index=chunk_index,
-                chunk_count=chunk_count,
-                policy="final_budget_subwindow_fallback",
-                core_packet_count=len(candidate_packets),
-                overlap_context_packet_count=0,
-                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
-                source_chunk_index=chunk_index,
-            )
             candidate_unit = build_prompt_unit(
                 experiment_id=experiment_id,
                 source_packet_json=source_packet_json,
                 source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=candidate_metadata,
+                group_metadata=group_metadata,
                 prompt_unit_id=prompt_unit_id,
                 unit_type=f"{unit_type}_packet_window",
                 packets=candidate_packets,
@@ -1650,7 +1574,7 @@ def build_base_prompt_units(
                 input_token_budget=input_token_budget,
                 context_truncation={
                     "applied": True,
-                    "reason": "final_flow_packet_window_exceeded_budget",
+                    "reason": "final_packet_window_exceeded_budget",
                     "policy": "split_core_packets_without_overlap",
                     "source_modification_unit_id": prompt_unit_id,
                 },
@@ -1667,23 +1591,11 @@ def build_base_prompt_units(
         sub_chunk_count = len(fallback_chunks)
         for sub_chunk_index, fallback_packets in enumerate(fallback_chunks, start=1):
             sub_prompt_unit_id = f"{prompt_unit_id}_sub_{sub_chunk_index:04d}"
-            sub_metadata = dict(group_metadata)
-            sub_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
-                chunk_index=chunk_index,
-                chunk_count=chunk_count,
-                policy="final_budget_subwindow_fallback",
-                core_packet_count=len(fallback_packets),
-                overlap_context_packet_count=0,
-                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
-                source_chunk_index=chunk_index,
-                sub_chunk_index=sub_chunk_index,
-                sub_chunk_count=sub_chunk_count,
-            )
             sub_prompt_unit = build_prompt_unit(
                 experiment_id=experiment_id,
                 source_packet_json=source_packet_json,
                 source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=sub_metadata,
+                group_metadata=group_metadata,
                 prompt_unit_id=sub_prompt_unit_id,
                 unit_type=f"{unit_type}_packet_window",
                 packets=fallback_packets,
@@ -1692,7 +1604,7 @@ def build_base_prompt_units(
                 input_token_budget=input_token_budget,
                 context_truncation={
                     "applied": True,
-                    "reason": "final_flow_packet_window_exceeded_budget",
+                    "reason": "final_packet_window_exceeded_budget",
                     "policy": "split_core_packets_without_overlap",
                     "source_modification_unit_id": prompt_unit_id,
                 },
@@ -1709,23 +1621,11 @@ def build_base_prompt_units(
             packet_sub_chunk_count = len(fallback_packets)
             for packet_sub_chunk_index, packet in enumerate(fallback_packets, start=1):
                 packet_prompt_unit_id = f"{sub_prompt_unit_id}_pkt_{packet_sub_chunk_index:04d}"
-                packet_metadata = dict(group_metadata)
-                packet_metadata["flow_packet_window"] = build_flow_packet_window_metadata(
-                    chunk_index=chunk_index,
-                    chunk_count=chunk_count,
-                    policy="final_budget_single_packet_fallback",
-                    core_packet_count=1,
-                    overlap_context_packet_count=0,
-                    flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
-                    source_chunk_index=chunk_index,
-                    sub_chunk_index=packet_sub_chunk_index,
-                    sub_chunk_count=packet_sub_chunk_count,
-                )
                 packet_prompt_unit = build_prompt_unit(
                     experiment_id=experiment_id,
                     source_packet_json=source_packet_json,
                     source_packet_json_schema_version=source_packet_json_schema_version,
-                    group_metadata=packet_metadata,
+                    group_metadata=group_metadata,
                     prompt_unit_id=packet_prompt_unit_id,
                     unit_type=f"{unit_type}_packet_window",
                     packets=[packet],
@@ -1734,7 +1634,7 @@ def build_base_prompt_units(
                     input_token_budget=input_token_budget,
                     context_truncation={
                         "applied": True,
-                        "reason": "final_flow_packet_window_exceeded_budget",
+                        "reason": "final_packet_window_exceeded_budget",
                         "policy": "single_packet_fallback_after_subwindow_overrun",
                         "source_modification_unit_id": sub_prompt_unit_id,
                     },
@@ -1781,21 +1681,114 @@ def build_header_only_prompt_units_for_group(
         )
         for packet in parent_group.get("physical_packets", [])
     ]
-    prompt_unit = build_prompt_unit(
-        experiment_id=experiment_id,
-        source_packet_json=source_packet_json,
-        source_packet_json_schema_version=source_packet_json_schema_version,
-        group_metadata=group_metadata,
-        prompt_unit_id=parent_group_id,
-        unit_type="header_only_physical_packet_group",
-        packets=[],
-        physical_packets=compact_physical_packets,
-        token_config=token_config,
-        input_token_budget=input_token_budget,
-        context_truncation=None,
-        modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
-    )
-    return [prompt_unit]
+    if grouping_policy != "flow_context_aware":
+        return [
+            build_prompt_unit(
+                experiment_id=experiment_id,
+                source_packet_json=source_packet_json,
+                source_packet_json_schema_version=source_packet_json_schema_version,
+                group_metadata=group_metadata,
+                prompt_unit_id=parent_group_id,
+                unit_type="header_only_physical_packet_group",
+                packets=[],
+                physical_packets=compact_physical_packets,
+                token_config=token_config,
+                input_token_budget=input_token_budget,
+                context_truncation=None,
+                modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
+            )
+        ]
+
+    parent_flow_summary = parent_group.get("parent_flow_summary")
+    if not isinstance(parent_flow_summary, dict):
+        raise ValueError(f"Flow parent group {parent_group_id!r} lacks parent_flow_summary.")
+
+    flow_packet_positions = {
+        str(packet["packet_id"]): position
+        for position, packet in enumerate(compact_physical_packets, start=1)
+    }
+
+    def build_fragment_unit(
+        fragment_packets: list[dict[str, Any]],
+        fragment_index: int,
+        fragment_count: int,
+    ) -> dict[str, Any]:
+        first_packet_id = str(fragment_packets[0]["packet_id"])
+        last_packet_id = str(fragment_packets[-1]["packet_id"])
+        fragment_id = parent_group_id if fragment_count == 1 else f"{parent_group_id}_fragment_{fragment_index:04d}"
+        fragment_flow_context = {
+            **parent_flow_summary,
+            "flow_packet_first_index": flow_packet_positions[first_packet_id],
+            "flow_packet_last_packet_index": flow_packet_positions[last_packet_id],
+        }
+        fragment_compact_unit_context = {
+            "parent_group_id": parent_group_id,
+            "group_fragment_id": fragment_id,
+            "compact_unit_index": fragment_index,
+            "compact_unit_count": fragment_count,
+            "fragment_physical_packet_count": len(fragment_packets),
+            "fragment_first_packet_id": first_packet_id,
+            "fragment_last_packet_id": last_packet_id,
+        }
+        return build_prompt_unit(
+            experiment_id=experiment_id,
+            source_packet_json=source_packet_json,
+            source_packet_json_schema_version=source_packet_json_schema_version,
+            group_metadata=group_metadata,
+            prompt_unit_id=fragment_id,
+            unit_type=(
+                "header_only_flow_context_aware_group"
+                if fragment_count == 1
+                else "header_only_flow_context_aware_group_fragment"
+            ),
+            packets=[],
+            physical_packets=fragment_packets,
+            token_config=token_config,
+            input_token_budget=input_token_budget,
+            context_truncation=None,
+            modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
+            fragment_flow_context=fragment_flow_context,
+            fragment_compact_unit_context=fragment_compact_unit_context,
+        )
+
+    chunks: list[list[dict[str, Any]]] = []
+    current_chunk: list[dict[str, Any]] = []
+    for packet in compact_physical_packets:
+        candidate_chunk = current_chunk + [packet]
+        candidate_unit = build_fragment_unit(candidate_chunk, len(chunks) + 1, 1)
+        if current_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
+            chunks.append(current_chunk)
+            current_chunk = [packet]
+        else:
+            current_chunk = candidate_chunk
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    while True:
+        fragment_count = len(chunks)
+        units = [
+            build_fragment_unit(fragment_packets, fragment_index, fragment_count)
+            for fragment_index, fragment_packets in enumerate(chunks, start=1)
+        ]
+        oversized_index = next(
+            (
+                index
+                for index, unit in enumerate(units)
+                if unit["estimated_input_tokens"] > input_token_budget and len(chunks[index]) > 1
+            ),
+            None,
+        )
+        if oversized_index is None:
+            for unit in units:
+                if unit["estimated_input_tokens"] > input_token_budget:
+                    mark_over_budget_prompt_unit(unit, unit["modification_unit_id"])
+            return units
+        oversized_chunk = chunks[oversized_index]
+        midpoint = max(1, len(oversized_chunk) // 2)
+        chunks[oversized_index : oversized_index + 1] = [
+            oversized_chunk[:midpoint],
+            oversized_chunk[midpoint:],
+        ]
 
 
 #This function creates all compact prompt units for one fixed-size parent group.
@@ -1813,7 +1806,6 @@ def build_prompt_units_for_group(
     parent_group: dict[str, Any],
     header_field_definitions: dict[str, Any],
     header_policy: dict[str, Any],
-    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     modification_strategy: str,
@@ -1867,8 +1859,6 @@ def build_prompt_units_for_group(
         unit_type=unit_type,
         base_packets=base_packets,
         physical_packets=compact_physical_packets,
-        grouping_policy=grouping_policy,
-        flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
         input_token_budget=input_token_budget,
         modification_strategy=modification_strategy,
@@ -1888,8 +1878,6 @@ def build_prompt_units_for_group(
                 records=records,
                 payload_plans=payload_plans,
                 payload_window=payload_window,
-                grouping_policy=grouping_policy,
-                flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
                 token_config=token_config,
                 input_token_budget=input_token_budget,
                 modification_strategy=modification_strategy,
@@ -1929,11 +1917,10 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "editable_region_count": prompt_unit["editable_region_count"],
         "token_estimation": prompt_unit.get("token_estimation"),
         "context_truncation": prompt_unit["context_truncation"],
+        "fragment_flow_context": prompt_unit.get("fragment_flow_context"),
+        "fragment_compact_unit_context": prompt_unit.get("fragment_compact_unit_context"),
         "modification_unit_file_size_bytes_pretty": prompt_unit_path.stat().st_size,
     }
-    for key in ["packet_mapping_status_counts", "flow_packet_window"]:
-        if key in group_metadata:
-            summary[key] = group_metadata[key]
     return summary
 
 
@@ -2086,7 +2073,6 @@ def build_manifest(
     packet_json: dict[str, Any],
     grouping_policy: str,
     group_size_packets: int | None,
-    flow_payload_slide_window_overlap_units: int,
     token_config: dict[str, Any],
     input_token_budget: int,
     header_policy: dict[str, Any],
@@ -2120,7 +2106,6 @@ def build_manifest(
             "group_size_packets": group_size_packets,
             "group_size_physical_packets": group_size_packets,
             "group_size_canonical_regions": None,
-            "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
             "parent_group_count": parent_group_count,
             "parent_group_size_statistics": parent_group_stats,
             "modification_unit_count": len(prompt_unit_summaries),
@@ -2190,17 +2175,15 @@ def run_grouping(
     header_policy = load_header_editability_policy(config, config_path)
     global ACTIVE_EDITABLE_HEADER_FIELDS
     ACTIVE_EDITABLE_HEADER_FIELDS = editable_header_fields_from_policy(header_policy)
-    flow_payload_slide_window_overlap_units = get_flow_payload_slide_window_overlap_units(config, grouping_policy)
 
     packet_json = validate_packet_json(read_json(input_json_path), input_json_path)
-    if grouping_policy == "flow_based" and not packet_json.get("metadata", {}).get("include_flow_context"):
-        raise ValueError("flow_based grouping requires packet_json_v4 generated with flow context enabled.")
     traffic = packet_json["traffic"]
     ordered_traffic = sorted(traffic, key=lambda packet: int(packet["reduced_packet_index"]))
     parent_groups = group_records_by_policy(
         records=ordered_traffic,
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
+        tcp_connections=packet_json["tcp_connections"],
     )
     physical_parent_group_coverage = validate_physical_parent_group_coverage(parent_groups, ordered_traffic)
     canonical_records = build_canonical_region_records(packet_json)
@@ -2282,7 +2265,6 @@ def run_grouping(
             parent_group=parent_group,
             header_field_definitions=packet_json["header_field_definitions"],
             header_policy=header_policy,
-            flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
             token_config=token_config,
             input_token_budget=input_token_budget,
             modification_strategy=modification_strategy,
@@ -2315,7 +2297,6 @@ def run_grouping(
         packet_json=packet_json,
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
-        flow_payload_slide_window_overlap_units=flow_payload_slide_window_overlap_units,
         token_config=token_config,
         input_token_budget=input_token_budget,
         header_policy=header_policy,
@@ -2341,7 +2322,6 @@ def run_grouping(
         "packet_count": len(traffic),
         "canonical_region_count": len(canonical_records),
         "group_size_packets": effective_group_size,
-        "flow_payload_slide_window_overlap_units": flow_payload_slide_window_overlap_units,
         "parent_group_size_statistics": parent_group_stats,
         "input_token_budget": input_token_budget,
         "modification_strategy": modification_strategy,
@@ -2402,8 +2382,8 @@ def main() -> None:
         print(f"Canonical TCP regions grouped: {result['canonical_region_count']}")
         print(f"Parent group count: {result['parent_group_count']}")
         print(f"Modification unit count: {result['modification_unit_count']}")
-        print(f"Configured group size (physical packets): {result['group_size_packets']}")
-        print(f"Flow payload slide window overlap units: {result['flow_payload_slide_window_overlap_units']}")
+        if result["group_size_packets"] is not None:
+            print(f"Configured group size (physical packets): {result['group_size_packets']}")
         print(f"Parent group size statistics: {result['parent_group_size_statistics']}")
         print(f"Input token budget: {result['input_token_budget']}")
         print(f"Output directory: {result['output_dir']}")

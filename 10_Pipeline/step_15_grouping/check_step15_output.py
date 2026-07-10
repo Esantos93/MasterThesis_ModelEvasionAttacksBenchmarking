@@ -159,6 +159,7 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     physical_packet_ids: list[str] = []
     payload_window_count = 0
     editable_payload_region_count = 0
+    flow_fragments_by_parent: dict[str, list[tuple[dict[str, Any], dict[str, Any], int]]] = {}
 
     for entry in manifest["compact_modification_units"]:
         unit_path = resolve_existing_path(entry.get("modification_unit_file"), manifest_path.parent)
@@ -175,6 +176,36 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         payload_window_count += int(unit.get("payload_window_count") or 0)
         editable_payload_region_count += int(unit.get("editable_payload_region_count") or 0)
         editable_region_distribution[int(unit.get("editable_region_count") or 0)] += 1
+
+        if metadata.get("grouping_policy") == "flow_context_aware":
+            flow_context = unit.get("fragment_flow_context")
+            compact_context = unit.get("fragment_compact_unit_context")
+            if not isinstance(flow_context, dict) or not isinstance(compact_context, dict):
+                raise ValueError(f"Flow-context-aware unit {unit_path} lacks its two fragment context objects.")
+            required_flow_fields = {
+                "flow_id",
+                "tcp_connection_id",
+                "endpoint_a",
+                "endpoint_b",
+                "packet_count",
+                "total_bytes",
+                "total_tcp_payload_bytes",
+                "TCP_handshake",
+                "TCP_closure",
+                "flow_packet_first_index",
+                "flow_packet_last_packet_index",
+            }
+            missing_flow_fields = sorted(required_flow_fields - set(flow_context))
+            if missing_flow_fields:
+                raise ValueError(f"Flow context in {unit_path} lacks fields: {missing_flow_fields}")
+            if flow_context["flow_id"] != flow_context["tcp_connection_id"]:
+                raise ValueError(f"Flow context in {unit_path} does not use tcp_connection_id as flow_id.")
+            parent_group_id = str(unit.get("parent_group_id"))
+            if compact_context.get("parent_group_id") != parent_group_id:
+                raise ValueError(f"Compact-unit context in {unit_path} has the wrong parent_group_id.")
+            flow_fragments_by_parent.setdefault(parent_group_id, []).append(
+                (flow_context, compact_context, len(unit.get("physical_packets", [])))
+            )
 
         for physical_packet in unit.get("physical_packets", []):
             packet_id = str(physical_packet.get("packet_id"))
@@ -204,6 +235,26 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     if duplicate_packets:
         raise ValueError(f"Physical packets appear in more than one header-only unit: {duplicate_packets[:10]}")
 
+    if metadata.get("grouping_policy") == "flow_context_aware":
+        if len(flow_fragments_by_parent) != int(metadata.get("parent_group_count") or -1):
+            raise ValueError("Flow-context-aware parent group count does not match unit contexts.")
+        for parent_group_id, fragments in flow_fragments_by_parent.items():
+            fragments.sort(key=lambda item: int(item[1]["compact_unit_index"]))
+            fragment_count = len(fragments)
+            expected_first_index = 1
+            for expected_index, (flow_context, compact_context, physical_packet_count) in enumerate(fragments, start=1):
+                if int(compact_context.get("compact_unit_index") or -1) != expected_index:
+                    raise ValueError(f"Non-contiguous compact unit indexes in {parent_group_id!r}.")
+                if int(compact_context.get("compact_unit_count") or -1) != fragment_count:
+                    raise ValueError(f"Wrong compact_unit_count in {parent_group_id!r}.")
+                first_index = int(flow_context["flow_packet_first_index"])
+                last_index = int(flow_context["flow_packet_last_packet_index"])
+                if first_index != expected_first_index or last_index - first_index + 1 != physical_packet_count:
+                    raise ValueError(f"Invalid flow-relative packet range in {parent_group_id!r}.")
+                expected_first_index = last_index + 1
+            if expected_first_index - 1 != int(fragments[0][0]["packet_count"]):
+                raise ValueError(f"Flow fragments do not cover the full parent flow {parent_group_id!r}.")
+
     return {
         "unit_schema_counts": dict(sorted(unit_schema_counts.items())),
         "editable_region_distribution": dict(sorted(editable_region_distribution.items())),
@@ -212,6 +263,8 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         "payload_window_count": payload_window_count,
         "editable_payload_region_count": editable_payload_region_count,
         "physical_packet_units_covered": len(physical_packet_ids),
+        "flow_context_parent_count": len(flow_fragments_by_parent),
+        "flow_context_fragment_count": sum(len(fragments) for fragments in flow_fragments_by_parent.values()),
     }
 
 
@@ -244,6 +297,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-strategy", choices=[HEADER_ONLY_STRATEGY, "hybrid"], help="Expected Step 15 strategy.")
     parser.add_argument("--expected-packet-count", type=int, help="Expected physical source packet count.")
     parser.add_argument("--expected-group-size", type=int, help="Expected fixed physical packet group size.")
+    parser.add_argument("--expected-grouping-policy", choices=["fixed_packet_count", "flow_context_aware"])
+    parser.add_argument("--expected-parent-group-count", type=int)
     return parser.parse_args()
 
 
@@ -254,6 +309,20 @@ def main() -> None:
     expected_strategy = None if args.expected_strategy == "hybrid" else args.expected_strategy
     manifest_path = find_manifest(output_dir, expected_strategy)
     manifest = read_json(manifest_path)
+    metadata = manifest.get("metadata", {})
+    if args.expected_grouping_policy and metadata.get("grouping_policy") != args.expected_grouping_policy:
+        raise ValueError(
+            f"Expected grouping_policy={args.expected_grouping_policy!r}, "
+            f"found {metadata.get('grouping_policy')!r}."
+        )
+    if (
+        args.expected_parent_group_count is not None
+        and int(metadata.get("parent_group_count") or -1) != args.expected_parent_group_count
+    ):
+        raise ValueError(
+            f"Expected parent_group_count={args.expected_parent_group_count}, "
+            f"found {metadata.get('parent_group_count')!r}."
+        )
     common_summary = check_common_manifest(
         manifest=manifest,
         manifest_path=manifest_path,

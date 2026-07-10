@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 
 from common.prompt_projection import (
+    build_compact_patch_prompt_parts,
     estimate_compact_patch_prompt_tokens,
     load_prompt_input_json_data_structure_from_config,
     load_prompt_instructions_profile_from_config,
 )
 from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
+from step_15_grouping.check_step15_output import check_header_only_units
 from step_15_grouping.group_packets import run_grouping
 
 
@@ -20,10 +22,6 @@ def tcp_record(
     packet_number: int,
     sequence: int,
     payload: bytes,
-    *,
-    assigned_flow_ids: list[str] | None = None,
-    candidate_flow_ids: list[str] | None = None,
-    mapping_status: str = "mapped_unique",
 ) -> dict:
     return {
         "packet_id": f"packet_{packet_number:06d}",
@@ -80,16 +78,11 @@ def tcp_record(
         },
         "canonical_region_ids": [],
         "canonical_region_mappings": [],
-        "flow_context": {
-            "assigned_flow_ids": assigned_flow_ids or [],
-            "candidate_flow_ids": candidate_flow_ids or [],
-            "packet_mapping_status": mapping_status,
-        },
     }
 
 
 # This helper wraps canonicalizer output in the packet_json_v4 structure consumed by Step 15.
-def packet_json_v4(records: list[dict], include_flow_context: bool) -> dict:
+def packet_json_v4(records: list[dict]) -> dict:
     canonical = canonicalize_tcp_records(records)
     region_ids_by_packet: dict[str, list[str]] = {}
     mappings_by_packet: dict[str, list[dict]] = {}
@@ -111,7 +104,6 @@ def packet_json_v4(records: list[dict], include_flow_context: bool) -> dict:
         "metadata": {
             "schema_version": "packet_json_v4",
             "grouping_unit": "physical_packet",
-            "include_flow_context": include_flow_context,
         },
         "identity_fields": [
             "packet_id",
@@ -149,8 +141,6 @@ def config(
         pipeline["modification_strategy"] = modification_strategy
     if group_size is not None:
         pipeline["group_size_packets"] = group_size
-    if grouping_policy == "flow_based":
-        pipeline["flow_payload_slide_window_overlap_units"] = 1
     return {
         "experiment": {
             "experiment_id": "step15_canonical_test",
@@ -198,11 +188,11 @@ class CanonicalStep15Tests(unittest.TestCase):
 
     def test_fixed_size_counts_physical_packets_and_deduplicates_payload_retransmissions(self) -> None:
         records = [
-            tcp_record(1, 1000, b"attack", assigned_flow_ids=["flow_000001"]),
-            tcp_record(2, 1000, b"attack", assigned_flow_ids=["flow_000001"]),
-            tcp_record(3, 1006, b"next", assigned_flow_ids=["flow_000001"]),
+            tcp_record(1, 1000, b"attack"),
+            tcp_record(2, 1000, b"attack"),
+            tcp_record(3, 1006, b"next"),
         ]
-        source = packet_json_v4(records, include_flow_context=False)
+        source = packet_json_v4(records)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -248,37 +238,9 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertEqual("headers_full_classification_record_v1", first_header_record["schema_version"])
         self.assertGreater(len(first_header_record["header_field_classifications"]), 3)
 
-    def test_flow_based_groups_canonical_regions_by_shared_flow_context(self) -> None:
-        records = [
-            tcp_record(1, 1000, b"attack", assigned_flow_ids=["flow_000023"]),
-            tcp_record(2, 1000, b"attack", assigned_flow_ids=["flow_000023"]),
-            tcp_record(
-                3,
-                1006,
-                b"next",
-                candidate_flow_ids=["flow_000023"],
-                mapping_status="unassigned_time_window_mismatch",
-            ),
-        ]
-        source = packet_json_v4(records, include_flow_context=True)
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            manifest, units = self.run_step15(source, config(root, "flow_based"), root)
-
-        self.assertEqual(1, manifest["metadata"]["parent_group_count"])
-        self.assertTrue(all(unit["parent_group_id"] == "flow_000023" for unit in units))
-        editable_ids = {
-            region_id
-            for unit in units
-            for region_id in unit["editable_canonical_region_ids"]
-        }
-        self.assertEqual(2, len(editable_ids))
-        self.assertTrue(all(unit["source_packet_json_schema_version"] == "packet_json_v4" for unit in units))
-
     def test_large_canonical_region_windows_cover_bytes_once(self) -> None:
         payload = bytes(index % 251 for index in range(600))
-        source = packet_json_v4([tcp_record(1, 1000, payload)], include_flow_context=False)
+        source = packet_json_v4([tcp_record(1, 1000, payload)])
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -320,20 +282,12 @@ class CanonicalStep15Tests(unittest.TestCase):
 
     def test_oversized_payload_window_is_split_until_each_editable_unit_fits_budget(self) -> None:
         payload = bytes(index % 251 for index in range(1200))
-        records = [
-            tcp_record(
-                1,
-                1000,
-                payload,
-                candidate_flow_ids=["flow_a", "flow_b"],
-                mapping_status="ambiguous_duplicate_overlapping",
-            )
-        ]
-        source = packet_json_v4(records, include_flow_context=True)
+        records = [tcp_record(1, 1000, payload)]
+        source = packet_json_v4(records)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            active_config = config(root, "flow_based")
+            active_config = config(root, "fixed_packet_count", group_size=1)
             active_config["llm"]["payload_window_left_context_bytes"] = 128
             active_config["llm"]["payload_window_editable_center_bytes"] = 1024
             active_config["llm"]["payload_window_right_context_bytes"] = 128
@@ -364,7 +318,7 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
 
     def test_step15_rejects_packet_json_v3(self) -> None:
-        source = packet_json_v4([tcp_record(1, 1000, b"attack")], include_flow_context=False)
+        source = packet_json_v4([tcp_record(1, 1000, b"attack")])
         source["metadata"]["schema_version"] = "packet_json_v3"
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -377,7 +331,7 @@ class CanonicalStep15Tests(unittest.TestCase):
             tcp_record(packet_number, 1000 + packet_number * 10, b"attack")
             for packet_number in range(1, 8)
         ]
-        source = packet_json_v4(records, include_flow_context=False)
+        source = packet_json_v4(records)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -435,7 +389,7 @@ class CanonicalStep15Tests(unittest.TestCase):
 
     def test_header_only_strategy_uses_active_header_policy_fields(self) -> None:
         records = [tcp_record(packet_number, 1000 + packet_number * 10, b"attack") for packet_number in range(1, 3)]
-        source = packet_json_v4(records, include_flow_context=False)
+        source = packet_json_v4(records)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -485,6 +439,128 @@ class CanonicalStep15Tests(unittest.TestCase):
             {region["field"] for region in editable_regions},
         )
         self.assertEqual([8], [unit["editable_header_region_count"] for unit in units])
+
+    def test_flow_context_aware_groups_by_tcp_connection_and_propagates_non_editable_context(self) -> None:
+        first_flow_records = [tcp_record(packet_number, 1000 + packet_number, b"a") for packet_number in [1, 3, 5]]
+        second_flow_records = [tcp_record(packet_number, 2000 + packet_number, b"b") for packet_number in [2, 4]]
+        for record in second_flow_records:
+            record["src_port"] = 23456
+            record["tcp_header"]["source_port"] = 23456
+        records = sorted(first_flow_records + second_flow_records, key=lambda record: record["reduced_packet_index"])
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="header_only_strategy_v1",
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+            checker_summary = check_header_only_units(
+                manifest,
+                root / "05_groups" / "flow_context_aware" / "compact_modification_units_manifest_v2.json",
+            )
+
+        connection_ids = {connection["tcp_connection_id"] for connection in source["tcp_connections"]}
+        self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        self.assertEqual("flow_context_aware", manifest["metadata"]["grouping_policy"])
+        self.assertIsNone(manifest["metadata"]["group_size_packets"])
+        self.assertEqual(5, manifest["metadata"]["physical_parent_group_coverage"]["covered_physical_packet_count"])
+        self.assertEqual(connection_ids, {unit["fragment_flow_context"]["flow_id"] for unit in units})
+        self.assertEqual(2, checker_summary["flow_context_parent_count"])
+        self.assertTrue(
+            all(
+                unit["fragment_flow_context"]["flow_id"]
+                == unit["fragment_flow_context"]["tcp_connection_id"]
+                for unit in units
+            )
+        )
+        self.assertTrue(all("fragment_compact_unit_context" in unit for unit in units))
+        self.assertTrue(all(unit["packets"] == [] for unit in units))
+        self.assertTrue(all(unit["editable_payload_region_count"] == 0 for unit in units))
+        self.assertTrue(all("flow_context" not in unit for unit in units))
+        self.assertTrue(all("assigned_flow_ids" not in unit for unit in units))
+        self.assertTrue(all("candidate_flow_ids" not in unit for unit in units))
+        _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
+        projected_prompt = build_compact_patch_prompt_parts(
+            prompt_unit=units[0],
+            prompt_input_structure=load_prompt_input_json_data_structure_from_config(active_config),
+            instruction_lines=instruction_lines,
+        )["json_prompt_input"]
+        self.assertEqual(units[0]["fragment_flow_context"], projected_prompt["fragment_flow_context"])
+        self.assertEqual(
+            units[0]["fragment_compact_unit_context"],
+            projected_prompt["fragment_compact_unit_context"],
+        )
+        self.assertTrue(projected_prompt["editable_headers"])
+        covered_packet_ids = [
+            packet["packet_id"]
+            for unit in units
+            for packet in unit["physical_packets"]
+        ]
+        self.assertEqual(
+            sorted(record["packet_id"] for record in records),
+            sorted(covered_packet_ids),
+        )
+        self.assertEqual(len(covered_packet_ids), len(set(covered_packet_ids)))
+
+    def test_flow_context_aware_splits_large_flow_into_budgeted_fragments(self) -> None:
+        records = [tcp_record(packet_number, 1000 + packet_number * 10, b"payload") for packet_number in range(1, 21)]
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="header_only_strategy_v1",
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(1, manifest["metadata"]["parent_group_count"])
+        self.assertGreater(len(units), 1)
+        self.assertTrue(
+            all(unit["estimated_input_tokens"] <= manifest["metadata"]["input_token_budget"] for unit in units)
+        )
+        self.assertEqual(
+            list(range(1, len(units) + 1)),
+            [unit["fragment_compact_unit_context"]["compact_unit_index"] for unit in units],
+        )
+        self.assertTrue(
+            all(
+                unit["fragment_compact_unit_context"]["compact_unit_count"] == len(units)
+                for unit in units
+            )
+        )
+        expected_first_index = 1
+        for unit in units:
+            flow_context = unit["fragment_flow_context"]
+            self.assertEqual(expected_first_index, flow_context["flow_packet_first_index"])
+            self.assertGreaterEqual(flow_context["flow_packet_last_packet_index"], expected_first_index)
+            expected_first_index = flow_context["flow_packet_last_packet_index"] + 1
+            self.assertNotIn("fragment_flow_context", unit["physical_packets"])
+            editable_regions = [
+                region
+                for packet in unit["physical_packets"]
+                for region in packet["header_field_classifications"]
+            ]
+            self.assertTrue(all(region["identity_type"] == "physical_header_region" for region in editable_regions))
+        self.assertEqual(21, expected_first_index)
+
+    def test_flow_context_aware_rejects_packet_without_tcp_connection_id(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"payload")])
+        source["traffic"][0].pop("tcp_connection_id")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="header_only_strategy_v1",
+            )
+            with self.assertRaisesRegex(ValueError, "tcp_connection_id is missing"):
+                self.run_step15(source, active_config, root)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,6 @@ Known active config references:
 | Config family | Policy |
 | --- | --- |
 | `config_LLM_baseline_Llama31_8B.json` and other baseline model configs | `header_v1.json` |
-| `config_LLM_flow_based_headers.json` | `header_v1.json` |
 | `config_LLM_expanded_header_editability.json` | `header_expanded_v1.json` historical/experimental expanded-header config; not part of the current Main Baseline matrix unless explicitly reopened. |
 
 ## `header_v1.json`
