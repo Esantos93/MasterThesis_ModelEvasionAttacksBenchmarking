@@ -20,6 +20,8 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
             "canonical_region_ids",
             "editable_canonical_region_ids",
             "context_canonical_region_ids",
+            "fragment_flow_context",
+            "fragment_compact_unit_context",
         ],
         "editable_header_table_name": "editable_headers",
         "editable_header_columns_name": "editable_headers_columns",
