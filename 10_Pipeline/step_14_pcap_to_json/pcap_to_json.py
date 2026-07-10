@@ -92,25 +92,8 @@ def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     }
 
 
-# This function decides whether step 14 should export flow metadata and per-packet flow context for the selected experiment.
-def should_include_flow_context(config: dict[str, Any]) -> bool:
-    grouping_policy = str(config.get("pipeline", {}).get("grouping_policy", "")).strip()
-    return grouping_policy != "fixed_packet_count"
-
-
-# This function converts the step 13 flow table into a lookup keyed by flow_id.
-def flow_table_by_id(flow_table: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    flows = flow_table.get("flows")
-    if not isinstance(flows, list):
-        raise ValueError("Step 13 flow table must contain a 'flows' list.")
-    return {str(flow["flow_id"]): flow for flow in flows if flow.get("flow_id")}
-
-
 # This function loads the definitive compact_v1 artifacts produced by step 13.
-def load_step13_context(
-    packet_manifest_path: str | Path,
-    include_flow_context: bool,
-) -> tuple[dict[int, dict[str, Any]], dict[str, dict[str, Any]]]:
+def load_step13_context(packet_manifest_path: str | Path) -> dict[int, dict[str, Any]]:
     manifest_path = Path(packet_manifest_path)
     manifest = read_json(manifest_path)
     if manifest.get("metadata", {}).get("artifact_format") != "compact_v1":
@@ -119,11 +102,6 @@ def load_step13_context(
     artifacts = manifest.get("artifacts", {})
     packet_index_path = resolve_artifact_path(manifest_path, artifacts.get("packet_index", ""))
     packet_records = read_jsonl(packet_index_path)
-    flow_lookup = {}
-    if include_flow_context:
-        flow_table_path = resolve_artifact_path(manifest_path, artifacts.get("flow_table", ""))
-        flow_lookup = flow_table_by_id(read_json(flow_table_path))
-
     context_by_index = {}
     for record in packet_records:
         reduced_index = reduced_index_from_packet_id(record.get("packet_id", ""))
@@ -132,7 +110,7 @@ def load_step13_context(
             "reduced_packet_index": reduced_index,
         }
 
-    return context_by_index, flow_lookup
+    return context_by_index
 
 
 # This function estimates JSON size with compact separators without changing the record itself.
@@ -140,13 +118,12 @@ def compact_record_size(record: dict[str, Any]) -> int:
     return len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
-# This function builds one JSON packet record by combining Scapy packet fields with step 13 identity and flow context.
+# This function builds one JSON packet record by combining Scapy packet facts with step 13 packet identity.
 def build_json_record(
     packet: Any,
     reduced_packet_index: int,
     packet_context: dict[str, Any],
     include_frame_hex: bool,
-    include_flow_context: bool,
 ) -> dict[str, Any]:
     packet_bytes = bytes(packet)
     packet_id = str(packet_context["packet_id"])
@@ -208,25 +185,9 @@ def build_json_record(
         "captured_frame_bytes_accounted_for": facts["captured_frame_bytes_accounted_for"],
         "packet_length_bytes": len(packet_bytes),
     }
-    if include_flow_context:
-        record["flow_context"] = {
-            "candidate_flow_ids": packet_context.get("candidate_flow_ids", []),
-            "assigned_flow_ids": packet_context.get("assigned_flow_ids", []),
-            "packet_mapping_status": packet_context.get("packet_mapping_status", ""),
-        }
     if include_frame_hex:
         record["packet_bytes_hex"] = bytes_to_hex(packet_bytes)
     return record
-
-
-# This helper returns the sorted flow IDs referenced by the exported packet records.
-def referenced_flow_ids(records: list[dict[str, Any]]) -> list[str]:
-    flow_ids = set()
-    for record in records:
-        context = record.get("flow_context", {})
-        flow_ids.update(str(flow_id) for flow_id in context.get("candidate_flow_ids", []))
-        flow_ids.update(str(flow_id) for flow_id in context.get("assigned_flow_ids", []))
-    return sorted(flow_ids)
 
 
 # This function verifies packet order, stable identity and complete structured headers before the artifact is written.
@@ -309,12 +270,11 @@ def convert_pcap_to_json_records(
 
     scapy = import_scapy()
     PcapReader = scapy["PcapReader"]
-    include_flow_context = should_include_flow_context(config)
     input_pcap_path = Path(input_pcap).expanduser()
     if not input_pcap_path.exists():
         raise FileNotFoundError(f"Selected PCAP does not exist: {input_pcap_path}")
 
-    context_by_index, flow_lookup = load_step13_context(packet_manifest_path, include_flow_context)
+    context_by_index = load_step13_context(packet_manifest_path)
     records = []
     protocol_counts: Counter[str] = Counter()
 
@@ -330,7 +290,6 @@ def convert_pcap_to_json_records(
                 reduced_packet_index=reduced_packet_index,
                 packet_context=packet_context,
                 include_frame_hex=include_frame_hex,
-                include_flow_context=include_flow_context,
             )
             records.append(record)
             protocol_counts[str(record.get("transport_protocol") or "OTHER")] += 1
@@ -366,7 +325,6 @@ def convert_pcap_to_json_records(
             "schema_version": SCHEMA_VERSION,
             "grouping_policy": config.get("pipeline", {}).get("grouping_policy", ""),
             "grouping_unit": GROUPING_UNIT,
-            "include_flow_context": include_flow_context,
             "source_selected_pcap": str(input_pcap_path),
             "packet_manifest_path": str(packet_manifest_path),
             "packet_count": len(records),
@@ -398,15 +356,6 @@ def convert_pcap_to_json_records(
         "tcp_representation_sets": tcp_canonicalization["tcp_representation_sets"],
         "tcp_canonicalization_conflicts": tcp_canonicalization["tcp_canonicalization_conflicts"],
     }
-    if include_flow_context:
-        flow_ids = referenced_flow_ids(records)
-        output["flow_context_fields"] = [
-            "candidate_flow_ids",
-            "assigned_flow_ids",
-            "packet_mapping_status",
-        ]
-        output["flows"] = [flow_lookup[flow_id] for flow_id in flow_ids if flow_id in flow_lookup]
-        output["metadata"]["flow_count"] = len(output["flows"])
     return output
 
 

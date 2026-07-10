@@ -12,6 +12,8 @@ TCP_SYN_FLAG = 0x02
 TCP_FIN_FLAG = 0x01
 TCP_ACK_FLAG = 0x10
 TCP_RST_FLAG = 0x04
+TCP_HANDSHAKE_STATUSES = {"complete", "partial", "not_found"}
+TCP_CLOSURE_STATUSES = {"fin_no_rst", "rst_no_fin", "fin_and_rst", "none_found"}
 
 
 # This helper creates compact deterministic identifiers from stable TCP coordinates.
@@ -39,6 +41,59 @@ def connection_coordinates(record: dict[str, Any]) -> tuple[tuple[Any, ...], str
     endpoint_a, endpoint_b = endpoints[0], endpoints[1]
     direction = "a_to_b" if source == endpoint_a else "b_to_a"
     return (6, *endpoint_a, *endpoint_b), direction, endpoint_a, endpoint_b
+
+
+# This helper advances one raw TCP sequence number while respecting the 32-bit wraparound space.
+def tcp_next_sequence(value: int) -> int:
+    return (int(value) + 1) % TCP_SEQUENCE_MODULUS
+
+
+# This function summarizes whether the selected packets contain a recognizable three-way TCP handshake.
+def classify_tcp_handshake(packet_records: list[dict[str, Any]]) -> str:
+    syn_packets = [
+        record
+        for record in packet_records
+        if int(record.get("tcp_flags") or 0) & TCP_SYN_FLAG and not int(record.get("tcp_flags") or 0) & TCP_ACK_FLAG
+    ]
+    syn_ack_packets = [
+        record
+        for record in packet_records
+        if int(record.get("tcp_flags") or 0) & TCP_SYN_FLAG and int(record.get("tcp_flags") or 0) & TCP_ACK_FLAG
+    ]
+    if not syn_packets and not syn_ack_packets:
+        return "not_found"
+
+    for syn in syn_packets:
+        syn_direction = str(syn.get("tcp_direction", ""))
+        syn_seq_next = tcp_next_sequence(int(syn.get("tcp_seq") or 0))
+        for syn_ack in syn_ack_packets:
+            if str(syn_ack.get("tcp_direction", "")) == syn_direction:
+                continue
+            if int(syn_ack.get("tcp_ack") or 0) % TCP_SEQUENCE_MODULUS != syn_seq_next:
+                continue
+            syn_ack_seq_next = tcp_next_sequence(int(syn_ack.get("tcp_seq") or 0))
+            for ack in packet_records:
+                flags = int(ack.get("tcp_flags") or 0)
+                if not flags & TCP_ACK_FLAG or flags & TCP_SYN_FLAG:
+                    continue
+                if str(ack.get("tcp_direction", "")) != syn_direction:
+                    continue
+                if int(ack.get("tcp_ack") or 0) % TCP_SEQUENCE_MODULUS == syn_ack_seq_next:
+                    return "complete"
+    return "partial"
+
+
+# This function summarizes the observed TCP shutdown signal without inferring closure from absent packets.
+def classify_tcp_closure(packet_records: list[dict[str, Any]]) -> str:
+    has_fin = any(int(record.get("tcp_flags") or 0) & TCP_FIN_FLAG for record in packet_records)
+    has_rst = any(int(record.get("tcp_flags") or 0) & TCP_RST_FLAG for record in packet_records)
+    if has_fin and has_rst:
+        return "fin_and_rst"
+    if has_fin:
+        return "fin_no_rst"
+    if has_rst:
+        return "rst_no_fin"
+    return "none_found"
 
 
 # This function unwraps a 32-bit TCP number to the closest coordinate around the previous observation.
@@ -442,6 +497,11 @@ def validate_canonical_contract(records: list[dict[str, Any]], result: dict[str,
                 raise ValueError(f"Canonical TCP regions overlap inside stream {stream_id}.")
 
     known_region_ids = set(region_ids)
+    for connection in result["tcp_connections"]:
+        if connection.get("TCP_handshake") not in TCP_HANDSHAKE_STATUSES:
+            raise ValueError(f"TCP connection has invalid TCP_handshake: {connection}")
+        if connection.get("TCP_closure") not in TCP_CLOSURE_STATUSES:
+            raise ValueError(f"TCP connection has invalid TCP_closure: {connection}")
     for record in records:
         if record.get("transport_protocol") != "TCP":
             continue
@@ -679,6 +739,8 @@ def canonicalize_tcp_records(records: list[dict[str, Any]], oversized_frame_thre
                 "first_packet_id": packet_records[0]["packet_id"],
                 "last_packet_id": packet_records[-1]["packet_id"],
                 "tcp_stream_ids": sorted({str(record["tcp_stream_id"]) for record in packet_records}),
+                "TCP_handshake": classify_tcp_handshake(packet_records),
+                "TCP_closure": classify_tcp_closure(packet_records),
             }
         )
 

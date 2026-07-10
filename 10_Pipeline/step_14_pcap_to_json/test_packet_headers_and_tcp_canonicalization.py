@@ -213,7 +213,6 @@ class PhysicalHeaderExtractionTests(unittest.TestCase):
                 index,
                 contexts[index],
                 include_frame_hex=False,
-                include_flow_context=False,
             )
             for index in [1, 2]
         ]
@@ -238,7 +237,6 @@ class PhysicalHeaderExtractionTests(unittest.TestCase):
             1,
             context,
             include_frame_hex=False,
-            include_flow_context=False,
         )
 
         result = canonicalize_tcp_records([record])
@@ -247,8 +245,81 @@ class PhysicalHeaderExtractionTests(unittest.TestCase):
         self.assertTrue(record["frame_oversized"])
         self.assertEqual(1, result["summary"]["oversized_frame_count"])
 
-
 class TcpCanonicalizationTests(unittest.TestCase):
+    def test_connection_reports_complete_tcp_handshake(self) -> None:
+        records = [
+            tcp_record(1, 1000, flags=0x02),
+            tcp_record(
+                2,
+                5000,
+                flags=0x12,
+                source=("10.0.0.2", 80),
+                destination=("10.0.0.1", 12345),
+                acknowledgement=1001,
+            ),
+            tcp_record(3, 1001, flags=0x10, acknowledgement=5001),
+        ]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("complete", result["tcp_connections"][0]["TCP_handshake"])
+        self.assertEqual("none_found", result["tcp_connections"][0]["TCP_closure"])
+
+    def test_connection_reports_partial_tcp_handshake(self) -> None:
+        records = [
+            tcp_record(1, 1000, flags=0x02),
+            tcp_record(
+                2,
+                5000,
+                flags=0x12,
+                source=("10.0.0.2", 80),
+                destination=("10.0.0.1", 12345),
+                acknowledgement=1001,
+            ),
+        ]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("partial", result["tcp_connections"][0]["TCP_handshake"])
+
+    def test_connection_reports_missing_tcp_handshake(self) -> None:
+        records = [tcp_record(1, 1000, b"payload", flags=0x18, acknowledgement=5000)]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("not_found", result["tcp_connections"][0]["TCP_handshake"])
+
+    def test_connection_reports_fin_closure(self) -> None:
+        records = [tcp_record(1, 1000, flags=0x11, acknowledgement=5000)]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("fin_no_rst", result["tcp_connections"][0]["TCP_closure"])
+
+    def test_connection_reports_rst_closure(self) -> None:
+        records = [tcp_record(1, 1000, flags=0x14, acknowledgement=5000)]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("rst_no_fin", result["tcp_connections"][0]["TCP_closure"])
+
+    def test_connection_reports_fin_and_rst_closure(self) -> None:
+        records = [
+            tcp_record(1, 1000, flags=0x11, acknowledgement=5000),
+            tcp_record(2, 1001, flags=0x14, acknowledgement=5000),
+        ]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("fin_and_rst", result["tcp_connections"][0]["TCP_closure"])
+
+    def test_connection_reports_no_closure(self) -> None:
+        records = [tcp_record(1, 1000, b"payload", flags=0x18, acknowledgement=5000)]
+
+        result = canonicalize_tcp_records(records)
+
+        self.assertEqual("none_found", result["tcp_connections"][0]["TCP_closure"])
+
     def test_exact_retransmission_uses_one_canonical_region(self) -> None:
         records = [tcp_record(1, 1000, b"abcdef"), tcp_record(2, 1000, b"abcdef")]
 
