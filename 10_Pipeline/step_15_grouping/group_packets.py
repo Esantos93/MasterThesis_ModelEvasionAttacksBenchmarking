@@ -30,6 +30,11 @@ from common.prompt_projection import (
     load_prompt_instructions_profile_from_config,
 )
 from common.terminal_logging import default_step_log_path, terminal_log
+from common.token_budget import (
+    TOKEN_BUDGET_POLICY,
+    build_compact_patch_token_plan,
+    load_token_budget_config,
+)
 
 
 #These are the Step 15 artifact schema names produced by the current code.
@@ -53,9 +58,6 @@ SUPPORTED_MODIFICATION_STRATEGIES = [HYBRID_MODIFICATION_STRATEGY, HEADER_ONLY_M
 #Experiment-level budget values that affect the LLM contract must come from the active config.
 DEFAULT_TOKEN_BUDGET_CONFIG = {
     "prompt_target_context": 4096,
-    "prompt_template_overhead_tokens": 500,
-    "context_reserve_tokens": 256,
-    "token_budget_safety_factor": 0.85,
     "chars_per_token_estimate": 3.0,
     "small_payload_min_bytes": 64,
     "small_payload_max_bytes": 512,
@@ -64,7 +66,6 @@ DEFAULT_TOKEN_BUDGET_CONFIG = {
     "payload_window_editable_center_bytes": 512,
     "payload_window_right_context_bytes": 128,
 }
-REQUIRED_TOKEN_BUDGET_CONFIG_KEYS = ["expected_output_patch_tokens"]
 ACTIVE_EDITABLE_HEADER_FIELDS: list[str] = []
 
 HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
@@ -134,27 +135,6 @@ def editable_header_region_count(prompt_unit: dict[str, Any]) -> int:
         for region in packet.get("header_field_classifications", [])
         if isinstance(region, dict) and region.get("editable")
     )
-
-
-#This helper mirrors the compact Step 15 fields used for token planning.
-def build_token_estimation_view(prompt_unit: dict[str, Any]) -> dict[str, Any]:
-    view = {
-        "schema_version": prompt_unit["schema_version"],
-        "experiment_id": prompt_unit.get("experiment_id"),
-        "parent_group_id": prompt_unit["parent_group_id"],
-        "modification_unit_id": prompt_unit["modification_unit_id"],
-        "unit_type": prompt_unit.get("unit_type"),
-        "group_metadata": prompt_unit.get("group_metadata", {}),
-        "token_budget": prompt_unit.get("token_budget", {}),
-        "packet_ids": prompt_unit.get("packet_ids", []),
-        "editable_packet_ids": prompt_unit.get("editable_packet_ids", []),
-        "context_packet_ids": prompt_unit.get("context_packet_ids", []),
-        "packets": prompt_unit.get("packets", []),
-        "context_truncation": prompt_unit.get("context_truncation"),
-    }
-    if prompt_unit.get("header_only"):
-        view["physical_packets"] = prompt_unit.get("physical_packets", [])
-    return view
 
 
 #This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
@@ -496,16 +476,21 @@ def get_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
         for key in token_config:
             if key in source:
                 token_config[key] = source[key]
-    for key in REQUIRED_TOKEN_BUDGET_CONFIG_KEYS:
+    for key in ["runtime_max_model_len"]:
         if key in llm_config:
             token_config[key] = llm_config[key]
         elif key in pipeline_config:
             token_config[key] = pipeline_config[key]
-        else:
-            raise ValueError(
-                f"Step 15 requires {key!r} in the active config under 'llm' or 'pipeline'. "
-                "This experiment-level budget value has no internal default."
-            )
+    budget_policy_config = load_token_budget_config(config)
+    if budget_policy_config["policy"] != TOKEN_BUDGET_POLICY:
+        raise ValueError(
+            f"Step 15 requires llm.token_budget.policy={TOKEN_BUDGET_POLICY!r}; "
+            f"found {budget_policy_config['policy']!r}."
+        )
+    token_config.update(budget_policy_config)
+    token_config["runtime_max_model_len"] = int(
+        token_config.get("runtime_max_model_len") or token_config["prompt_target_context"]
+    )
     token_config["prompt_input_structure"] = load_prompt_input_json_data_structure_from_config(config)
     instructions_profile, instruction_lines = load_prompt_instructions_profile_from_config(config)
     token_config["prompt_instructions_profile"] = instructions_profile
@@ -513,15 +498,10 @@ def get_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
     return token_config
 
 
-#This function derives the input-token budget used by Step 15 to plan compact prompt units.
-def compute_input_token_budget(token_config: dict[str, Any]) -> int:
-    available = (
-        int(token_config["prompt_target_context"])
-        - int(token_config["prompt_template_overhead_tokens"])
-        - int(token_config["expected_output_patch_tokens"])
-        - int(token_config["context_reserve_tokens"])
-    )
-    return max(1, int(available * float(token_config["token_budget_safety_factor"])))
+#This helper applies the active combined input-plus-output token planning rule.
+def token_plan_fits(prompt_unit: dict[str, Any]) -> bool:
+    token_plan = prompt_unit.get("token_plan")
+    return isinstance(token_plan, dict) and bool(token_plan.get("fits_prompt_target_context"))
 
 
 #This function implements the baseline parent grouping policy over physical packets.
@@ -949,11 +929,19 @@ def payload_summary(mode: str, payload: bytes, text: str, readability: dict[str,
 
 
 #This function decides whether a full payload can be included as a small editable region.
-def payload_fits_small_full(candidate_view: dict[str, Any], payload_length: int, token_config: dict[str, Any], input_token_budget: int) -> bool:
+def payload_fits_small_full(
+    candidate_view: dict[str, Any],
+    payload_length: int,
+    token_config: dict[str, Any],
+    prompt_target_context: int,
+) -> bool:
     min_bytes = int(token_config["small_payload_min_bytes"])
     max_bytes = int(token_config["small_payload_max_bytes"])
     small_payload_limit = max(min_bytes, min(payload_length, max_bytes))
-    small_full_token_limit = max(1, int(input_token_budget * float(token_config["small_full_token_budget_fraction"])))
+    small_full_token_limit = max(
+        1,
+        int(prompt_target_context * float(token_config["small_full_token_budget_fraction"])),
+    )
     estimated_tokens = estimate_json_tokens(candidate_view, float(token_config["chars_per_token_estimate"]))
     return payload_length <= small_payload_limit and estimated_tokens <= small_full_token_limit
 
@@ -1041,7 +1029,7 @@ def build_payload_windows(packet: dict[str, Any], payload: bytes, readability: d
 
 
 #This function creates the compact payload view for a packet and any extra payload-window units required for large payloads.
-def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], input_token_budget: int) -> dict[str, Any]:
+def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], prompt_target_context: int) -> dict[str, Any]:
     payload = payload_hex_to_bytes(packet)
     payload_length = len(payload)
     if payload_length == 0:
@@ -1077,7 +1065,7 @@ def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], inp
         replacement_format = "hex"
         value = payload.hex()
 
-    if payload_fits_small_full(candidate_view, payload_length, token_config, input_token_budget):
+    if payload_fits_small_full(candidate_view, payload_length, token_config, prompt_target_context):
         return {
             "payload_view": candidate_view,
             "editable_regions": [
@@ -1201,7 +1189,6 @@ def build_prompt_unit(
     packets: list[dict[str, Any]],
     physical_packets: list[dict[str, Any]] | None = None,
     token_config: dict[str, Any],
-    input_token_budget: int,
     context_truncation: dict[str, Any] | None,
     modification_strategy: str,
     fragment_flow_context: dict[str, Any] | None = None,
@@ -1226,8 +1213,8 @@ def build_prompt_unit(
         "group_metadata": group_metadata,
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
-            "input_token_budget": input_token_budget,
             "chars_per_token_estimate": float(token_config["chars_per_token_estimate"]),
+            "active_policy": TOKEN_BUDGET_POLICY,
         },
         "canonical_region_ids": [],
         "editable_canonical_region_ids": [],
@@ -1245,7 +1232,7 @@ def build_prompt_unit(
         prompt_unit["fragment_compact_unit_context"] = fragment_compact_unit_context
     refresh_prompt_unit_counts(prompt_unit, token_config)
     if (
-        prompt_unit["estimated_input_tokens"] > input_token_budget
+        not token_plan_fits(prompt_unit)
         and prompt_unit["context_packet_ids"]
         and prompt_unit["editable_packet_ids"]
     ):
@@ -1287,7 +1274,23 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
         chars_per_token_estimate=float(token_config["chars_per_token_estimate"]),
     )
     prompt_unit["token_estimation"] = token_estimation
-    prompt_unit["estimated_input_tokens"] = int(token_estimation["estimated_input_tokens"])
+    token_plan = build_compact_patch_token_plan(
+        prompt_unit=prompt_unit,
+        prompt_input_structure=token_config["prompt_input_structure"],
+        instruction_lines=token_config["prompt_instruction_lines"],
+        prompt_target_context=int(token_config["prompt_target_context"]),
+        runtime_max_model_len=int(token_config["runtime_max_model_len"]),
+        chars_per_token_estimate=float(token_config["chars_per_token_estimate"]),
+        output_token_estimation_safety_factor=float(token_config["output_token_estimation_safety_factor"]),
+        payload_replacement_size_policy=token_config["payload_replacement_size_policy"],
+    )
+    prompt_unit["token_plan"] = token_plan
+    prompt_unit["token_planning_validation_status"] = (
+        "validated_header_only_planning_path"
+        if prompt_unit.get("header_only")
+        else "payload_hybrid_planning_hook_not_revalidated"
+    )
+    prompt_unit["estimated_input_tokens"] = int(token_plan["estimated_input_tokens"])
 
 
 #This function marks modification units that still exceed the soft Step 15 budget after all local splitting options.
@@ -1295,26 +1298,17 @@ def mark_over_budget_prompt_unit(prompt_unit: dict[str, Any], source_modificatio
     if int(prompt_unit.get("editable_region_count", 0)) == 0:
         prompt_unit["context_truncation"] = {
             "applied": True,
-            "reason": "context_only_modification_unit_exceeds_input_token_budget",
+            "reason": "context_only_modification_unit_exceeds_prompt_target_context",
             "policy": "not_llm_routable_no_editable_regions",
             "source_modification_unit_id": source_modification_unit_id,
         }
         return
     prompt_unit["context_truncation"] = {
         "applied": True,
-        "reason": "single_editable_canonical_region_exceeds_input_token_budget",
-        "policy": "no_smaller_step15_canonical_region_unit_available",
+        "reason": "indivisible_editable_unit_exceeds_prompt_target_context",
+        "policy": TOKEN_BUDGET_POLICY,
         "source_modification_unit_id": source_modification_unit_id,
     }
-
-
-#This function copies a compact canonical region as context so overlap never duplicates editable ownership.
-def as_context_packet(packet: dict[str, Any]) -> dict[str, Any]:
-    context_packet = dict(packet)
-    context_packet["role"] = "context"
-    context_packet["editable"] = False
-    context_packet["editable_regions"] = []
-    return context_packet
 
 
 #This function splits compact canonical regions into deterministic prompt-unit chunks that fit the budget when possible.
@@ -1323,7 +1317,6 @@ def build_token_aware_packet_chunks(
     packets: list[dict[str, Any]],
     prompt_unit_context: dict[str, Any],
     token_config: dict[str, Any],
-    input_token_budget: int,
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     current_chunk: list[dict[str, Any]] = []
@@ -1334,7 +1327,7 @@ def build_token_aware_packet_chunks(
         candidate_unit["packets"] = candidate_chunk
         candidate_unit["context_truncation"] = None
         refresh_prompt_unit_counts(candidate_unit, token_config)
-        if current_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
+        if current_chunk and not token_plan_fits(candidate_unit):
             chunks.append({"core_packets": current_chunk})
             current_chunk = [packet]
         else:
@@ -1373,7 +1366,6 @@ def build_payload_window_prompt_unit(
     payload_plans: list[dict[str, Any]],
     payload_window: dict[str, Any],
     token_config: dict[str, Any],
-    input_token_budget: int,
     modification_strategy: str,
 ) -> dict[str, Any]:
     window_packet_plan = {
@@ -1400,7 +1392,6 @@ def build_payload_window_prompt_unit(
         unit_type="payload_window",
         packets=window_packets,
         token_config=token_config,
-        input_token_budget=input_token_budget,
         context_truncation=None,
         modification_strategy=modification_strategy,
     )
@@ -1420,7 +1411,6 @@ def build_budgeted_payload_window_prompt_units(
     payload_plans: list[dict[str, Any]],
     payload_window: dict[str, Any],
     token_config: dict[str, Any],
-    input_token_budget: int,
     modification_strategy: str,
 ) -> tuple[list[dict[str, Any]], int]:
     record = records[source_index]
@@ -1458,11 +1448,10 @@ def build_budgeted_payload_window_prompt_units(
             payload_plans=payload_plans,
             payload_window=candidate_window,
             token_config=token_config,
-            input_token_budget=input_token_budget,
             modification_strategy=modification_strategy,
         )
-        if candidate_unit["estimated_input_tokens"] <= input_token_budget or candidate_end - candidate_start <= 1:
-            if candidate_unit["estimated_input_tokens"] > input_token_budget:
+        if token_plan_fits(candidate_unit) or candidate_end - candidate_start <= 1:
+            if not token_plan_fits(candidate_unit):
                 mark_over_budget_prompt_unit(candidate_unit, candidate_unit["modification_unit_id"])
                 refresh_prompt_unit_counts(candidate_unit, token_config)
             prompt_units.append(candidate_unit)
@@ -1488,7 +1477,6 @@ def build_base_prompt_units(
     base_packets: list[dict[str, Any]],
     physical_packets: list[dict[str, Any]],
     token_config: dict[str, Any],
-    input_token_budget: int,
     modification_strategy: str,
 ) -> list[dict[str, Any]]:
     prompt_unit_context = {
@@ -1509,8 +1497,8 @@ def build_base_prompt_units(
         "group_metadata": group_metadata,
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
-            "input_token_budget": input_token_budget,
             "chars_per_token_estimate": float(token_config["chars_per_token_estimate"]),
+            "active_policy": TOKEN_BUDGET_POLICY,
         },
         "canonical_region_ids": [],
         "editable_canonical_region_ids": [],
@@ -1526,7 +1514,6 @@ def build_base_prompt_units(
         packets=base_packets,
         prompt_unit_context=prompt_unit_context,
         token_config=token_config,
-        input_token_budget=input_token_budget,
     )
     chunks = add_chunk_packets(chunks)
 
@@ -1545,11 +1532,10 @@ def build_base_prompt_units(
             packets=chunk["packets"],
             physical_packets=physical_packets,
             token_config=token_config,
-            input_token_budget=input_token_budget,
             context_truncation=None,
             modification_strategy=modification_strategy,
         )
-        if prompt_unit["estimated_input_tokens"] <= input_token_budget:
+        if token_plan_fits(prompt_unit):
             prompt_units.append(prompt_unit)
             continue
         if len(chunk["core_packets"]) <= 1:
@@ -1571,7 +1557,6 @@ def build_base_prompt_units(
                 packets=candidate_packets,
                 physical_packets=physical_packets,
                 token_config=token_config,
-                input_token_budget=input_token_budget,
                 context_truncation={
                     "applied": True,
                     "reason": "final_packet_window_exceeded_budget",
@@ -1580,7 +1565,7 @@ def build_base_prompt_units(
                 },
                 modification_strategy=modification_strategy,
             )
-            if current_fallback_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
+            if current_fallback_chunk and not token_plan_fits(candidate_unit):
                 fallback_chunks.append(current_fallback_chunk)
                 current_fallback_chunk = [packet]
             else:
@@ -1601,7 +1586,6 @@ def build_base_prompt_units(
                 packets=fallback_packets,
                 physical_packets=physical_packets,
                 token_config=token_config,
-                input_token_budget=input_token_budget,
                 context_truncation={
                     "applied": True,
                     "reason": "final_packet_window_exceeded_budget",
@@ -1610,7 +1594,7 @@ def build_base_prompt_units(
                 },
                 modification_strategy=modification_strategy,
             )
-            if sub_prompt_unit["estimated_input_tokens"] <= input_token_budget:
+            if token_plan_fits(sub_prompt_unit):
                 prompt_units.append(sub_prompt_unit)
                 continue
             if len(fallback_packets) == 1:
@@ -1631,7 +1615,6 @@ def build_base_prompt_units(
                     packets=[packet],
                     physical_packets=physical_packets,
                     token_config=token_config,
-                    input_token_budget=input_token_budget,
                     context_truncation={
                         "applied": True,
                         "reason": "final_packet_window_exceeded_budget",
@@ -1640,7 +1623,7 @@ def build_base_prompt_units(
                     },
                     modification_strategy=modification_strategy,
                 )
-                if packet_prompt_unit["estimated_input_tokens"] > input_token_budget:
+                if not token_plan_fits(packet_prompt_unit):
                     mark_over_budget_prompt_unit(packet_prompt_unit, sub_prompt_unit_id)
                 prompt_units.append(packet_prompt_unit)
     return prompt_units
@@ -1662,7 +1645,6 @@ def build_header_only_prompt_units_for_group(
     header_field_definitions: dict[str, Any],
     header_policy: dict[str, Any],
     token_config: dict[str, Any],
-    input_token_budget: int,
 ) -> list[dict[str, Any]]:
     group_metadata = build_group_metadata(
         parent_group_id,
@@ -1693,7 +1675,6 @@ def build_header_only_prompt_units_for_group(
                 packets=[],
                 physical_packets=compact_physical_packets,
                 token_config=token_config,
-                input_token_budget=input_token_budget,
                 context_truncation=None,
                 modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
             )
@@ -1744,7 +1725,6 @@ def build_header_only_prompt_units_for_group(
             packets=[],
             physical_packets=fragment_packets,
             token_config=token_config,
-            input_token_budget=input_token_budget,
             context_truncation=None,
             modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
             fragment_flow_context=fragment_flow_context,
@@ -1756,7 +1736,7 @@ def build_header_only_prompt_units_for_group(
     for packet in compact_physical_packets:
         candidate_chunk = current_chunk + [packet]
         candidate_unit = build_fragment_unit(candidate_chunk, len(chunks) + 1, 1)
-        if current_chunk and candidate_unit["estimated_input_tokens"] > input_token_budget:
+        if current_chunk and not token_plan_fits(candidate_unit):
             chunks.append(current_chunk)
             current_chunk = [packet]
         else:
@@ -1774,13 +1754,13 @@ def build_header_only_prompt_units_for_group(
             (
                 index
                 for index, unit in enumerate(units)
-                if unit["estimated_input_tokens"] > input_token_budget and len(chunks[index]) > 1
+                if not token_plan_fits(unit) and len(chunks[index]) > 1
             ),
             None,
         )
         if oversized_index is None:
             for unit in units:
-                if unit["estimated_input_tokens"] > input_token_budget:
+                if not token_plan_fits(unit):
                     mark_over_budget_prompt_unit(unit, unit["modification_unit_id"])
             return units
         oversized_chunk = chunks[oversized_index]
@@ -1807,7 +1787,6 @@ def build_prompt_units_for_group(
     header_field_definitions: dict[str, Any],
     header_policy: dict[str, Any],
     token_config: dict[str, Any],
-    input_token_budget: int,
     modification_strategy: str,
     heartbeat: Any | None,
 ) -> list[dict[str, Any]]:
@@ -1826,12 +1805,17 @@ def build_prompt_units_for_group(
             header_field_definitions=header_field_definitions,
             header_policy=header_policy,
             token_config=token_config,
-            input_token_budget=input_token_budget,
         )
 
     payload_plans = []
     for record_index, record in enumerate(records, start=1):
-        payload_plans.append(build_payload_plan(record, token_config, input_token_budget))
+        payload_plans.append(
+            build_payload_plan(
+                record,
+                token_config,
+                int(token_config["prompt_target_context"]),
+            )
+        )
         if heartbeat:
             heartbeat(
                 f"planning_parent_group={parent_group_id}, "
@@ -1860,7 +1844,6 @@ def build_prompt_units_for_group(
         base_packets=base_packets,
         physical_packets=compact_physical_packets,
         token_config=token_config,
-        input_token_budget=input_token_budget,
         modification_strategy=modification_strategy,
     )
 
@@ -1879,7 +1862,6 @@ def build_prompt_units_for_group(
                 payload_plans=payload_plans,
                 payload_window=payload_window,
                 token_config=token_config,
-                input_token_budget=input_token_budget,
                 modification_strategy=modification_strategy,
             )
             prompt_units.extend(new_prompt_units)
@@ -1908,6 +1890,8 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "editable_packet_ids": prompt_unit["editable_packet_ids"],
         "context_packet_ids": prompt_unit["context_packet_ids"],
         "estimated_input_tokens": prompt_unit["estimated_input_tokens"],
+        "token_plan": prompt_unit.get("token_plan"),
+        "token_planning_validation_status": prompt_unit.get("token_planning_validation_status"),
         "physical_packet_count": len(prompt_unit.get("physical_packets", [])),
         "editable_header_region_count": sum(
             int(packet.get("editable_header_region_count") or 0)
@@ -1925,7 +1909,7 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
 
 
 #This function separates over-budget prompt units that can be routed to the LLM from context-only units Step 17 will auto-accept.
-def build_over_budget_summary(prompt_unit_summaries: list[dict[str, Any]], input_token_budget: int) -> dict[str, Any]:
+def build_over_budget_summary(prompt_unit_summaries: list[dict[str, Any]]) -> dict[str, Any]:
     summary = {
         "over_budget_count": 0,
         "over_budget_editable_count": 0,
@@ -1935,7 +1919,8 @@ def build_over_budget_summary(prompt_unit_summaries: list[dict[str, Any]], input
     }
     reason_counts: Counter[str] = Counter()
     for prompt_unit in prompt_unit_summaries:
-        if int(prompt_unit.get("estimated_input_tokens") or 0) <= input_token_budget:
+        token_plan = prompt_unit.get("token_plan")
+        if isinstance(token_plan, dict) and int(token_plan.get("overflow_tokens") or 0) == 0:
             continue
         summary["over_budget_count"] += 1
         editable_region_count = int(prompt_unit.get("editable_region_count") or 0)
@@ -2074,7 +2059,6 @@ def build_manifest(
     grouping_policy: str,
     group_size_packets: int | None,
     token_config: dict[str, Any],
-    input_token_budget: int,
     header_policy: dict[str, Any],
     parent_group_count: int,
     parent_group_stats: dict[str, Any],
@@ -2126,8 +2110,13 @@ def build_manifest(
                 "editable_header_region_count": header_classification_artifacts["editable_header_region_count"],
             },
             "token_budget_config": token_config,
-            "input_token_budget": input_token_budget,
-            "over_budget_summary": build_over_budget_summary(prompt_unit_summaries, input_token_budget),
+            "token_budget_policy": TOKEN_BUDGET_POLICY,
+            "token_planning_validation_status": (
+                "validated_header_only_planning_path"
+                if header_only
+                else "payload_hybrid_planning_hook_not_revalidated"
+            ),
+            "over_budget_summary": build_over_budget_summary(prompt_unit_summaries),
             "payload_mode_counts": dict(sorted(payload_mode_counts.items())),
             "canonical_ownership_summary": canonical_ownership_summary,
             "physical_parent_group_coverage": physical_parent_group_coverage,
@@ -2171,7 +2160,6 @@ def run_grouping(
     output_root_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
     output_group_dir = output_root_dir / policy_output_subdir(grouping_policy, effective_group_size)
     token_config = get_token_budget_config(config)
-    input_token_budget = compute_input_token_budget(token_config)
     header_policy = load_header_editability_policy(config, config_path)
     global ACTIVE_EDITABLE_HEADER_FIELDS
     ACTIVE_EDITABLE_HEADER_FIELDS = editable_header_fields_from_policy(header_policy)
@@ -2266,7 +2254,6 @@ def run_grouping(
             header_field_definitions=packet_json["header_field_definitions"],
             header_policy=header_policy,
             token_config=token_config,
-            input_token_budget=input_token_budget,
             modification_strategy=modification_strategy,
             heartbeat=heartbeat,
         )
@@ -2298,7 +2285,6 @@ def run_grouping(
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
         token_config=token_config,
-        input_token_budget=input_token_budget,
         header_policy=header_policy,
         parent_group_count=len(parent_groups),
         parent_group_stats=parent_group_stats,
@@ -2323,7 +2309,6 @@ def run_grouping(
         "canonical_region_count": len(canonical_records),
         "group_size_packets": effective_group_size,
         "parent_group_size_statistics": parent_group_stats,
-        "input_token_budget": input_token_budget,
         "modification_strategy": modification_strategy,
         "manifest_schema_version": modification_units_manifest_schema_version(modification_strategy),
     }
@@ -2385,7 +2370,6 @@ def main() -> None:
         if result["group_size_packets"] is not None:
             print(f"Configured group size (physical packets): {result['group_size_packets']}")
         print(f"Parent group size statistics: {result['parent_group_size_statistics']}")
-        print(f"Input token budget: {result['input_token_budget']}")
         print(f"Output directory: {result['output_dir']}")
         print(f"Group manifest written to: {result['manifest_path']}")
 

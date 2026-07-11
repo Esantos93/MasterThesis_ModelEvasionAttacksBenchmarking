@@ -148,10 +148,6 @@ def config(
         },
         "llm": {
             "prompt_target_context": 4096,
-            "prompt_template_overhead_tokens": 500,
-            "expected_output_patch_tokens": 1536,
-            "context_reserve_tokens": 256,
-            "token_budget_safety_factor": 0.85,
             "chars_per_token_estimate": 3.0,
             "small_payload_min_bytes": 64,
             "small_payload_max_bytes": 512,
@@ -295,10 +291,11 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         self.assertEqual(0, manifest["metadata"]["over_budget_summary"]["over_budget_editable_count"])
         payload_window_units = [unit for unit in units if unit["unit_type"] == "payload_window"]
-        self.assertGreater(len(payload_window_units), 2)
+        self.assertGreaterEqual(len(payload_window_units), 1)
         self.assertTrue(
             all(
-                unit["estimated_input_tokens"] <= manifest["metadata"]["input_token_budget"]
+                unit["token_plan"]["total_planned_tokens"]
+                <= unit["token_plan"]["prompt_target_context"]
                 for unit in payload_window_units
             )
         )
@@ -464,6 +461,8 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         connection_ids = {connection["tcp_connection_id"] for connection in source["tcp_connections"]}
         self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        self.assertEqual(2, len(units))
+        self.assertEqual("compact_patch_token_budget_v2", manifest["metadata"]["token_budget_policy"])
         self.assertEqual("flow_context_aware", manifest["metadata"]["grouping_policy"])
         self.assertIsNone(manifest["metadata"]["group_size_packets"])
         self.assertEqual(5, manifest["metadata"]["physical_parent_group_coverage"]["covered_physical_packet_count"])
@@ -482,6 +481,9 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertTrue(all("flow_context" not in unit for unit in units))
         self.assertTrue(all("assigned_flow_ids" not in unit for unit in units))
         self.assertTrue(all("candidate_flow_ids" not in unit for unit in units))
+        self.assertTrue(all(unit["token_plan"]["policy"] == "compact_patch_token_budget_v2" for unit in units))
+        self.assertTrue(all(unit["token_plan"]["planned_output_tokens"] > 0 for unit in units))
+        self.assertTrue(all(unit["token_plan"]["overflow_tokens"] == 0 for unit in units))
         _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
         projected_prompt = build_compact_patch_prompt_parts(
             prompt_unit=units[0],
@@ -516,12 +518,26 @@ class CanonicalStep15Tests(unittest.TestCase):
                 "flow_context_aware",
                 modification_strategy="header_only_strategy_v1",
             )
+            active_config["llm"]["prompt_target_context"] = 1800
             manifest, units = self.run_step15(source, active_config, root)
 
         self.assertEqual(1, manifest["metadata"]["parent_group_count"])
         self.assertGreater(len(units), 1)
         self.assertTrue(
-            all(unit["estimated_input_tokens"] <= manifest["metadata"]["input_token_budget"] for unit in units)
+            all(
+                unit["token_plan"]["total_planned_tokens"]
+                <= unit["token_plan"]["prompt_target_context"]
+                for unit in units
+            )
+        )
+        self.assertTrue(all(unit["token_plan"]["policy"] == "compact_patch_token_budget_v2" for unit in units))
+        self.assertTrue(all(unit["token_plan"]["planned_output_tokens"] > 0 for unit in units))
+        self.assertTrue(
+            all(
+                unit["token_plan"]["total_planned_tokens"]
+                == unit["token_plan"]["estimated_input_tokens"] + unit["token_plan"]["planned_output_tokens"]
+                for unit in units
+            )
         )
         self.assertEqual(
             list(range(1, len(units) + 1)),
@@ -547,6 +563,12 @@ class CanonicalStep15Tests(unittest.TestCase):
             ]
             self.assertTrue(all(region["identity_type"] == "physical_header_region" for region in editable_regions))
         self.assertEqual(21, expected_first_index)
+        packet_owners = {
+            packet["packet_id"]: unit["modification_unit_id"]
+            for unit in units
+            for packet in unit["physical_packets"]
+        }
+        self.assertEqual(20, len(packet_owners))
 
     def test_flow_context_aware_rejects_packet_without_tcp_connection_id(self) -> None:
         source = packet_json_v4([tcp_record(1, 1000, b"payload")])

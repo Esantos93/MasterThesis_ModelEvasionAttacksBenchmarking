@@ -160,6 +160,8 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     payload_window_count = 0
     editable_payload_region_count = 0
     flow_fragments_by_parent: dict[str, list[tuple[dict[str, Any], dict[str, Any], int]]] = {}
+    token_plan_policy_counts: Counter[str] = Counter()
+    token_plan_overflow_count = 0
 
     for entry in manifest["compact_modification_units"]:
         unit_path = resolve_existing_path(entry.get("modification_unit_file"), manifest_path.parent)
@@ -173,6 +175,21 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
             raise ValueError(f"Header-only unit {unit_path} contains payload windows.")
         if unit.get("editable_payload_region_count") != 0:
             raise ValueError(f"Header-only unit {unit_path} contains editable payload regions.")
+        token_plan = unit.get("token_plan")
+        if not isinstance(token_plan, dict):
+            raise ValueError(f"Header-only unit {unit_path} lacks token_plan.")
+        token_plan_policy_counts[str(token_plan.get("policy"))] += 1
+        if token_plan.get("policy") != "compact_patch_token_budget_v2":
+            raise ValueError(f"Header-only unit {unit_path} uses the wrong token-budget policy.")
+        estimated_input_tokens = int(token_plan.get("estimated_input_tokens") or 0)
+        planned_output_tokens = int(token_plan.get("planned_output_tokens") or 0)
+        total_planned_tokens = int(token_plan.get("total_planned_tokens") or 0)
+        if planned_output_tokens <= 0:
+            raise ValueError(f"Header-only unit {unit_path} has no planned output allowance.")
+        if total_planned_tokens != estimated_input_tokens + planned_output_tokens:
+            raise ValueError(f"Header-only unit {unit_path} has an inconsistent token plan.")
+        if total_planned_tokens > int(token_plan.get("prompt_target_context") or 0):
+            token_plan_overflow_count += 1
         payload_window_count += int(unit.get("payload_window_count") or 0)
         editable_payload_region_count += int(unit.get("editable_payload_region_count") or 0)
         editable_region_distribution[int(unit.get("editable_region_count") or 0)] += 1
@@ -234,6 +251,8 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     duplicate_packets = [packet_id for packet_id, count in Counter(physical_packet_ids).items() if count > 1]
     if duplicate_packets:
         raise ValueError(f"Physical packets appear in more than one header-only unit: {duplicate_packets[:10]}")
+    if token_plan_overflow_count:
+        raise ValueError(f"Header-only output contains {token_plan_overflow_count} over-budget compact units.")
 
     if metadata.get("grouping_policy") == "flow_context_aware":
         if len(flow_fragments_by_parent) != int(metadata.get("parent_group_count") or -1):
@@ -265,6 +284,8 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         "physical_packet_units_covered": len(physical_packet_ids),
         "flow_context_parent_count": len(flow_fragments_by_parent),
         "flow_context_fragment_count": sum(len(fragments) for fragments in flow_fragments_by_parent.values()),
+        "token_plan_policy_counts": dict(sorted(token_plan_policy_counts.items())),
+        "token_plan_overflow_count": token_plan_overflow_count,
     }
 
 
@@ -349,7 +370,7 @@ def main() -> None:
         "parent_group_count": metadata.get("parent_group_count"),
         "modification_unit_count": metadata.get("modification_unit_count"),
         "parent_group_size_statistics": metadata.get("parent_group_size_statistics"),
-        "input_token_budget": metadata.get("input_token_budget"),
+        "token_budget_policy": metadata.get("token_budget_policy"),
         "over_budget_summary": metadata.get("over_budget_summary"),
         "editable_header_regions_enabled": metadata.get("editable_header_regions_enabled"),
         "editable_payload_regions_enabled": metadata.get("editable_payload_regions_enabled"),
