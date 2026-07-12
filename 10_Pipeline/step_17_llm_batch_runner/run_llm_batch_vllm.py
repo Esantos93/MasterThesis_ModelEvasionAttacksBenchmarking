@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,22 @@ class VllmChatCompletionAdapter:
         }
         if VLLM_CHAT_TEMPLATE_KWARGS:
             template_kwargs.update(VLLM_CHAT_TEMPLATE_KWARGS)
-        token_ids = tokenizer.apply_chat_template(messages, **template_kwargs)
+        tokenized = tokenizer.apply_chat_template(messages, **template_kwargs)
+        if isinstance(tokenized, Mapping):
+            if "input_ids" not in tokenized:
+                raise ValueError("Chat-template tokenization result did not contain input_ids.")
+            token_ids = tokenized["input_ids"]
+        elif hasattr(tokenized, "input_ids"):
+            token_ids = tokenized.input_ids
+        else:
+            token_ids = tokenized
+        shape = getattr(token_ids, "shape", None)
+        if shape is not None and len(shape) > 0:
+            return int(shape[-1])
+        if isinstance(token_ids, list) and token_ids and isinstance(token_ids[0], list):
+            if len(token_ids) != 1:
+                raise ValueError("Expected one tokenized chat sequence for one Prompt Unit.")
+            token_ids = token_ids[0]
         return len(token_ids)
 
     #This method runs one chat completion and returns the response shape expected by shared Step 17 code.

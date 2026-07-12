@@ -829,9 +829,12 @@ class VllmModelDiscoveryTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.kwargs = None
 
-            def apply_chat_template(self, messages: list[dict], **kwargs: object) -> list[int]:
+            def apply_chat_template(self, messages: list[dict], **kwargs: object) -> dict[str, list[list[int]]]:
                 self.kwargs = kwargs
-                return [1, 2, 3, 4]
+                return {
+                    "input_ids": [[1, 2, 3, 4]],
+                    "attention_mask": [[1, 1, 1, 1]],
+                }
 
         class FakeEngine:
             def __init__(self, tokenizer: FakeTokenizer) -> None:
