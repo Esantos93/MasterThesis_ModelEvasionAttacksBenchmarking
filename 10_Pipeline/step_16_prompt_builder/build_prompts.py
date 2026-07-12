@@ -273,8 +273,10 @@ def validate_modification_unit(modification_unit: Any, modification_unit_path: P
                 f"header_only_strategy_v1. Found strategy={strategy!r}: {modification_unit_path}."
             )
     packets = modification_unit.get("packets")
-    if not isinstance(packets, list):
-        raise ValueError(f"Modification unit must contain a packets list: {modification_unit_path}")
+    if packets is not None and not isinstance(packets, list):
+        raise ValueError(f"Modification unit packets must be a list when present: {modification_unit_path}")
+    if not isinstance(modification_unit.get("physical_packets"), list):
+        raise ValueError(f"Modification unit must contain a physical_packets list: {modification_unit_path}")
     if not isinstance(modification_unit.get("parent_group_id"), str):
         raise ValueError(f"Modification unit must contain parent_group_id: {modification_unit_path}")
     if not isinstance(modification_unit.get("modification_unit_id"), str):

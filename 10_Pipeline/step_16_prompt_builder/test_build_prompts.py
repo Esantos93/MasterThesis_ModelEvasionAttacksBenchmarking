@@ -91,7 +91,6 @@ def build_v2_modification_unit() -> dict:
         "context_canonical_region_ids": [],
         "editable_packet_ids": [],
         "context_packet_ids": [],
-        "packets": [],
         "physical_packets": [
             build_v2_physical_packet("packet_000001"),
             build_v2_physical_packet("packet_000002"),
