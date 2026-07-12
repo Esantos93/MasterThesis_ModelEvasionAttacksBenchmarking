@@ -55,8 +55,6 @@
     "prompt_target_context": 4096,
     "prompt_template_overhead_tokens": 500,
     "runtime_max_model_len": 12288,
-    "expected_output_patch_tokens": 512,
-    "context_reserve_tokens": 256,
     "token_budget_safety_factor": 0.85,
     "chars_per_token_estimate": 3.0,
     "small_payload_min_bytes": 64,
