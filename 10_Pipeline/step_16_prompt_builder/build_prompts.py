@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import sys
 from datetime import datetime, timezone
@@ -20,22 +21,18 @@ from common import prompt_projection
 #These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contracts.
 PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
 PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
-SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V1 = "compact_modification_unit_v1"
 SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2 = "compact_modification_unit_v2"
-SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V1 = "compact_modification_units_manifest_v1"
 SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2 = "compact_modification_units_manifest_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
+TOKEN_BUDGET_POLICY = "compact_patch_token_budget_v2"
 
 SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS = {
-    SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V1,
     SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2,
 }
 SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS = {
-    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V1,
     SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2,
 }
 SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION = {
-    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V1: "compact_modification_units_manifest_v1.json",
     SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2: "compact_modification_units_manifest_v2.json",
 }
 
@@ -63,6 +60,8 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
             "canonical_region_ids",
             "editable_canonical_region_ids",
             "context_canonical_region_ids",
+            "fragment_flow_context",
+            "fragment_compact_unit_context",
         ],
         "editable_header_table_name": "editable_headers",
         "editable_header_columns_name": "editable_headers_columns",
@@ -242,6 +241,12 @@ def validate_modification_units_manifest(manifest: Any, manifest_path: Path) -> 
                 "Step 16 supports compact_modification_units_manifest_v2 only for "
                 f"header_only_strategy_v1. Found strategy={strategy!r} in {manifest_path}."
             )
+        if metadata.get("token_budget_policy") != TOKEN_BUDGET_POLICY:
+            raise ValueError(
+                f"Step 16 requires metadata.token_budget_policy={TOKEN_BUDGET_POLICY!r} for "
+                f"compact_modification_units_manifest_v2. Found {metadata.get('token_budget_policy')!r} "
+                f"in {manifest_path}."
+            )
     modification_units = manifest.get("compact_modification_units")
     if not isinstance(modification_units, list):
         raise ValueError(f"Manifest must contain a compact_modification_units list: {manifest_path}")
@@ -277,8 +282,7 @@ def validate_modification_unit(modification_unit: Any, modification_unit_path: P
     return modification_unit
 
 
-#This function selects the Step 15 manifest to consume.
-#V2 is preferred for Baseline-004, but directories containing both schemas must be explicit.
+#This function selects the active Step 15 V2 manifest to consume.
 def resolve_source_manifest_path(input_group_dir: Path, source_manifest: str | Path | None) -> Path:
     if source_manifest is not None:
         manifest_path = Path(source_manifest).expanduser()
@@ -730,6 +734,73 @@ def estimate_prompt_unit_input_tokens(config: dict[str, Any], prompt_unit: dict[
     )
 
 
+#This function validates the Step 15 V2 token plan against the exact prompt text built by Step 16.
+def validate_v2_token_plan(
+    *,
+    prompt_unit: dict[str, Any],
+    token_estimation: dict[str, Any],
+    modification_unit_path: Path,
+) -> dict[str, Any]:
+    token_plan = prompt_unit.get("token_plan")
+    if not isinstance(token_plan, dict):
+        raise ValueError(f"Step 16 requires token_plan for compact_modification_unit_v2: {modification_unit_path}")
+    if token_plan.get("policy") != TOKEN_BUDGET_POLICY:
+        raise ValueError(
+            f"Step 16 requires token_plan.policy={TOKEN_BUDGET_POLICY!r} for "
+            f"compact_modification_unit_v2. Found {token_plan.get('policy')!r}: {modification_unit_path}"
+        )
+
+    required_integer_fields = [
+        "estimated_input_tokens",
+        "planned_output_tokens",
+        "total_planned_tokens",
+        "prompt_target_context",
+        "runtime_max_model_len",
+        "max_tokens",
+        "overflow_tokens",
+    ]
+    for field_name in required_integer_fields:
+        value = token_plan.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"token_plan.{field_name} must be an integer: {modification_unit_path}")
+    if not isinstance(token_plan.get("breakdown"), dict):
+        raise ValueError(f"token_plan.breakdown must be an object: {modification_unit_path}")
+
+    actual_estimated_input_tokens = int(token_estimation["estimated_input_tokens"])
+    planned_estimated_input_tokens = int(token_plan["estimated_input_tokens"])
+    if actual_estimated_input_tokens != planned_estimated_input_tokens:
+        raise ValueError(
+            "Step 16 visible prompt token estimate does not match the Step 15 token plan: "
+            f"step16={actual_estimated_input_tokens}, step15={planned_estimated_input_tokens}, "
+            f"unit={modification_unit_path}"
+        )
+
+    planned_output_tokens = int(token_plan["planned_output_tokens"])
+    if planned_output_tokens <= 0:
+        raise ValueError(f"token_plan.planned_output_tokens must be greater than zero: {modification_unit_path}")
+    if int(token_plan["max_tokens"]) != planned_output_tokens:
+        raise ValueError(
+            "token_plan.max_tokens must equal token_plan.planned_output_tokens: "
+            f"{modification_unit_path}"
+        )
+    expected_total = planned_estimated_input_tokens + planned_output_tokens
+    if int(token_plan["total_planned_tokens"]) != expected_total:
+        raise ValueError(
+            "token_plan.total_planned_tokens must equal estimated_input_tokens + planned_output_tokens: "
+            f"{modification_unit_path}"
+        )
+    if expected_total > int(token_plan["prompt_target_context"]):
+        raise ValueError(
+            "token_plan.total_planned_tokens exceeds token_plan.prompt_target_context: "
+            f"{modification_unit_path}"
+        )
+    if int(token_plan["overflow_tokens"]) != 0:
+        raise ValueError(f"token_plan.overflow_tokens must be zero for a routable V2 prompt: {modification_unit_path}")
+    if int(token_plan["runtime_max_model_len"]) <= 0 or int(token_plan["prompt_target_context"]) <= 0:
+        raise ValueError(f"token_plan context limits must be positive: {modification_unit_path}")
+    return deepcopy(token_plan)
+
+
 #This function dispatches prompt construction based on llm.prompt_version.
 def build_messages_by_prompt_version(
     *,
@@ -769,6 +840,11 @@ def build_prompt_unit(
         prompt_unit=prompt_unit,
     )
     token_estimation = estimate_prompt_unit_input_tokens(config, prompt_unit)
+    token_plan = validate_v2_token_plan(
+        prompt_unit=prompt_unit,
+        token_estimation=token_estimation,
+        modification_unit_path=modification_unit_path,
+    )
     prompt_contract = "patch_output"
     required_top_level_keys = ["schema_version", "parent_group_id", "prompt_unit_id"]
     if has_editable_payload:
@@ -842,6 +918,7 @@ def build_prompt_unit(
             "editable_regions": editable_region_index["regions"],
         },
         "token_budget": prompt_unit.get("token_budget", {}),
+        "token_plan": token_plan,
         "token_estimation": token_estimation,
         "estimated_input_tokens": int(token_estimation["estimated_input_tokens"]),
         "instructions": {
@@ -887,6 +964,16 @@ def build_prompt_units_manifest(
 ) -> dict[str, Any]:
     source_metadata = source_manifest.get("metadata", {})
     llm_config = config.get("llm", {})
+    planned_output_tokens = [
+        int(summary["token_plan"]["planned_output_tokens"])
+        for summary in prompt_summaries
+        if isinstance(summary.get("token_plan"), dict)
+        and isinstance(summary["token_plan"].get("planned_output_tokens"), int)
+    ]
+    planned_output_token_counts: dict[str, int] = {}
+    for token_count in planned_output_tokens:
+        key = str(token_count)
+        planned_output_token_counts[key] = planned_output_token_counts.get(key, 0) + 1
     return {
         "metadata": {
             "schema_version": PROMPT_UNITS_MANIFEST_SCHEMA_VERSION,
@@ -909,6 +996,22 @@ def build_prompt_units_manifest(
             "output_dir": str(output_dir),
             "total_source_modification_units": total_source_modification_units,
             "total_prompt_count": len(prompt_summaries),
+            "token_budget_policy": (
+                TOKEN_BUDGET_POLICY
+                if planned_output_tokens and len(planned_output_tokens) == len(prompt_summaries)
+                else source_metadata.get("token_budget_policy")
+            ),
+            "max_tokens_source": (
+                "token_plan.planned_output_tokens"
+                if planned_output_tokens and len(planned_output_tokens) == len(prompt_summaries)
+                else None
+            ),
+            "planned_output_tokens_distribution": {
+                "count": len(planned_output_tokens),
+                "min": min(planned_output_tokens) if planned_output_tokens else None,
+                "max": max(planned_output_tokens) if planned_output_tokens else None,
+                "value_counts": dict(sorted(planned_output_token_counts.items(), key=lambda item: int(item[0]))),
+            },
         },
         "prompt_units": prompt_summaries,
     }
@@ -983,6 +1086,7 @@ def run_prompt_builder(
                 "prompt_instructions_profile": prompt_unit["prompt_template"]["prompt_instructions_profile"],
                 "editable_region_count": len(prompt_unit["input_traceability"]["editable_regions"]),
                 "estimated_input_tokens": prompt_unit.get("estimated_input_tokens"),
+                "token_plan": prompt_unit.get("token_plan"),
                 "token_estimation": prompt_unit.get("token_estimation"),
             }
         )
@@ -1029,10 +1133,7 @@ def parse_cli_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-manifest",
-        help=(
-            "Explicit Step 15 compact modification-units manifest to consume. "
-            "Use this when both V1 and V2 manifests are present in the input directory."
-        ),
+        help="Explicit active Step 15 compact_modification_units_manifest_v2 manifest to consume.",
     )
     parser.add_argument(
         "--cloud-root",
