@@ -42,12 +42,19 @@ LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-}"
 if [[ -z "${RUNTIME_MAX_MODEL_LEN+x}" ]]; then
   RUNTIME_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-12288}"
 fi
-EXPECTED_OUTPUT_PATCH_TOKENS="${EXPECTED_OUTPUT_PATCH_TOKENS:-}"
+if [[ -n "${EXPECTED_OUTPUT_PATCH_TOKENS:-}" ]]; then
+  echo "EXPECTED_OUTPUT_PATCH_TOKENS is obsolete. Step 17 uses each prompt unit's token_plan.planned_output_tokens."
+  exit 1
+fi
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-30}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-${RUNTIME_MAX_MODEL_LEN}}"
+if [[ "${VLLM_MAX_MODEL_LEN}" != "${RUNTIME_MAX_MODEL_LEN}" ]]; then
+  echo "VLLM_MAX_MODEL_LEN and RUNTIME_MAX_MODEL_LEN must match."
+  exit 1
+fi
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 DISABLE_THINKING="${DISABLE_THINKING:-0}"
 
@@ -267,7 +274,7 @@ echo "Step 17 runner: ${STEP17_RUNNER:-<skipped>}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Runtime max model len: ${RUNTIME_MAX_MODEL_LEN}"
 echo "vLLM max model len: ${VLLM_MAX_MODEL_LEN}"
-echo "Expected output patch tokens override: ${EXPECTED_OUTPUT_PATCH_TOKENS:-<config>}"
+echo "Output token budget source: prompt_unit.token_plan.planned_output_tokens"
 echo "Disable thinking: ${DISABLE_THINKING}"
 echo "Limit Step 16: ${LIMIT_PROMPTS_S16:-<none>}"
 echo "Limit Step 17: ${LIMIT_PROMPTS_S17:-<none>}"
@@ -325,6 +332,9 @@ print(f"Source modification units metadata: {metadata.get('total_source_modifica
 print(f"Editable-region count distribution: {dict(sorted(editable_counts.items(), key=lambda item: str(item[0])))}")
 print(f"Prompt input profile: {metadata.get('prompt_input_json_data_profile')}")
 print(f"Prompt instructions profile: {metadata.get('prompt_instructions_profile')}")
+print(f"Token budget policy: {metadata.get('token_budget_policy')}")
+print(f"Max tokens source: {metadata.get('max_tokens_source')}")
+print(f"Planned output tokens distribution: {metadata.get('planned_output_tokens_distribution')}")
 PY
 
 if [[ "${SKIP_STEP17}" != "1" ]]; then
@@ -346,9 +356,6 @@ if [[ "${SKIP_STEP17}" != "1" ]]; then
     --run-id "${RUN_ID}"
     --runtime-max-model-len "${RUNTIME_MAX_MODEL_LEN}"
   )
-  if [[ -n "${EXPECTED_OUTPUT_PATCH_TOKENS}" ]]; then
-    step17_args+=(--expected-output-patch-tokens "${EXPECTED_OUTPUT_PATCH_TOKENS}")
-  fi
   if [[ "${STEP17_BACKEND}" == "vllm" ]]; then
     step17_args+=(--vllm-dtype "${VLLM_DTYPE}")
     step17_args+=(--vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}")
