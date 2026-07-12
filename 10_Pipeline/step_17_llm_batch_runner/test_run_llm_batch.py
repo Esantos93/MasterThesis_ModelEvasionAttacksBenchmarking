@@ -5,12 +5,14 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_llm_batch
 import run_llm_batch_vllm
 import reparse_llm_outputs
+import summarize_llm_runtime
 
 
 class ReparseArtifactCleanupTest(unittest.TestCase):
@@ -41,10 +43,60 @@ class ReparseArtifactCleanupTest(unittest.TestCase):
             self.assertEqual(output_paths["raw"], "unit.raw.txt")
 
 
+class PromptPackageContractTest(unittest.TestCase):
+    def test_rejects_historical_v1_source_contract(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["source_modification_unit_schema_version"] = "compact_modification_unit_v1"
+
+        with self.assertRaisesRegex(ValueError, "accepts only prompt units generated from"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("historical.prompt.json"))
+
+    def test_requires_current_token_plan(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package.pop("token_plan")
+
+        with self.assertRaisesRegex(ValueError, "requires token_plan.policy"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("missing_plan.prompt.json"))
+
+    def test_rejects_wrong_token_plan_policy(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["token_plan"]["policy"] = "wrong_policy"
+
+        with self.assertRaisesRegex(ValueError, "requires token_plan.policy"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("wrong_policy.prompt.json"))
+
+    def test_rejects_non_positive_planned_output_tokens(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["token_plan"]["planned_output_tokens"] = 0
+        prompt_package["token_plan"]["max_tokens"] = 0
+
+        with self.assertRaisesRegex(ValueError, "planned_output_tokens > 0"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("zero_output.prompt.json"))
+
+    def test_rejects_token_plan_max_tokens_mismatch(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["token_plan"]["max_tokens"] = 512
+
+        with self.assertRaisesRegex(ValueError, "max_tokens == token_plan.planned_output_tokens"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("max_mismatch.prompt.json"))
+
+
 #This function builds a minimal payload-only prompt package for validation tests.
 def build_prompt_package() -> dict:
     return {
         "schema_version": "prompt_unit_v1",
+        "source_modification_unit_schema_version": "compact_modification_unit_v2",
+        "token_plan": {
+            "policy": "compact_patch_token_budget_v2",
+            "estimated_input_tokens": 10,
+            "planned_output_tokens": 1536,
+            "total_planned_tokens": 1546,
+            "prompt_target_context": 8192,
+            "runtime_max_model_len": 12288,
+            "max_tokens": 1536,
+            "overflow_tokens": 0,
+            "breakdown": {},
+        },
         "parent_group_id": "parent_001",
         "prompt_unit_id": "unit_001",
         "prompt_contract": "patch_output",
@@ -99,6 +151,18 @@ def build_mixed_prompt_package(payload_length_bytes: int) -> dict:
 def build_header_prompt_package() -> dict:
     return {
         "schema_version": "prompt_unit_v1",
+        "source_modification_unit_schema_version": "compact_modification_unit_v2",
+        "token_plan": {
+            "policy": "compact_patch_token_budget_v2",
+            "estimated_input_tokens": 10,
+            "planned_output_tokens": 1536,
+            "total_planned_tokens": 1546,
+            "prompt_target_context": 8192,
+            "runtime_max_model_len": 12288,
+            "max_tokens": 1536,
+            "overflow_tokens": 0,
+            "breakdown": {},
+        },
         "parent_group_id": "parent_001",
         "prompt_unit_id": "unit_header_001",
         "prompt_contract": "patch_output",
@@ -560,62 +624,185 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertEqual(result["reason"], "replacement_uint_below_min")
 
 
-#This test case covers the hybrid output-token budget policy.
-class OutputBudgetPolicyTest(unittest.TestCase):
-    def test_header_only_budget_is_not_based_on_header_region_count(self) -> None:
-        prompt_package = build_header_prompt_package()
-        regions = prompt_package["input_traceability"]["editable_regions"]
-        regions.extend(
-            {
-                "identity_type": "physical_header_region",
-                "packet_id": "packet_000001",
-                "region_id": f"packet_000001:header_{index}",
-                "region_type": "header_field",
-                "field": f"header_{index}",
-                "format": "uint",
-                "allowed_operations": ["replace_uint"],
-                "constraints": {"min": 0, "max": 255},
-                "current_value": 1,
-            }
-            for index in range(17)
-        )
+#This backend records generation calls and returns contract-valid empty header edits.
+class SyntheticLlm:
+    def __init__(self, token_counts: dict[str, int]) -> None:
+        self.token_counts = token_counts
+        self.single_generation_calls = 0
+        self.batch_generation_calls: list[list[str]] = []
+        self.batch_max_tokens: list[list[int]] = []
 
-        desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
+    def count_chat_tokens(self, messages: list[dict]) -> int:
+        return self.token_counts[str(messages[0]["content"])]
+
+    def create_chat_completion(self, *, messages: list[dict], **_kwargs: object):
+        self.single_generation_calls += 1
+        prompt_unit_id = str(messages[0]["content"])
+        output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": prompt_unit_id,
+            "header_edits": [],
+        }
+        return iter([{"choices": [{"delta": {"content": json.dumps(output)}}]}])
+
+    def create_chat_completions_batch(
+        self,
+        *,
+        messages_batch: list[list[dict]],
+        generation_params_batch: list[dict],
+    ) -> list[str]:
+        prompt_unit_ids = [str(messages[0]["content"]) for messages in messages_batch]
+        self.batch_generation_calls.append(prompt_unit_ids)
+        self.batch_max_tokens.append([int(params["max_tokens"]) for params in generation_params_batch])
+        return [
+            json.dumps(
+                {
+                    "schema_version": "patch_output_v1",
+                    "parent_group_id": "parent_001",
+                    "prompt_unit_id": prompt_unit_id,
+                    "header_edits": [],
+                }
+            )
+            for prompt_unit_id in prompt_unit_ids
+        ]
+
+
+def build_runtime_generation_params(runtime_max_model_len: int) -> dict:
+    return {
+        "temperature": 0.0,
+        "top_p": 0.95,
+        "prompt_target_context": 80,
+        "runtime_max_model_len": runtime_max_model_len,
+        "n_ctx": runtime_max_model_len,
+        "n_ctx_mode": "runtime_max_model_len",
+        "chars_per_token_estimate": 3.0,
+    }
+
+
+def build_runtime_prompt(prompt_unit_id: str, planned_output_tokens: int, estimated_input_tokens: int = 10) -> dict:
+    prompt_package = build_header_prompt_package()
+    prompt_package["prompt_unit_id"] = prompt_unit_id
+    prompt_package["group_id"] = prompt_unit_id
+    prompt_package["messages"] = [{"role": "user", "content": prompt_unit_id}]
+    prompt_package["token_plan"].update(
+        {
+            "estimated_input_tokens": estimated_input_tokens,
+            "planned_output_tokens": planned_output_tokens,
+            "total_planned_tokens": estimated_input_tokens + planned_output_tokens,
+            "prompt_target_context": 80,
+            "runtime_max_model_len": 100,
+            "max_tokens": planned_output_tokens,
+            "overflow_tokens": 0,
+        }
+    )
+    return prompt_package
+
+
+#This test case covers direct runtime consumption of compact_patch_token_budget_v2.
+class TokenPlanRuntimeTest(unittest.TestCase):
+    def test_runtime_max_tokens_equals_planned_output_tokens_without_legacy_budgeting(self) -> None:
+        llm = SyntheticLlm({"unit_header_001": 40})
+        prompt_package = build_runtime_prompt("unit_header_001", planned_output_tokens=37)
+
+        generation_params, runtime_plan = run_llm_batch.build_prompt_generation_params(
+            llm=llm,
             prompt_package=prompt_package,
-            output_token_cap=1536,
+            base_generation_params=build_runtime_generation_params(100),
         )
 
-        self.assertEqual(desired_tokens, 1536)
-        self.assertEqual(policy["prompt_class"], "header_only")
-        self.assertEqual(policy["header_editable_region_count"], 18)
-        self.assertEqual(policy["payload_editable_region_count"], 0)
+        self.assertEqual(generation_params["max_tokens"], 37)
+        self.assertEqual(runtime_plan["max_tokens"], 37)
+        self.assertEqual(runtime_plan["planned_output_tokens"], 37)
+        self.assertEqual(runtime_plan["real_input_tokens"], 40)
+        self.assertEqual(runtime_plan["input_estimation_error_tokens"], 30)
+        self.assertEqual(runtime_plan["overflow_tokens"], 0)
+        self.assertNotIn("dynamic_output_budget_policy", runtime_plan)
+        self.assertNotIn("expected_output_patch_tokens", runtime_plan)
 
-    def test_payload_involved_budget_uses_payload_editable_bytes(self) -> None:
-        prompt_package = build_payload_prompt_package(length_bytes=512)
+    def test_single_prompt_overflow_is_controlled_and_does_not_call_llm(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prompt_path = root / "overflow.prompt.json"
+            prompt_package = build_runtime_prompt("overflow", planned_output_tokens=30)
+            prompt_path.write_text(json.dumps(prompt_package), encoding="utf-8")
+            output_dirs = run_llm_batch.prepare_model_output_dirs(root / "outputs", "synthetic", "run_test")
+            llm = SyntheticLlm({"overflow": 80})
 
-        desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
-            prompt_package=prompt_package,
-            output_token_cap=1536,
-        )
+            metadata = run_llm_batch.run_single_prompt(
+                llm=llm,
+                prompt_path=prompt_path,
+                model_path=Path("synthetic"),
+                model_name="synthetic",
+                output_dirs=output_dirs,
+                generation_params=build_runtime_generation_params(100),
+                heartbeat_seconds=0,
+                prompt_index=1,
+                total_prompts=1,
+            )
 
-        self.assertEqual(desired_tokens, 1280)
-        self.assertEqual(policy["prompt_class"], "payload_involved")
-        self.assertEqual(policy["payload_editable_bytes"], 512)
-        self.assertEqual(policy["budget_tier"], "payload_bytes_le_512")
+            self.assertEqual(llm.single_generation_calls, 0)
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(metadata["failure_reason"], "input_context_overflow")
+            self.assertEqual(metadata["recommended_action"], "rerun_step15_with_smaller_units_or_larger_context")
+            self.assertEqual(metadata["real_input_tokens"], 80)
+            self.assertEqual(metadata["planned_output_tokens"], 30)
+            self.assertEqual(metadata["source_modification_unit_id"], "overflow")
+            self.assertEqual(metadata["prompt_target_context"], 80)
+            self.assertEqual(metadata["runtime_max_model_len"], 100)
+            self.assertEqual(metadata["token_plan"]["policy"], "compact_patch_token_budget_v2")
+            self.assertEqual(metadata["overflow_tokens"], 10)
+            self.assertTrue(Path(metadata["output_paths"]["failure"]).is_file())
 
-    def test_mixed_header_payload_budget_uses_header_floor(self) -> None:
-        prompt_package = build_mixed_prompt_package(payload_length_bytes=64)
+    def test_batch_excludes_overflow_and_processes_valid_neighbors(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prompt_paths = []
+            for prompt_unit_id, planned_output_tokens in [("fit_before", 20), ("overflow", 30), ("fit_after", 20)]:
+                prompt_path = root / f"{prompt_unit_id}.prompt.json"
+                prompt_path.write_text(
+                    json.dumps(build_runtime_prompt(prompt_unit_id, planned_output_tokens)),
+                    encoding="utf-8",
+                )
+                prompt_paths.append(prompt_path)
+            llm = SyntheticLlm({"fit_before": 40, "overflow": 80, "fit_after": 40})
 
-        desired_tokens, policy = run_llm_batch.estimate_desired_output_tokens(
-            prompt_package=prompt_package,
-            output_token_cap=1536,
-        )
+            with patch.object(run_llm_batch, "load_model", return_value=llm):
+                summary = run_llm_batch.run_model_batch(
+                    model_path=Path("synthetic"),
+                    prompt_paths=prompt_paths,
+                    output_root=root / "outputs",
+                    run_id="run_batch",
+                    generation_params=build_runtime_generation_params(100),
+                    progress_every=0,
+                    heartbeat_seconds=0,
+                    llm_batch_size=2,
+                )
 
-        self.assertEqual(desired_tokens, 1536)
-        self.assertEqual(policy["prompt_class"], "payload_involved")
-        self.assertEqual(policy["payload_editable_bytes"], 64)
-        self.assertEqual(policy["header_editable_region_count"], 1)
-        self.assertEqual(policy["budget_tier"], "payload_bytes_le_64_mixed_header_floor")
+            self.assertEqual(llm.batch_generation_calls, [["fit_before", "fit_after"]])
+            self.assertEqual(llm.batch_max_tokens, [[20, 20]])
+            self.assertEqual(summary["accepted_count"], 2)
+            self.assertEqual(summary["failed_count"], 1)
+            overflow_metadata = json.loads(
+                (root / "outputs" / "synthetic" / "run_batch" / "metadata" / "overflow.metadata.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(overflow_metadata["failure_reason"], "input_context_overflow")
+            run_dir = root / "outputs" / "synthetic" / "run_batch"
+            summary_paths = summarize_llm_runtime.summarize_run(
+                run_dir=run_dir,
+                prompt_dirs=[root],
+            )
+            runtime_summary = json.loads(summary_paths["json"].read_text(encoding="utf-8"))
+            self.assertEqual(runtime_summary["counts"]["by_failure_reason"]["input_context_overflow"], 1)
+            self.assertEqual(runtime_summary["aggregates"]["llm_attempted"]["prompt_count"], 2)
+            overflow_row = next(
+                row for row in runtime_summary["per_prompt"] if row["prompt_unit_id"] == "overflow"
+            )
+            self.assertEqual(overflow_row["planned_output_tokens"], 30)
+            self.assertEqual(overflow_row["runtime_max_model_len"], 100)
+            self.assertEqual(overflow_row["overflow_tokens"], 10)
 
 
 #This test case covers vLLM model-discovery behavior.
@@ -636,6 +823,31 @@ class VllmModelDiscoveryTest(unittest.TestCase):
             )
 
         self.assertEqual(selected, [valid_model_dir])
+
+    def test_vllm_chat_token_count_uses_the_model_chat_template(self) -> None:
+        class FakeTokenizer:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def apply_chat_template(self, messages: list[dict], **kwargs: object) -> list[int]:
+                self.kwargs = kwargs
+                return [1, 2, 3, 4]
+
+        class FakeEngine:
+            def __init__(self, tokenizer: FakeTokenizer) -> None:
+                self.tokenizer = tokenizer
+
+            def get_tokenizer(self) -> FakeTokenizer:
+                return self.tokenizer
+
+        tokenizer = FakeTokenizer()
+        adapter = object.__new__(run_llm_batch_vllm.VllmChatCompletionAdapter)
+        adapter.llm = FakeEngine(tokenizer)
+
+        token_count = adapter.count_chat_tokens([{"role": "user", "content": "test"}])
+
+        self.assertEqual(token_count, 4)
+        self.assertEqual(tokenizer.kwargs, {"tokenize": True, "add_generation_prompt": True})
 
 
 if __name__ == "__main__":

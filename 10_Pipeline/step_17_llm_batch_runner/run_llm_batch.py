@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
-import math
 import re
 import sys
 import threading
@@ -31,6 +31,8 @@ PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
 PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
+ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
+TOKEN_BUDGET_POLICY = "compact_patch_token_budget_v2"
 FIELD_ALIASES = {
     "region_type": ["region_type", "type"],
     "operation": ["operation", "op"],
@@ -82,6 +84,10 @@ def validate_prompt_manifest(prompt_manifest: Any, manifest_path: Path) -> dict[
         raise ValueError(
             f"Prompt manifest must use schema_version={PROMPT_UNITS_MANIFEST_SCHEMA_VERSION}: {manifest_path}"
         )
+    if metadata.get("token_budget_policy") != TOKEN_BUDGET_POLICY:
+        raise ValueError(
+            f"Prompt manifest must use token_budget_policy={TOKEN_BUDGET_POLICY}: {manifest_path}"
+        )
     prompt_units = prompt_manifest.get("prompt_units")
     if not isinstance(prompt_units, list):
         raise ValueError(f"Prompt manifest must contain a prompt_units list: {manifest_path}")
@@ -99,6 +105,24 @@ def validate_prompt_package(prompt_package: Any, prompt_path: Path) -> dict[str,
     if prompt_package.get("prompt_contract") != PATCH_PROMPT_CONTRACT:
         raise ValueError(
             f"Step 17 currently expects prompt_contract={PATCH_PROMPT_CONTRACT}: {prompt_path}"
+        )
+    if prompt_package.get("source_modification_unit_schema_version") != ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
+        raise ValueError(
+            "Step 17 accepts only prompt units generated from "
+            f"source_modification_unit_schema_version={ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION}: {prompt_path}"
+        )
+    token_plan = prompt_package.get("token_plan")
+    if not isinstance(token_plan, dict) or token_plan.get("policy") != TOKEN_BUDGET_POLICY:
+        raise ValueError(
+            f"Step 17 requires token_plan.policy={TOKEN_BUDGET_POLICY}: {prompt_path}"
+        )
+    planned_output_tokens = token_plan.get("planned_output_tokens")
+    if isinstance(planned_output_tokens, bool) or not isinstance(planned_output_tokens, int) or planned_output_tokens <= 0:
+        raise ValueError(f"Step 17 requires token_plan.planned_output_tokens > 0: {prompt_path}")
+    if token_plan.get("max_tokens") != planned_output_tokens:
+        raise ValueError(
+            "Step 17 requires token_plan.max_tokens == token_plan.planned_output_tokens: "
+            f"{prompt_path}"
         )
     messages = prompt_package.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -226,27 +250,10 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
     return {
         "temperature": args.temperature if args.temperature is not None else float(llm_config.get("temperature", 0.0)),
         "top_p": args.top_p if args.top_p is not None else float(llm_config.get("top_p", 0.95)),
-        "output_token_margin_percent": (
-            args.output_token_margin_percent
-            if args.output_token_margin_percent is not None
-            else float(llm_config.get("output_token_margin_percent", 20.0))
-        ),
-        "context_reserve_tokens": (
-            args.context_reserve_tokens
-            if args.context_reserve_tokens is not None
-            else int(llm_config.get("context_reserve_tokens", 256))
-        ),
         "prompt_target_context": int(llm_config.get("prompt_target_context", 4096)),
         "runtime_max_model_len": runtime_max_model_len,
-        "expected_output_patch_tokens": (
-            args.expected_output_patch_tokens
-            if args.expected_output_patch_tokens is not None
-            else int(llm_config.get("expected_output_patch_tokens", 1536))
-        ),
-        "n_ctx": args.n_ctx if args.n_ctx is not None else runtime_max_model_len,
-        "n_ctx_mode": "fixed_cli" if args.n_ctx is not None else "runtime_max_model_len",
-        "min_n_ctx": args.min_n_ctx if args.min_n_ctx is not None else int(llm_config.get("min_n_ctx", 2048)),
-        "max_n_ctx": args.max_n_ctx if args.max_n_ctx is not None else int(llm_config.get("max_n_ctx", 32768)),
+        "n_ctx": runtime_max_model_len,
+        "n_ctx_mode": "runtime_max_model_len",
         "chars_per_token_estimate": (
             args.chars_per_token_estimate
             if args.chars_per_token_estimate is not None
@@ -255,8 +262,7 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
     }
 
 
-#This function converts chat messages into a stable text representation for input-token estimation.
-#The actual chat template can add a few extra tokens, so Step 17 also keeps a context reserve.
+#This function converts chat messages into a stable text representation for tokenizer fallback measurement.
 def messages_to_estimation_text(messages: list[dict[str, Any]]) -> str:
     parts = []
     for message in messages:
@@ -266,95 +272,27 @@ def messages_to_estimation_text(messages: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
-#This function estimates token count from text length before the model is loaded.
-#It is only used for context preflight before the vLLM model is loaded.
-def estimate_tokens_from_char_count(text: str, chars_per_token_estimate: float) -> int:
-    if chars_per_token_estimate <= 0:
-        raise ValueError("--chars-per-token-estimate must be greater than zero.")
-    return max(1, math.ceil(len(text) / chars_per_token_estimate))
-
-
-#This function returns the next power of two greater than or equal to a positive integer.
-def next_power_of_two(value: int) -> int:
-    if value <= 1:
-        return 1
-    return 2 ** math.ceil(math.log2(value))
-
-
-#This function estimates the context window required by all selected prompts before model loading.
-#A single model context length is selected for the whole run before the backend is loaded.
+#This function records that the configured runtime model length is the backend context boundary.
 def estimate_dynamic_n_ctx(prompt_paths: list[Path], generation_params: dict[str, Any]) -> dict[str, Any]:
-    if generation_params["n_ctx"] is not None:
-        return {
-            "mode": generation_params.get("n_ctx_mode", "fixed_cli"),
-            "n_ctx": generation_params["n_ctx"],
-            "largest_required_context_tokens": None,
-            "largest_prompt_file": None,
-            "was_capped_by_max_n_ctx": False,
-        }
-
-    largest_required_context_tokens = 0
-    largest_prompt_file = None
-    largest_input_tokens_estimate = 0
-    largest_output_tokens_estimate = 0
-
-    for prompt_path in prompt_paths:
-        prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
-        message_text = messages_to_estimation_text(prompt_package["messages"])
-        input_tokens_estimate = estimate_tokens_from_char_count(
-            message_text,
-            generation_params["chars_per_token_estimate"],
-        )
-        output_tokens_estimate = int(generation_params["expected_output_patch_tokens"])
-        required_context_tokens = (
-            input_tokens_estimate
-            + output_tokens_estimate
-            + int(generation_params["context_reserve_tokens"])
-        )
-
-        if required_context_tokens > largest_required_context_tokens:
-            largest_required_context_tokens = required_context_tokens
-            largest_prompt_file = str(prompt_path)
-            largest_input_tokens_estimate = input_tokens_estimate
-            largest_output_tokens_estimate = output_tokens_estimate
-
-    desired_n_ctx = next_power_of_two(largest_required_context_tokens)
-    desired_n_ctx = max(int(generation_params["min_n_ctx"]), desired_n_ctx)
-    selected_n_ctx = min(desired_n_ctx, int(generation_params["max_n_ctx"]))
     return {
-        "mode": "dynamic_prompt_preflight",
-        "n_ctx": selected_n_ctx,
-        "desired_n_ctx": desired_n_ctx,
-        "min_n_ctx": generation_params["min_n_ctx"],
-        "max_n_ctx": generation_params["max_n_ctx"],
-        "chars_per_token_estimate": generation_params["chars_per_token_estimate"],
-        "largest_required_context_tokens": largest_required_context_tokens,
-        "largest_input_tokens_estimate": largest_input_tokens_estimate,
-        "largest_output_tokens_estimate": largest_output_tokens_estimate,
-        "largest_prompt_file": largest_prompt_file,
-        "was_capped_by_max_n_ctx": selected_n_ctx < desired_n_ctx,
+        "mode": "runtime_max_model_len",
+        "n_ctx": int(generation_params["runtime_max_model_len"]),
+        "prompt_count_validated": len(prompt_paths),
+        "output_budget_source": "prompt_unit.token_plan.planned_output_tokens",
+        "was_capped_by_max_n_ctx": False,
     }
 
 
 #This function measures how many tokens the current prompt messages occupy for the loaded model.
 def measure_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
+    if hasattr(llm, "count_chat_tokens"):
+        return int(llm.count_chat_tokens(messages))
     estimation_text = messages_to_estimation_text(messages)
     try:
         tokens = llm.tokenize(estimation_text.encode("utf-8"), add_bos=True)
     except TypeError:
         tokens = llm.tokenize(estimation_text.encode("utf-8"))
     return len(tokens)
-
-
-OUTPUT_BUDGET_POLICY_NAME = "hybrid_output_token_budget_v1"
-HEADER_ONLY_OUTPUT_BUDGET = 1536
-MIXED_HEADER_OUTPUT_BUDGET_FLOOR = 1536
-PAYLOAD_OUTPUT_BUDGET_BY_EDITABLE_BYTES = [
-    (64, 768),
-    (256, 1024),
-    (512, 1280),
-]
-PAYLOAD_OUTPUT_BUDGET_ABOVE_MAX_BYTES = 1536
 
 
 #This function counts editable regions declared by a Step 16 prompt unit.
@@ -366,85 +304,7 @@ def get_editable_region_count(prompt_package: dict[str, Any]) -> int:
     return 0
 
 
-#This function summarizes editable payload/header regions for dynamic output-token budgeting.
-def summarize_editable_regions_for_output_budget(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    traceability = prompt_package.get("input_traceability", {})
-    editable_regions = traceability.get("editable_regions", [])
-    summary = {
-        "editable_region_count": 0,
-        "payload_editable_region_count": 0,
-        "header_editable_region_count": 0,
-        "payload_editable_bytes": 0,
-        "prompt_class": None,
-    }
-    if not isinstance(editable_regions, list):
-        return summary
-
-    for editable_region in editable_regions:
-        if not isinstance(editable_region, dict):
-            continue
-        summary["editable_region_count"] += 1
-        if editable_region.get("identity_type") == "physical_header_region":
-            summary["header_editable_region_count"] += 1
-            continue
-        summary["payload_editable_region_count"] += 1
-        length_bytes = editable_region.get("length_bytes")
-        if isinstance(length_bytes, int) and length_bytes > 0:
-            summary["payload_editable_bytes"] += length_bytes
-
-    if summary["payload_editable_region_count"] > 0:
-        summary["prompt_class"] = "payload_involved"
-    elif summary["header_editable_region_count"] > 0:
-        summary["prompt_class"] = "header_only"
-    return summary
-
-
-#This function maps editable payload bytes to the configured output-token tier.
-def estimate_payload_output_budget(payload_editable_bytes: int) -> tuple[int, str]:
-    for max_payload_bytes, output_tokens in PAYLOAD_OUTPUT_BUDGET_BY_EDITABLE_BYTES:
-        if payload_editable_bytes <= max_payload_bytes:
-            return output_tokens, f"payload_bytes_le_{max_payload_bytes}"
-    return PAYLOAD_OUTPUT_BUDGET_ABOVE_MAX_BYTES, "payload_bytes_above_512"
-
-
-#This function estimates the desired output-token budget for one prompt unit.
-def estimate_desired_output_tokens(
-    *,
-    prompt_package: dict[str, Any],
-    output_token_cap: int,
-) -> tuple[int, dict[str, Any]]:
-    region_summary = summarize_editable_regions_for_output_budget(prompt_package)
-    prompt_class = region_summary["prompt_class"]
-    if prompt_class is None:
-        raise ValueError("Step 17 supports only header_only or payload_involved prompt units.")
-    if prompt_class == "header_only":
-        estimated_output_tokens = HEADER_ONLY_OUTPUT_BUDGET
-        budget_tier = "header_only"
-    else:
-        estimated_output_tokens, budget_tier = estimate_payload_output_budget(
-            int(region_summary["payload_editable_bytes"])
-        )
-        if region_summary["header_editable_region_count"] > 0 and estimated_output_tokens < MIXED_HEADER_OUTPUT_BUDGET_FLOOR:
-            estimated_output_tokens = MIXED_HEADER_OUTPUT_BUDGET_FLOOR
-            budget_tier = f"{budget_tier}_mixed_header_floor"
-
-    desired_output_tokens = min(estimated_output_tokens, output_token_cap)
-    policy_details = {
-        "policy": OUTPUT_BUDGET_POLICY_NAME,
-        "editable_region_count": region_summary["editable_region_count"],
-        "payload_editable_region_count": region_summary["payload_editable_region_count"],
-        "header_editable_region_count": region_summary["header_editable_region_count"],
-        "payload_editable_bytes": region_summary["payload_editable_bytes"],
-        "prompt_class": prompt_class,
-        "budget_tier": budget_tier,
-        "estimated_output_tokens": estimated_output_tokens,
-        "output_token_cap": output_token_cap,
-        "was_capped_by_output_token_cap": desired_output_tokens < estimated_output_tokens,
-    }
-    return desired_output_tokens, policy_details
-
-
-#This function calculates max_tokens for one compact patch prompt.
+#This function applies the shared Step 15/16 token plan to one runtime prompt without replanning or clipping.
 def build_prompt_generation_params(
     *,
     llm: Any,
@@ -453,54 +313,34 @@ def build_prompt_generation_params(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     prompt_generation_params = dict(base_generation_params)
     real_input_tokens = measure_input_tokens(llm, prompt_package["messages"])
-    estimated_input_tokens = prompt_package.get("estimated_input_tokens")
-    if isinstance(estimated_input_tokens, (int, float)) and estimated_input_tokens > 0:
-        estimation_error_ratio = real_input_tokens / float(estimated_input_tokens)
+    source_token_plan = prompt_package["token_plan"]
+    estimated_input_tokens = int(source_token_plan["estimated_input_tokens"])
+    planned_output_tokens = int(source_token_plan["planned_output_tokens"])
+    if estimated_input_tokens > 0:
+        input_estimation_error_ratio = (
+            real_input_tokens - estimated_input_tokens
+        ) / float(estimated_input_tokens)
     else:
-        estimation_error_ratio = None
+        input_estimation_error_ratio = None
+    runtime_max_model_len = int(base_generation_params["runtime_max_model_len"])
+    overflow_tokens = max(0, real_input_tokens + planned_output_tokens - runtime_max_model_len)
 
-    output_token_cap = int(base_generation_params["expected_output_patch_tokens"])
-    desired_max_tokens, output_budget_policy = estimate_desired_output_tokens(
-        prompt_package=prompt_package,
-        output_token_cap=output_token_cap,
+    prompt_generation_params["max_tokens"] = planned_output_tokens
+    runtime_token_plan = deepcopy(source_token_plan)
+    runtime_token_plan["planning_runtime_max_model_len"] = source_token_plan.get("runtime_max_model_len")
+    runtime_token_plan["planning_overflow_tokens"] = source_token_plan.get("overflow_tokens")
+    runtime_token_plan.update(
+        {
+            "real_input_tokens": real_input_tokens,
+            "input_estimation_error_tokens": real_input_tokens - estimated_input_tokens,
+            "input_estimation_error_ratio": input_estimation_error_ratio,
+            "runtime_max_model_len": runtime_max_model_len,
+            "max_tokens": planned_output_tokens,
+            "overflow_tokens": overflow_tokens,
+            "fits_runtime_max_model_len": overflow_tokens == 0,
+        }
     )
-    available_context_tokens = (
-        int(base_generation_params["n_ctx"])
-        - real_input_tokens
-        - int(base_generation_params["context_reserve_tokens"])
-    )
-    if available_context_tokens <= 0:
-        raise ValueError(
-            "Prompt does not fit in the configured context window after reserve tokens. "
-            f"real_input_tokens={real_input_tokens}, "
-            f"n_ctx={base_generation_params['n_ctx']}, "
-            f"context_reserve_tokens={base_generation_params['context_reserve_tokens']}"
-        )
-
-    max_tokens = min(desired_max_tokens, available_context_tokens)
-    prompt_generation_params["max_tokens"] = max_tokens
-    token_plan = {
-        "mode": "compact_patch_dynamic_output_budget_v1",
-        "estimated_input_tokens": estimated_input_tokens,
-        "real_input_tokens": real_input_tokens,
-        "estimation_error_ratio": estimation_error_ratio,
-        "prompt_target_context": base_generation_params["prompt_target_context"],
-        "runtime_max_model_len": base_generation_params["runtime_max_model_len"],
-        "desired_max_tokens": desired_max_tokens,
-        "max_tokens": max_tokens,
-        "expected_output_patch_tokens": base_generation_params["expected_output_patch_tokens"],
-        "output_token_cap": output_token_cap,
-        "dynamic_output_budget_policy": output_budget_policy,
-        "editable_region_count": output_budget_policy["editable_region_count"],
-        "payload_editable_region_count": output_budget_policy["payload_editable_region_count"],
-        "header_editable_region_count": output_budget_policy["header_editable_region_count"],
-        "payload_editable_bytes": output_budget_policy["payload_editable_bytes"],
-        "prompt_class": output_budget_policy["prompt_class"],
-        "context_reserve_tokens": base_generation_params["context_reserve_tokens"],
-        "available_context_tokens": available_context_tokens,
-        "was_capped_by_context": max_tokens < desired_max_tokens,
-    }
-    return prompt_generation_params, token_plan
+    return prompt_generation_params, runtime_token_plan
 
 
 #This function extracts the text response from the model chat completion response.
@@ -1151,13 +991,29 @@ def build_run_metadata(
         "prompt_contract": prompt_package.get("prompt_contract"),
         "prompt_file": str(prompt_path),
         "source_modification_unit_file": prompt_package.get("source_modification_unit_file"),
+        "source_modification_unit_id": (
+            prompt_package.get("source_modification_unit_id")
+            or prompt_package.get("prompt_unit_id")
+        ),
         "source_modification_unit_schema_version": prompt_package.get("source_modification_unit_schema_version"),
         "model_name": model_name,
         "model_path": str(model_path),
         "generation_params": generation_params,
+        "source_token_plan": deepcopy(prompt_package.get("token_plan")),
         "token_plan": token_plan,
         "real_input_tokens": token_plan.get("real_input_tokens") if token_plan else None,
+        "input_estimation_error_tokens": token_plan.get("input_estimation_error_tokens") if token_plan else None,
+        "input_estimation_error_ratio": token_plan.get("input_estimation_error_ratio") if token_plan else None,
+        "planned_output_tokens": token_plan.get("planned_output_tokens") if token_plan else None,
+        "prompt_target_context": token_plan.get("prompt_target_context") if token_plan else None,
+        "runtime_max_model_len": token_plan.get("runtime_max_model_len") if token_plan else None,
+        "overflow_tokens": token_plan.get("overflow_tokens") if token_plan else None,
         "max_tokens": token_plan.get("max_tokens") if token_plan else None,
+        "recommended_action": (
+            "rerun_step15_with_smaller_units_or_larger_context"
+            if failure_reason == "input_context_overflow"
+            else None
+        ),
         "started_at_utc": started_at_utc,
         "finished_at_utc": finished_at_utc,
         "runtime_seconds": runtime_seconds,
@@ -1184,6 +1040,74 @@ def write_failure_outputs(
         write_json(rejected_path, rejected_json)
         output_paths["rejected_json"] = str(rejected_path)
     return output_paths
+
+
+#This function writes a controlled failure for a prompt whose real input plus planned output exceeds the backend context.
+def write_input_context_overflow_metadata(
+    *,
+    prompt_package: dict[str, Any],
+    prompt_path: Path,
+    model_path: Path,
+    model_name: str,
+    output_dirs: dict[str, Path],
+    generation_params: dict[str, Any],
+    token_plan: dict[str, Any],
+    started_at_utc: str,
+    runtime_seconds: float,
+) -> dict[str, Any]:
+    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_path.stem.replace(".prompt", ""))
+    parent_group_id = str(prompt_package.get("parent_group_id") or "")
+    recommended_action = "rerun_step15_with_smaller_units_or_larger_context"
+    validation_result = {
+        "accepted": False,
+        "reason": "input_context_overflow",
+        "recommended_action": recommended_action,
+        "overflow_tokens": int(token_plan["overflow_tokens"]),
+    }
+    failure_report = {
+        "failure_reason": "input_context_overflow",
+        "recommended_action": recommended_action,
+        "prompt_unit_id": prompt_unit_id,
+        "parent_group_id": parent_group_id,
+        "source_modification_unit_id": prompt_package.get("source_modification_unit_id") or prompt_unit_id,
+        "prompt_file": str(prompt_path),
+        "model_name": model_name,
+        "estimated_input_tokens": token_plan.get("estimated_input_tokens"),
+        "real_input_tokens": token_plan.get("real_input_tokens"),
+        "planned_output_tokens": token_plan.get("planned_output_tokens"),
+        "prompt_target_context": token_plan.get("prompt_target_context"),
+        "runtime_max_model_len": token_plan.get("runtime_max_model_len"),
+        "overflow_tokens": token_plan.get("overflow_tokens"),
+        "token_plan_policy": token_plan.get("policy"),
+        "validation_result": validation_result,
+    }
+    output_paths = write_failure_outputs(
+        output_dirs=output_dirs,
+        output_stem=prompt_unit_id,
+        failure_report=failure_report,
+        rejected_json=None,
+    )
+    metadata_path = output_dirs["metadata"] / f"{prompt_unit_id}.metadata.json"
+    output_paths["metadata"] = str(metadata_path)
+    finished_at_utc = datetime.now(timezone.utc).isoformat()
+    metadata = build_run_metadata(
+        status="failed",
+        failure_reason="input_context_overflow",
+        prompt_package=prompt_package,
+        prompt_path=prompt_path,
+        model_path=model_path,
+        model_name=model_name,
+        generation_params=generation_params,
+        token_plan=token_plan,
+        started_at_utc=started_at_utc,
+        finished_at_utc=finished_at_utc,
+        runtime_seconds=runtime_seconds,
+        output_paths=output_paths,
+        validation_result=validation_result,
+        generation_response_metadata=None,
+    )
+    write_json(metadata_path, metadata)
+    return metadata
 
 
 #This function runs one prompt through one already-loaded model.
@@ -1220,8 +1144,6 @@ def run_single_prompt(
     output_paths: dict[str, str] = {}
 
     traceability = prompt_package["input_traceability"]
-    editable_packet_ids = traceability.get("editable_packet_ids", [])
-    editable_packet_count = len(editable_packet_ids) if isinstance(editable_packet_ids, list) else 0
     editable_region_count = get_editable_region_count(prompt_package)
 
     if editable_region_count == 0:
@@ -1233,30 +1155,17 @@ def run_single_prompt(
         }
         failure_reason = "no_editable_regions_not_supported"
         validation_result = {"accepted": False, "reason": failure_reason, "patch_count": 0}
-        token_plan = {
-            "mode": "invalid_no_editable_regions",
-            "estimated_input_tokens": prompt_package.get("estimated_input_tokens"),
-            "real_input_tokens": 0,
-            "runtime_max_model_len": generation_params["runtime_max_model_len"],
-            "desired_max_tokens": 0,
-            "max_tokens": 0,
-            "expected_output_patch_tokens": generation_params["expected_output_patch_tokens"],
-            "output_token_cap": generation_params["expected_output_patch_tokens"],
-            "dynamic_output_budget_policy": {
-                "policy": OUTPUT_BUDGET_POLICY_NAME,
-                "editable_region_count": editable_region_count,
-                "editable_packet_count": editable_packet_count,
-                "budget_tier": "invalid_no_editable_regions",
-                "estimated_output_tokens": 0,
-                "output_token_cap": generation_params["expected_output_patch_tokens"],
-                "was_capped_by_output_token_cap": False,
-            },
-            "editable_region_count": editable_region_count,
-            "editable_packet_count": editable_packet_count,
-            "context_reserve_tokens": generation_params["context_reserve_tokens"],
-            "available_context_tokens": generation_params["runtime_max_model_len"],
-            "was_capped_by_context": False,
-        }
+        token_plan = deepcopy(prompt_package["token_plan"])
+        token_plan.update(
+            {
+                "real_input_tokens": 0,
+                "input_estimation_error_tokens": -int(token_plan["estimated_input_tokens"]),
+                "input_estimation_error_ratio": 0.0,
+                "runtime_max_model_len": int(generation_params["runtime_max_model_len"]),
+                "overflow_tokens": 0,
+                "fits_runtime_max_model_len": True,
+            }
+        )
         write_json(parsed_path, parsed_output)
         output_paths["parsed"] = str(parsed_path)
         output_paths["metadata"] = str(metadata_path)
@@ -1285,6 +1194,18 @@ def run_single_prompt(
             prompt_package=prompt_package,
             base_generation_params=generation_params,
         )
+        if int(token_plan["overflow_tokens"]) > 0:
+            return write_input_context_overflow_metadata(
+                prompt_package=prompt_package,
+                prompt_path=prompt_path,
+                model_path=model_path,
+                model_name=model_name,
+                output_dirs=output_dirs,
+                generation_params=generation_params,
+                token_plan=token_plan,
+                started_at_utc=started_at_utc,
+                runtime_seconds=time.perf_counter() - start_time,
+            )
         expected_packet_ids = expected_packet_ids_from_traceability(prompt_package)
         progress_state = {
             "visible_packet_count": 0,
@@ -1690,18 +1611,33 @@ def run_model_batch(
                     prompt_package=prompt_package,
                     base_generation_params=generation_params,
                 )
-                pending_batch.append(
-                    {
-                        "prompt_path": prompt_path,
-                        "prompt_package": prompt_package,
-                        "prompt_generation_params": prompt_generation_params,
-                        "token_plan": token_plan,
-                        "started_at_utc": datetime.now(timezone.utc).isoformat(),
-                        "start_time": time.perf_counter(),
-                    }
-                )
-                if len(pending_batch) >= llm_batch_size:
-                    flush_pending_batch(prompt_index)
+                started_at_utc = datetime.now(timezone.utc).isoformat()
+                if int(token_plan["overflow_tokens"]) > 0:
+                    metadata = write_input_context_overflow_metadata(
+                        prompt_package=prompt_package,
+                        prompt_path=prompt_path,
+                        model_path=model_path,
+                        model_name=model_name,
+                        output_dirs=output_dirs,
+                        generation_params=generation_params,
+                        token_plan=token_plan,
+                        started_at_utc=started_at_utc,
+                        runtime_seconds=time.perf_counter() - prompt_started,
+                    )
+                    record_metadata(metadata)
+                else:
+                    pending_batch.append(
+                        {
+                            "prompt_path": prompt_path,
+                            "prompt_package": prompt_package,
+                            "prompt_generation_params": prompt_generation_params,
+                            "token_plan": token_plan,
+                            "started_at_utc": started_at_utc,
+                            "start_time": time.perf_counter(),
+                        }
+                    )
+                    if len(pending_batch) >= llm_batch_size:
+                        flush_pending_batch(prompt_index)
 
         should_print = (
             prompt_index == 1
@@ -1748,8 +1684,6 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--heartbeat-seconds must be zero or a positive integer.")
     if args.llm_batch_size <= 0:
         raise ValueError("--llm-batch-size must be a positive integer.")
-    if args.expected_output_patch_tokens is not None and args.expected_output_patch_tokens <= 0:
-        raise ValueError("--expected-output-patch-tokens must be a positive integer.")
     run_id = args.run_id or build_default_run_id(args.run_label)
     paths = default_cloud_paths(config, args.cloud_root)
     output_root = Path(args.output_root).expanduser() if args.output_root else paths["output_root"]
@@ -1762,22 +1696,10 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         model_filters=args.model_filter,
     )
     generation_params = build_generation_params(config, args)
-    if generation_params["output_token_margin_percent"] < 0:
-        raise ValueError("llm.output_token_margin_percent or --output-token-margin-percent must be zero or positive.")
-    if generation_params["context_reserve_tokens"] < 0:
-        raise ValueError("llm.context_reserve_tokens or --context-reserve-tokens must be zero or positive.")
     if generation_params["prompt_target_context"] <= 0:
         raise ValueError("llm.prompt_target_context must be a positive integer.")
     if generation_params["runtime_max_model_len"] <= 0:
         raise ValueError("llm.runtime_max_model_len or --runtime-max-model-len must be a positive integer.")
-    if generation_params["expected_output_patch_tokens"] <= 0:
-        raise ValueError("llm.expected_output_patch_tokens or --expected-output-patch-tokens must be positive.")
-    if generation_params["min_n_ctx"] <= 0:
-        raise ValueError("llm.min_n_ctx or --min-n-ctx must be a positive integer.")
-    if generation_params["max_n_ctx"] <= 0:
-        raise ValueError("llm.max_n_ctx or --max-n-ctx must be a positive integer.")
-    if generation_params["min_n_ctx"] > generation_params["max_n_ctx"]:
-        raise ValueError("llm.min_n_ctx cannot be larger than llm.max_n_ctx.")
     if generation_params["chars_per_token_estimate"] <= 0:
         raise ValueError("llm.chars_per_token_estimate or --chars-per-token-estimate must be greater than zero.")
     n_ctx_plan = estimate_dynamic_n_ctx(prompt_paths, generation_params)
@@ -1856,39 +1778,9 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, help="Override llm.temperature from config.")
     parser.add_argument("--top-p", type=float, help="Override llm.top_p from config.")
     parser.add_argument(
-        "--output-token-margin-percent",
-        type=float,
-        help="Legacy override kept for old metadata; compact patch prompts use expected_output_patch_tokens.",
-    )
-    parser.add_argument(
-        "--context-reserve-tokens",
-        type=int,
-        help="Override llm.context_reserve_tokens for context-window budgeting.",
-    )
-    parser.add_argument(
-        "--n-ctx",
-        type=int,
-        help="Fixed backend context window size. Overrides runtime_max_model_len.",
-    )
-    parser.add_argument(
         "--runtime-max-model-len",
         type=int,
         help="Hard backend context cap used by vLLM max_model_len.",
-    )
-    parser.add_argument(
-        "--expected-output-patch-tokens",
-        type=int,
-        help="Expected maximum patch-output token budget for compact patch prompting.",
-    )
-    parser.add_argument(
-        "--min-n-ctx",
-        type=int,
-        help="Override llm.min_n_ctx for dynamic prompt preflight.",
-    )
-    parser.add_argument(
-        "--max-n-ctx",
-        type=int,
-        help="Override llm.max_n_ctx for dynamic prompt preflight.",
     )
     parser.add_argument(
         "--chars-per-token-estimate",

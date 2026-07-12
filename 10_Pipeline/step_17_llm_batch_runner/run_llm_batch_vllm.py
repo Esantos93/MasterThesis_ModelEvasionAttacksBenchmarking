@@ -54,6 +54,18 @@ class VllmChatCompletionAdapter:
         decoded_text = text.decode("utf-8") if isinstance(text, bytes) else text
         return tokenizer.encode(decoded_text, add_special_tokens=add_bos)
 
+    #This method measures the exact chat-template token count used by vLLM for one prompt.
+    def count_chat_tokens(self, messages: list[dict[str, Any]]) -> int:
+        tokenizer = self.llm.get_tokenizer()
+        template_kwargs: dict[str, Any] = {
+            "tokenize": True,
+            "add_generation_prompt": True,
+        }
+        if VLLM_CHAT_TEMPLATE_KWARGS:
+            template_kwargs.update(VLLM_CHAT_TEMPLATE_KWARGS)
+        token_ids = tokenizer.apply_chat_template(messages, **template_kwargs)
+        return len(token_ids)
+
     #This method runs one chat completion and returns the response shape expected by shared Step 17 code.
     def create_chat_completion(
         self,
@@ -232,6 +244,15 @@ def main() -> None:
     global VLLM_CHAT_TEMPLATE_KWARGS
 
     args = parse_rise_cloud_args()
+    if (
+        args.vllm_max_model_len is not None
+        and args.runtime_max_model_len is not None
+        and args.vllm_max_model_len != args.runtime_max_model_len
+    ):
+        raise ValueError(
+            "--vllm-max-model-len and --runtime-max-model-len must match so Step 17 validates "
+            "against the actual backend context boundary."
+        )
     VLLM_MODEL_IDS = args.hf_model_id
     VLLM_DTYPE = args.vllm_dtype
     VLLM_GPU_MEMORY_UTILIZATION = args.vllm_gpu_memory_utilization

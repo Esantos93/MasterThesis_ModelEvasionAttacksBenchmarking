@@ -184,6 +184,7 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
 
     runtime_seconds = as_float(metadata.get("runtime_seconds"))
     real_input_tokens = as_int(metadata.get("real_input_tokens"), default=0)
+    planned_output_tokens = as_int(metadata.get("planned_output_tokens"), default=0)
     max_tokens = as_int(metadata.get("max_tokens"), default=0)
     validation_result = metadata.get("validation_result")
     patch_count = None
@@ -213,6 +214,11 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "validation_reason": validation_reason,
         "runtime_seconds": runtime_seconds,
         "real_input_tokens": real_input_tokens,
+        "input_estimation_error_tokens": metadata.get("input_estimation_error_tokens"),
+        "input_estimation_error_ratio": metadata.get("input_estimation_error_ratio"),
+        "planned_output_tokens": planned_output_tokens,
+        "runtime_max_model_len": metadata.get("runtime_max_model_len"),
+        "overflow_tokens": metadata.get("overflow_tokens"),
         "max_tokens": max_tokens,
         "patch_count": patch_count,
         "started_at_utc": metadata.get("started_at_utc"),
@@ -538,6 +544,11 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "validation_reason",
         "runtime_seconds",
         "real_input_tokens",
+        "input_estimation_error_tokens",
+        "input_estimation_error_ratio",
+        "planned_output_tokens",
+        "runtime_max_model_len",
+        "overflow_tokens",
         "max_tokens",
         "patch_count",
         "packet_count",
@@ -633,7 +644,12 @@ def summarize_run(
         for row in rows
         if row.get("status") not in ACCEPTED_STATUSES
     )
-    llm_rows = [row for row in rows if row.get("status") != "auto_empty_no_editable_regions"]
+    llm_rows = [
+        row
+        for row in rows
+        if row.get("status") != "auto_empty_no_editable_regions"
+        and row.get("failure_reason") != "input_context_overflow"
+    ]
     accepted_rows = [row for row in rows if row.get("status") in ACCEPTED_STATUSES]
     failed_rows = [row for row in rows if row.get("status") not in ACCEPTED_STATUSES]
     summary = {
