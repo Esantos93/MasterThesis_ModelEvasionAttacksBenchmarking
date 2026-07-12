@@ -25,7 +25,6 @@ from common.header_policy import (
 )
 from common.io_utils import write_json
 from common.prompt_projection import (
-    estimate_compact_patch_prompt_tokens,
     load_prompt_input_json_data_structure_from_config,
     load_prompt_instructions_profile_from_config,
 )
@@ -37,14 +36,11 @@ from common.token_budget import (
 )
 
 
-#These are the Step 15 artifact schema names produced by the current code.
-HYBRID_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v1"
-HYBRID_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v1"
+#These are the only Step 15 artifact schema names produced by the active code.
 HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
 HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v2"
 HEADERS_FULL_CLASSIFICATION_MANIFEST_SCHEMA_VERSION = "headers_full_classification_manifest_v1"
 HEADERS_FULL_CLASSIFICATION_RECORD_SCHEMA_VERSION = "headers_full_classification_record_v1"
-HYBRID_MODIFICATION_STRATEGY = "hybrid_physical_header_canonical_payload_strategy_v1"
 HEADER_ONLY_MODIFICATION_STRATEGY = "header_only_strategy_v1"
 SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
 GROUPING_UNIT = "physical_packet"
@@ -52,7 +48,6 @@ GROUPING_UNIT = "physical_packet"
 #This list records the grouping policies that the current code knows how to execute.
 #When a future grouping policy is implemented, it should be added here and in group_records_by_policy().
 SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_context_aware"]
-SUPPORTED_MODIFICATION_STRATEGIES = [HYBRID_MODIFICATION_STRATEGY, HEADER_ONLY_MODIFICATION_STRATEGY]
 
 #These defaults implement Step 15 planning heuristics from the cross-step redesign.
 #Experiment-level budget values that affect the LLM contract must come from the active config.
@@ -90,43 +85,6 @@ def estimate_json_tokens(data: Any, chars_per_token_estimate: float) -> int:
     return max(1, int(size_chars / chars_per_token_estimate) + 1)
 
 
-#This function selects the Step 15 modification strategy while keeping Baseline-003 as the default.
-def get_modification_strategy(config: dict[str, Any]) -> str:
-    strategy = str(config.get("pipeline", {}).get("modification_strategy", HYBRID_MODIFICATION_STRATEGY)).strip()
-    if strategy not in SUPPORTED_MODIFICATION_STRATEGIES:
-        raise ValueError(
-            f"Unsupported Step 15 modification strategy {strategy!r}. "
-            f"Supported strategies are: {SUPPORTED_MODIFICATION_STRATEGIES!r}."
-        )
-    return strategy
-
-
-#This function returns the compact source-unit schema emitted for the selected strategy.
-def modification_unit_schema_version(strategy: str) -> str:
-    if strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
-        return HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION
-    return HYBRID_MODIFICATION_UNIT_SCHEMA_VERSION
-
-
-#This function returns the manifest schema emitted for the selected strategy.
-def modification_units_manifest_schema_version(strategy: str) -> str:
-    if strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
-        return HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION
-    return HYBRID_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION
-
-
-#This function returns the manifest filename emitted for the selected strategy.
-def modification_units_manifest_filename(strategy: str) -> str:
-    if strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
-        return "compact_modification_units_manifest_v2.json"
-    return "compact_modification_units_manifest_v1.json"
-
-
-#This function states whether payload regions are exposed as editable for the selected strategy.
-def editable_payload_regions_enabled(strategy: str) -> bool:
-    return strategy != HEADER_ONLY_MODIFICATION_STRATEGY
-
-
 #This function counts the editable physical-header regions carried by a compact modification unit.
 def editable_header_region_count(prompt_unit: dict[str, Any]) -> int:
     return sum(
@@ -157,7 +115,12 @@ def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["pipeline"], ["grouping_policy", "grouping_unit"], "pipeline")
-    modification_strategy = get_modification_strategy(config)
+    modification_strategy = str(config["pipeline"].get("modification_strategy", "")).strip()
+    if modification_strategy != HEADER_ONLY_MODIFICATION_STRATEGY:
+        raise ValueError(
+            f"Step 15 requires pipeline.modification_strategy={HEADER_ONLY_MODIFICATION_STRATEGY!r}. "
+            "No other modification strategy is executable in active Step 15."
+        )
     grouping_unit = str(config["pipeline"]["grouping_unit"]).strip()
     if grouping_unit != GROUPING_UNIT:
         raise ValueError(f"Step 15 requires pipeline.grouping_unit={GROUPING_UNIT!r}.")
@@ -169,11 +132,6 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     if grouping_policy == "fixed_packet_count":
         require_keys(config["pipeline"], ["group_size_packets"], "pipeline")
-    if grouping_policy == "flow_context_aware" and modification_strategy != HEADER_ONLY_MODIFICATION_STRATEGY:
-        raise ValueError(
-            "Step 15 flow_context_aware currently requires "
-            "pipeline.modification_strategy='header_only_strategy_v1'."
-        )
 
 
 #This function validates the hybrid packet JSON contract required by the active third optimization.
@@ -392,7 +350,7 @@ def write_header_classification_artifacts(
     }
 
 
-#This function resolves packet aliases for every canonical TCP region.
+#Future V3 primitive: resolve packet aliases for canonical TCP regions without emitting a Step 15 unit.
 def build_canonical_region_records(packet_json: dict[str, Any]) -> list[dict[str, Any]]:
     packets_by_id = {str(packet["packet_id"]): packet for packet in packet_json["traffic"]}
     representations_by_region: dict[str, list[dict[str, Any]]] = {}
@@ -516,7 +474,6 @@ def group_fixed_packet_count(records: list[Any], group_size: int) -> list[dict[s
                 "group_index": group_index,
                 "unit_type": "fixed_physical_packet_group",
                 "physical_packets": records[start_index : start_index + group_size],
-                "records": [],
             }
         )
     return groups
@@ -612,7 +569,6 @@ def group_flow_context_aware(
                 "group_index": group_index,
                 "unit_type": "flow_context_aware_physical_packet_group",
                 "physical_packets": packets,
-                "records": [],
                 "parent_flow_summary": build_flow_summary(
                     tcp_connection_id=connection_id,
                     packets=packets,
@@ -657,7 +613,7 @@ def build_packet_parent_group_lookup(parent_groups: list[dict[str, Any]]) -> dic
     return lookup
 
 
-#This function assigns each canonical payload region to the parent group containing its first physical alias.
+#Future V3 primitive: assign canonical payload ownership from physical aliases without selecting an artifact schema.
 def assign_canonical_records_to_owner_groups(
     *,
     canonical_records: list[dict[str, Any]],
@@ -716,7 +672,6 @@ def median_from_sorted(values: list[int]) -> int | float | None:
 #This function summarizes parent-group sizes for manifest diagnostics.
 def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[str, Any]:
     sizes = sorted(len(group.get("physical_packets", group.get("records", []))) for group in parent_groups)
-    canonical_sizes = sorted(len(group.get("records", [])) for group in parent_groups)
     if not sizes:
         return {
             "group_count": 0,
@@ -727,21 +682,12 @@ def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[st
             "physical_packet_count_mode": None,
             "physical_packet_count_p95": None,
             "physical_packet_count_distribution": {},
-            "canonical_region_count_min": None,
-            "canonical_region_count_max": None,
-            "canonical_region_count_mean": None,
-            "canonical_region_count_median": None,
-            "canonical_region_count_mode": None,
-            "canonical_region_count_p95": None,
-            "canonical_region_count_distribution": {},
             "parent_group_unit_type_counts": {},
         }
 
     distribution = Counter(sizes)
-    canonical_distribution = Counter(canonical_sizes)
     unit_type_counts = Counter(str(group.get("unit_type", "unknown")) for group in parent_groups)
     mode_size, _ = sorted(distribution.items(), key=lambda item: (-item[1], item[0]))[0]
-    canonical_mode_size, _ = sorted(canonical_distribution.items(), key=lambda item: (-item[1], item[0]))[0]
     return {
         "group_count": len(sizes),
         "physical_packet_count_min": sizes[0],
@@ -751,13 +697,6 @@ def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[st
         "physical_packet_count_mode": mode_size,
         "physical_packet_count_p95": percentile_from_sorted(sizes, 0.95),
         "physical_packet_count_distribution": {str(size): count for size, count in sorted(distribution.items())},
-        "canonical_region_count_min": canonical_sizes[0],
-        "canonical_region_count_max": canonical_sizes[-1],
-        "canonical_region_count_mean": round(sum(canonical_sizes) / len(canonical_sizes), 4),
-        "canonical_region_count_median": median_from_sorted(canonical_sizes),
-        "canonical_region_count_mode": canonical_mode_size,
-        "canonical_region_count_p95": percentile_from_sorted(canonical_sizes, 0.95),
-        "canonical_region_count_distribution": {str(size): count for size, count in sorted(canonical_distribution.items())},
         "parent_group_unit_type_counts": dict(sorted(unit_type_counts.items())),
     }
 
@@ -1028,7 +967,7 @@ def build_payload_windows(packet: dict[str, Any], payload: bytes, readability: d
     return windows
 
 
-#This function creates the compact payload view for a packet and any extra payload-window units required for large payloads.
+#Future V3 primitive: create payload views and editable regions without wrapping them in an active artifact schema.
 def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], prompt_target_context: int) -> dict[str, Any]:
     payload = payload_hex_to_bytes(packet)
     payload_length = len(payload)
@@ -1090,58 +1029,20 @@ def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], pro
     }
 
 
-#This function builds one compact canonical-region view and retains physical packet aliases only as traceability.
-def build_compact_packet(packet: dict[str, Any], payload_plan: dict[str, Any], editable: bool) -> dict[str, Any]:
-    canonical_region_id = str(packet.get("canonical_region_id"))
-    compact_packet = {
-        "identity_type": "canonical_tcp_region",
-        "canonical_region_id": canonical_region_id,
-        "packet_id": canonical_region_id,
-        "role": "editable" if editable else "context",
-        "editable": editable,
-        "representative_packet_id": packet.get("representative_packet_id"),
-        "owner_parent_group_id": packet.get("owner_parent_group_id"),
-        "anchor_group_fragment_id": packet.get("anchor_group_fragment_id"),
-        "source_packet_ids": packet.get("source_packet_ids", []),
-        "physical_representation_ids": packet.get("physical_representation_ids", []),
-        "physical_representation_set_ids": packet.get("physical_representation_set_ids", []),
-        "tcp_connection_id": packet.get("tcp_connection_id"),
-        "tcp_stream_id": packet.get("tcp_stream_id"),
-        "direction": packet.get("direction"),
-        "stream_start": packet.get("stream_start"),
-        "stream_end": packet.get("stream_end"),
-        "first_reduced_packet_index": packet.get("first_reduced_packet_index"),
-        "last_reduced_packet_index": packet.get("last_reduced_packet_index"),
-        "first_timestamp_epoch_pcap": packet.get("first_timestamp_epoch_pcap"),
-        "last_timestamp_epoch_pcap": packet.get("last_timestamp_epoch_pcap"),
-        "src_ip": packet.get("src_ip"),
-        "dst_ip": packet.get("dst_ip"),
-        "transport_protocol": packet.get("transport_protocol"),
-        "src_port": packet.get("src_port"),
-        "dst_port": packet.get("dst_port"),
-        "tcp_flags_str": packet.get("tcp_flags_str"),
-        "payload_length_bytes": packet.get("payload_length_bytes"),
-        "payload_view": payload_plan["payload_view"],
-        "editable_regions": payload_plan["editable_regions"] if editable else [],
-    }
-    return compact_packet
-
-
 #This function builds common group metadata shared by all prompt units from the same parent group.
 def build_group_metadata(
     parent_group_id: str,
     group_index: int,
-    records: list[dict[str, Any]],
     grouping_policy: str,
     group_size_packets: int | None,
     unit_type: str,
     parent_group: dict[str, Any],
 ) -> dict[str, Any]:
     physical_packets = parent_group.get("physical_packets", [])
-    timestamp_records = physical_packets or records
+    timestamp_records = physical_packets
     first_timestamps = [record.get("timestamp_epoch_pcap", record.get("first_timestamp_epoch_pcap")) for record in timestamp_records]
     last_timestamps = [record.get("timestamp_epoch_pcap", record.get("last_timestamp_epoch_pcap")) for record in timestamp_records]
-    identity_records = physical_packets or records
+    identity_records = physical_packets
     connections = {
         str(record["tcp_connection_id"])
         for record in identity_records
@@ -1167,8 +1068,6 @@ def build_group_metadata(
         "last_reduced_packet_index": (
             max(int(packet["reduced_packet_index"]) for packet in physical_packets) if physical_packets else None
         ),
-        "canonical_region_count": len(records),
-        "source_packet_alias_count": len({packet_id for record in records for packet_id in record["source_packet_ids"]}),
         "first_timestamp_epoch_pcap": min(first_timestamps) if first_timestamps else None,
         "last_timestamp_epoch_pcap": max(last_timestamps) if last_timestamps else None,
         "tcp_connection_count": len(connections),
@@ -1177,105 +1076,13 @@ def build_group_metadata(
     return metadata
 
 
-#This function builds one compact prompt unit artifact.
-def build_prompt_unit(
-    *,
-    experiment_id: str,
-    source_packet_json: Path,
-    source_packet_json_schema_version: str,
-    group_metadata: dict[str, Any],
-    prompt_unit_id: str,
-    unit_type: str,
-    packets: list[dict[str, Any]],
-    physical_packets: list[dict[str, Any]] | None = None,
-    token_config: dict[str, Any],
-    context_truncation: dict[str, Any] | None,
-    modification_strategy: str,
-    fragment_flow_context: dict[str, Any] | None = None,
-    fragment_compact_unit_context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload_enabled = editable_payload_regions_enabled(modification_strategy)
-    prompt_unit = {
-        "schema_version": modification_unit_schema_version(modification_strategy),
-        "experiment_id": experiment_id,
-        "parent_group_id": group_metadata["parent_group_id"],
-        "modification_unit_id": prompt_unit_id,
-        "unit_type": unit_type,
-        "source_packet_json": str(source_packet_json),
-        "source_packet_json_schema_version": source_packet_json_schema_version,
-        "strategy": modification_strategy,
-        "modification_strategy": modification_strategy,
-        "payload_strategy_version": modification_strategy,
-        "header_only": modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY,
-        "editable_payload_regions_enabled": payload_enabled,
-        "editable_header_regions_enabled": True,
-        "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
-        "group_metadata": group_metadata,
-        "token_budget": {
-            "prompt_target_context": int(token_config["prompt_target_context"]),
-            "chars_per_token_estimate": float(token_config["chars_per_token_estimate"]),
-            "active_policy": TOKEN_BUDGET_POLICY,
-        },
-        "canonical_region_ids": [],
-        "editable_canonical_region_ids": [],
-        "context_canonical_region_ids": [],
-        "packet_ids": [],
-        "editable_packet_ids": [],
-        "context_packet_ids": [],
-        "physical_packets": physical_packets or [],
-        "packets": packets,
-        "context_truncation": context_truncation,
-    }
-    if fragment_flow_context is not None:
-        prompt_unit["fragment_flow_context"] = fragment_flow_context
-    if fragment_compact_unit_context is not None:
-        prompt_unit["fragment_compact_unit_context"] = fragment_compact_unit_context
-    refresh_prompt_unit_counts(prompt_unit, token_config)
-    if (
-        not token_plan_fits(prompt_unit)
-        and prompt_unit["context_packet_ids"]
-        and prompt_unit["editable_packet_ids"]
-    ):
-        original_context_packet_ids = list(prompt_unit["context_packet_ids"])
-        prompt_unit["packets"] = [packet for packet in prompt_unit["packets"] if packet.get("editable")]
-        prompt_unit["context_truncation"] = {
-            "applied": True,
-            "reason": "estimated_input_tokens_exceeded_budget",
-            "policy": "drop_context_packets_keep_editable_packets",
-            "original_context_packet_ids": original_context_packet_ids,
-        }
-        refresh_prompt_unit_counts(prompt_unit, token_config)
-    return prompt_unit
-
-
-#This function refreshes canonical ownership, compatibility aliases, counts, and token estimates after planning changes.
-def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[str, Any]) -> None:
-    packets = prompt_unit["packets"]
-    canonical_region_ids = [str(packet["canonical_region_id"]) for packet in packets]
-    editable_region_ids = [str(packet["canonical_region_id"]) for packet in packets if packet.get("editable")]
-    context_region_ids = [str(packet["canonical_region_id"]) for packet in packets if not packet.get("editable")]
-    prompt_unit["canonical_region_ids"] = canonical_region_ids
-    prompt_unit["editable_canonical_region_ids"] = editable_region_ids
-    prompt_unit["context_canonical_region_ids"] = context_region_ids
-    # Step 16/17 still read these names; their values now identify canonical regions, not physical packets.
-    prompt_unit["packet_ids"] = canonical_region_ids
-    prompt_unit["editable_packet_ids"] = editable_region_ids
-    prompt_unit["context_packet_ids"] = context_region_ids
-    payload_editable_region_count = sum(len(packet.get("editable_regions", [])) for packet in packets)
-    header_editable_region_count = editable_header_region_count(prompt_unit)
-    prompt_unit["editable_payload_region_count"] = payload_editable_region_count
-    prompt_unit["editable_header_region_count"] = header_editable_region_count
-    prompt_unit["editable_region_count"] = payload_editable_region_count + header_editable_region_count
-    prompt_unit["payload_window_count"] = sum(1 for packet in packets if packet.get("payload_view", {}).get("mode") == "payload_window")
-    token_estimation = estimate_compact_patch_prompt_tokens(
-        prompt_unit=prompt_unit,
-        prompt_input_structure=token_config["prompt_input_structure"],
-        instruction_lines=token_config["prompt_instruction_lines"],
-        chars_per_token_estimate=float(token_config["chars_per_token_estimate"]),
-    )
-    prompt_unit["token_estimation"] = token_estimation
+#This function finalizes counts and the active token plan for one V2 header-only unit.
+def finalize_header_only_unit(unit: dict[str, Any], token_config: dict[str, Any]) -> None:
+    header_count = editable_header_region_count(unit)
+    unit["editable_header_region_count"] = header_count
+    unit["editable_region_count"] = header_count
     token_plan = build_compact_patch_token_plan(
-        prompt_unit=prompt_unit,
+        prompt_unit=unit,
         prompt_input_structure=token_config["prompt_input_structure"],
         instruction_lines=token_config["prompt_instruction_lines"],
         prompt_target_context=int(token_config["prompt_target_context"]),
@@ -1284,214 +1091,47 @@ def refresh_prompt_unit_counts(prompt_unit: dict[str, Any], token_config: dict[s
         output_token_estimation_safety_factor=float(token_config["output_token_estimation_safety_factor"]),
         payload_replacement_size_policy=token_config["payload_replacement_size_policy"],
     )
-    prompt_unit["token_plan"] = token_plan
-    prompt_unit["token_planning_validation_status"] = (
-        "validated_header_only_planning_path"
-        if prompt_unit.get("header_only")
-        else "payload_hybrid_planning_hook_not_revalidated"
-    )
-    prompt_unit["estimated_input_tokens"] = int(token_plan["estimated_input_tokens"])
+    unit["token_plan"] = token_plan
+    unit["token_planning_validation_status"] = "validated_header_only_planning_path"
+    unit["estimated_input_tokens"] = int(token_plan["estimated_input_tokens"])
 
 
-#This function marks modification units that still exceed the soft Step 15 budget after all local splitting options.
-def mark_over_budget_prompt_unit(prompt_unit: dict[str, Any], source_modification_unit_id: str) -> None:
-    if int(prompt_unit.get("editable_region_count", 0)) == 0:
-        prompt_unit["context_truncation"] = {
-            "applied": True,
-            "reason": "context_only_modification_unit_exceeds_prompt_target_context",
-            "policy": "not_llm_routable_no_editable_regions",
-            "source_modification_unit_id": source_modification_unit_id,
-        }
-        return
-    prompt_unit["context_truncation"] = {
+#This function records the exceptional case where one indivisible physical packet cannot fit.
+def mark_over_budget_header_unit(unit: dict[str, Any]) -> None:
+    unit["context_truncation"] = {
         "applied": True,
-        "reason": "indivisible_editable_unit_exceeds_prompt_target_context",
+        "reason": "indivisible_physical_packet_exceeds_prompt_target_context",
         "policy": TOKEN_BUDGET_POLICY,
-        "source_modification_unit_id": source_modification_unit_id,
+        "source_modification_unit_id": unit["modification_unit_id"],
     }
 
 
-#This function splits compact canonical regions into deterministic prompt-unit chunks that fit the budget when possible.
-def build_token_aware_packet_chunks(
-    *,
-    packets: list[dict[str, Any]],
-    prompt_unit_context: dict[str, Any],
-    token_config: dict[str, Any],
-) -> list[dict[str, Any]]:
-    chunks: list[dict[str, Any]] = []
-    current_chunk: list[dict[str, Any]] = []
-
-    for packet in packets:
-        candidate_chunk = current_chunk + [packet]
-        candidate_unit = dict(prompt_unit_context)
-        candidate_unit["packets"] = candidate_chunk
-        candidate_unit["context_truncation"] = None
-        refresh_prompt_unit_counts(candidate_unit, token_config)
-        if current_chunk and not token_plan_fits(candidate_unit):
-            chunks.append({"core_packets": current_chunk})
-            current_chunk = [packet]
-        else:
-            current_chunk = candidate_chunk
-
-    if current_chunk:
-        chunks.append({"core_packets": current_chunk})
-    return chunks
-
-
-def add_chunk_packets(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    for chunk in chunks:
-        chunk["packets"] = chunk["core_packets"]
-    return chunks
-
-
-#This function selects local packet context for one payload-window prompt unit.
-def payload_window_context_indexes(
-    *,
-    record_count: int,
-) -> range:
-    return range(0, record_count)
-
-
-#This function builds one payload-window prompt unit for a selected editable byte window.
-def build_payload_window_prompt_unit(
+#This function builds the only active Step 15 source-unit contract.
+def build_header_only_unit(
     *,
     experiment_id: str,
     source_packet_json: Path,
     source_packet_json_schema_version: str,
     group_metadata: dict[str, Any],
-    parent_group_id: str,
-    prompt_unit_index: int,
-    source_index: int,
-    records: list[dict[str, Any]],
-    payload_plans: list[dict[str, Any]],
-    payload_window: dict[str, Any],
-    token_config: dict[str, Any],
-    modification_strategy: str,
-) -> dict[str, Any]:
-    window_packet_plan = {
-        "payload_view": payload_window["payload_view"],
-        "editable_regions": [payload_window["editable_region"]],
-    }
-    window_packets = []
-    for context_index in payload_window_context_indexes(
-        record_count=len(records),
-    ):
-        context_record = records[context_index]
-        context_plan = payload_plans[context_index]
-        if context_index == source_index:
-            window_packets.append(build_compact_packet(context_record, window_packet_plan, editable=True))
-        else:
-            summary_plan = {"payload_view": context_plan["payload_view"], "editable_regions": []}
-            window_packets.append(build_compact_packet(context_record, summary_plan, editable=False))
-    return build_prompt_unit(
-        experiment_id=experiment_id,
-        source_packet_json=source_packet_json,
-        source_packet_json_schema_version=source_packet_json_schema_version,
-        group_metadata=group_metadata,
-        prompt_unit_id=f"{parent_group_id}_window_{prompt_unit_index:04d}",
-        unit_type="payload_window",
-        packets=window_packets,
-        token_config=token_config,
-        context_truncation=None,
-        modification_strategy=modification_strategy,
-    )
-
-
-#This function splits one oversized payload window into smaller editable byte ranges until each unit fits if possible.
-def build_budgeted_payload_window_prompt_units(
-    *,
-    experiment_id: str,
-    source_packet_json: Path,
-    source_packet_json_schema_version: str,
-    group_metadata: dict[str, Any],
-    parent_group_id: str,
-    next_prompt_unit_index: int,
-    source_index: int,
-    records: list[dict[str, Any]],
-    payload_plans: list[dict[str, Any]],
-    payload_window: dict[str, Any],
-    token_config: dict[str, Any],
-    modification_strategy: str,
-) -> tuple[list[dict[str, Any]], int]:
-    record = records[source_index]
-    payload = payload_hex_to_bytes(record)
-    readability = text_readability_report(payload)
-    left_context = int(token_config["payload_window_left_context_bytes"])
-    right_context = int(token_config["payload_window_right_context_bytes"])
-    center_start = int(payload_window["payload_view"]["center_offset"])
-    center_end = center_start + int(payload_window["payload_view"]["center_length"])
-    pending_ranges = [(center_start, center_end)]
-    prompt_units = []
-    prompt_unit_index = next_prompt_unit_index
-
-    while pending_ranges:
-        candidate_start, candidate_end = pending_ranges.pop()
-        candidate_window = build_payload_window(
-            packet=record,
-            payload=payload,
-            readability=readability,
-            window_index=prompt_unit_index,
-            center_start=candidate_start,
-            center_end=candidate_end,
-            left_context=left_context,
-            right_context=right_context,
-        )
-        candidate_unit = build_payload_window_prompt_unit(
-            experiment_id=experiment_id,
-            source_packet_json=source_packet_json,
-            source_packet_json_schema_version=source_packet_json_schema_version,
-            group_metadata=group_metadata,
-            parent_group_id=parent_group_id,
-            prompt_unit_index=prompt_unit_index,
-            source_index=source_index,
-            records=records,
-            payload_plans=payload_plans,
-            payload_window=candidate_window,
-            token_config=token_config,
-            modification_strategy=modification_strategy,
-        )
-        if token_plan_fits(candidate_unit) or candidate_end - candidate_start <= 1:
-            if not token_plan_fits(candidate_unit):
-                mark_over_budget_prompt_unit(candidate_unit, candidate_unit["modification_unit_id"])
-                refresh_prompt_unit_counts(candidate_unit, token_config)
-            prompt_units.append(candidate_unit)
-            prompt_unit_index += 1
-            continue
-
-        midpoint = candidate_start + max(1, (candidate_end - candidate_start) // 2)
-        pending_ranges.append((midpoint, candidate_end))
-        pending_ranges.append((candidate_start, midpoint))
-
-    return prompt_units, prompt_unit_index
-
-
-#This function creates base prompt units from compact packets, splitting oversized groups into token-aware packet windows when needed.
-def build_base_prompt_units(
-    *,
-    experiment_id: str,
-    source_packet_json: Path,
-    source_packet_json_schema_version: str,
-    group_metadata: dict[str, Any],
-    parent_group_id: str,
+    modification_unit_id: str,
     unit_type: str,
-    base_packets: list[dict[str, Any]],
     physical_packets: list[dict[str, Any]],
     token_config: dict[str, Any],
-    modification_strategy: str,
-) -> list[dict[str, Any]]:
-    prompt_unit_context = {
-        "schema_version": modification_unit_schema_version(modification_strategy),
+    fragment_flow_context: dict[str, Any] | None = None,
+    fragment_compact_unit_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    unit = {
+        "schema_version": HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION,
         "experiment_id": experiment_id,
         "parent_group_id": group_metadata["parent_group_id"],
-        "modification_unit_id": parent_group_id,
+        "modification_unit_id": modification_unit_id,
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
-        "strategy": modification_strategy,
-        "modification_strategy": modification_strategy,
-        "payload_strategy_version": modification_strategy,
-        "header_only": modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY,
-        "editable_payload_regions_enabled": editable_payload_regions_enabled(modification_strategy),
+        "strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
+        "modification_strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
+        "header_only": True,
+        "editable_payload_regions_enabled": False,
         "editable_header_regions_enabled": True,
         "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
         "group_metadata": group_metadata,
@@ -1500,133 +1140,15 @@ def build_base_prompt_units(
             "chars_per_token_estimate": float(token_config["chars_per_token_estimate"]),
             "active_policy": TOKEN_BUDGET_POLICY,
         },
-        "canonical_region_ids": [],
-        "editable_canonical_region_ids": [],
-        "context_canonical_region_ids": [],
-        "packet_ids": [],
-        "editable_packet_ids": [],
-        "context_packet_ids": [],
         "physical_packets": physical_packets,
-        "packets": [],
         "context_truncation": None,
     }
-    chunks = build_token_aware_packet_chunks(
-        packets=base_packets,
-        prompt_unit_context=prompt_unit_context,
-        token_config=token_config,
-    )
-    chunks = add_chunk_packets(chunks)
-
-    prompt_units = []
-    chunk_count = len(chunks)
-    for chunk_index, chunk in enumerate(chunks, start=1):
-        prompt_unit_id = parent_group_id if chunk_count == 1 else f"{parent_group_id}_chunk_{chunk_index:04d}"
-        chunk_metadata = dict(group_metadata)
-        prompt_unit = build_prompt_unit(
-            experiment_id=experiment_id,
-            source_packet_json=source_packet_json,
-            source_packet_json_schema_version=source_packet_json_schema_version,
-            group_metadata=chunk_metadata,
-            prompt_unit_id=prompt_unit_id,
-            unit_type=unit_type if chunk_count == 1 else f"{unit_type}_packet_window",
-            packets=chunk["packets"],
-            physical_packets=physical_packets,
-            token_config=token_config,
-            context_truncation=None,
-            modification_strategy=modification_strategy,
-        )
-        if token_plan_fits(prompt_unit):
-            prompt_units.append(prompt_unit)
-            continue
-        if len(chunk["core_packets"]) <= 1:
-            mark_over_budget_prompt_unit(prompt_unit, prompt_unit_id)
-            prompt_units.append(prompt_unit)
-            continue
-
-        fallback_chunks: list[list[dict[str, Any]]] = []
-        current_fallback_chunk: list[dict[str, Any]] = []
-        for packet in chunk["core_packets"]:
-            candidate_packets = current_fallback_chunk + [packet]
-            candidate_unit = build_prompt_unit(
-                experiment_id=experiment_id,
-                source_packet_json=source_packet_json,
-                source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=group_metadata,
-                prompt_unit_id=prompt_unit_id,
-                unit_type=f"{unit_type}_packet_window",
-                packets=candidate_packets,
-                physical_packets=physical_packets,
-                token_config=token_config,
-                context_truncation={
-                    "applied": True,
-                    "reason": "final_packet_window_exceeded_budget",
-                    "policy": "split_core_packets_without_overlap",
-                    "source_modification_unit_id": prompt_unit_id,
-                },
-                modification_strategy=modification_strategy,
-            )
-            if current_fallback_chunk and not token_plan_fits(candidate_unit):
-                fallback_chunks.append(current_fallback_chunk)
-                current_fallback_chunk = [packet]
-            else:
-                current_fallback_chunk = candidate_packets
-        if current_fallback_chunk:
-            fallback_chunks.append(current_fallback_chunk)
-
-        sub_chunk_count = len(fallback_chunks)
-        for sub_chunk_index, fallback_packets in enumerate(fallback_chunks, start=1):
-            sub_prompt_unit_id = f"{prompt_unit_id}_sub_{sub_chunk_index:04d}"
-            sub_prompt_unit = build_prompt_unit(
-                experiment_id=experiment_id,
-                source_packet_json=source_packet_json,
-                source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=group_metadata,
-                prompt_unit_id=sub_prompt_unit_id,
-                unit_type=f"{unit_type}_packet_window",
-                packets=fallback_packets,
-                physical_packets=physical_packets,
-                token_config=token_config,
-                context_truncation={
-                    "applied": True,
-                    "reason": "final_packet_window_exceeded_budget",
-                    "policy": "split_core_packets_without_overlap",
-                    "source_modification_unit_id": prompt_unit_id,
-                },
-                modification_strategy=modification_strategy,
-            )
-            if token_plan_fits(sub_prompt_unit):
-                prompt_units.append(sub_prompt_unit)
-                continue
-            if len(fallback_packets) == 1:
-                mark_over_budget_prompt_unit(sub_prompt_unit, prompt_unit_id)
-                prompt_units.append(sub_prompt_unit)
-                continue
-
-            packet_sub_chunk_count = len(fallback_packets)
-            for packet_sub_chunk_index, packet in enumerate(fallback_packets, start=1):
-                packet_prompt_unit_id = f"{sub_prompt_unit_id}_pkt_{packet_sub_chunk_index:04d}"
-                packet_prompt_unit = build_prompt_unit(
-                    experiment_id=experiment_id,
-                    source_packet_json=source_packet_json,
-                    source_packet_json_schema_version=source_packet_json_schema_version,
-                    group_metadata=group_metadata,
-                    prompt_unit_id=packet_prompt_unit_id,
-                    unit_type=f"{unit_type}_packet_window",
-                    packets=[packet],
-                    physical_packets=physical_packets,
-                    token_config=token_config,
-                    context_truncation={
-                        "applied": True,
-                        "reason": "final_packet_window_exceeded_budget",
-                        "policy": "single_packet_fallback_after_subwindow_overrun",
-                        "source_modification_unit_id": sub_prompt_unit_id,
-                    },
-                    modification_strategy=modification_strategy,
-                )
-                if not token_plan_fits(packet_prompt_unit):
-                    mark_over_budget_prompt_unit(packet_prompt_unit, sub_prompt_unit_id)
-                prompt_units.append(packet_prompt_unit)
-    return prompt_units
+    if fragment_flow_context is not None:
+        unit["fragment_flow_context"] = fragment_flow_context
+    if fragment_compact_unit_context is not None:
+        unit["fragment_compact_unit_context"] = fragment_compact_unit_context
+    finalize_header_only_unit(unit, token_config)
+    return unit
 
 
 #This function creates one header-only modification unit from one physical parent group.
@@ -1637,8 +1159,6 @@ def build_header_only_prompt_units_for_group(
     source_packet_json_schema_version: str,
     parent_group_id: str,
     group_index: int,
-    unit_type: str,
-    records: list[dict[str, Any]],
     grouping_policy: str,
     group_size_packets: int | None,
     parent_group: dict[str, Any],
@@ -1649,7 +1169,6 @@ def build_header_only_prompt_units_for_group(
     group_metadata = build_group_metadata(
         parent_group_id,
         group_index,
-        records,
         grouping_policy,
         group_size_packets,
         "header_only_physical_packet_group",
@@ -1665,18 +1184,15 @@ def build_header_only_prompt_units_for_group(
     ]
     if grouping_policy != "flow_context_aware":
         return [
-            build_prompt_unit(
+            build_header_only_unit(
                 experiment_id=experiment_id,
                 source_packet_json=source_packet_json,
                 source_packet_json_schema_version=source_packet_json_schema_version,
                 group_metadata=group_metadata,
-                prompt_unit_id=parent_group_id,
+                modification_unit_id=parent_group_id,
                 unit_type="header_only_physical_packet_group",
-                packets=[],
                 physical_packets=compact_physical_packets,
                 token_config=token_config,
-                context_truncation=None,
-                modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
             )
         ]
 
@@ -1711,22 +1227,19 @@ def build_header_only_prompt_units_for_group(
             "fragment_first_packet_id": first_packet_id,
             "fragment_last_packet_id": last_packet_id,
         }
-        return build_prompt_unit(
+        return build_header_only_unit(
             experiment_id=experiment_id,
             source_packet_json=source_packet_json,
             source_packet_json_schema_version=source_packet_json_schema_version,
             group_metadata=group_metadata,
-            prompt_unit_id=fragment_id,
+            modification_unit_id=fragment_id,
             unit_type=(
                 "header_only_flow_context_aware_group"
                 if fragment_count == 1
                 else "header_only_flow_context_aware_group_fragment"
             ),
-            packets=[],
             physical_packets=fragment_packets,
             token_config=token_config,
-            context_truncation=None,
-            modification_strategy=HEADER_ONLY_MODIFICATION_STRATEGY,
             fragment_flow_context=fragment_flow_context,
             fragment_compact_unit_context=fragment_compact_unit_context,
         )
@@ -1761,7 +1274,7 @@ def build_header_only_prompt_units_for_group(
         if oversized_index is None:
             for unit in units:
                 if not token_plan_fits(unit):
-                    mark_over_budget_prompt_unit(unit, unit["modification_unit_id"])
+                    mark_over_budget_header_unit(unit)
             return units
         oversized_chunk = chunks[oversized_index]
         midpoint = max(1, len(oversized_chunk) // 2)
@@ -1771,111 +1284,6 @@ def build_header_only_prompt_units_for_group(
         ]
 
 
-#This function creates all compact prompt units for one fixed-size parent group.
-def build_prompt_units_for_group(
-    *,
-    experiment_id: str,
-    source_packet_json: Path,
-    source_packet_json_schema_version: str,
-    parent_group_id: str,
-    group_index: int,
-    unit_type: str,
-    records: list[dict[str, Any]],
-    grouping_policy: str,
-    group_size_packets: int | None,
-    parent_group: dict[str, Any],
-    header_field_definitions: dict[str, Any],
-    header_policy: dict[str, Any],
-    token_config: dict[str, Any],
-    modification_strategy: str,
-    heartbeat: Any | None,
-) -> list[dict[str, Any]]:
-    if modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
-        return build_header_only_prompt_units_for_group(
-            experiment_id=experiment_id,
-            source_packet_json=source_packet_json,
-            source_packet_json_schema_version=source_packet_json_schema_version,
-            parent_group_id=parent_group_id,
-            group_index=group_index,
-            unit_type=unit_type,
-            records=records,
-            grouping_policy=grouping_policy,
-            group_size_packets=group_size_packets,
-            parent_group=parent_group,
-            header_field_definitions=header_field_definitions,
-            header_policy=header_policy,
-            token_config=token_config,
-        )
-
-    payload_plans = []
-    for record_index, record in enumerate(records, start=1):
-        payload_plans.append(
-            build_payload_plan(
-                record,
-                token_config,
-                int(token_config["prompt_target_context"]),
-            )
-        )
-        if heartbeat:
-            heartbeat(
-                f"planning_parent_group={parent_group_id}, "
-                f"planned_canonical_regions={record_index}/{len(records)}"
-            )
-    group_metadata = build_group_metadata(parent_group_id, group_index, records, grouping_policy, group_size_packets, unit_type, parent_group)
-    compact_physical_packets = [
-        build_compact_physical_packet(
-            packet=packet,
-            header_field_definitions=header_field_definitions,
-            header_policy=header_policy,
-        )
-        for packet in parent_group.get("physical_packets", [])
-    ]
-    base_packets = [
-        build_compact_packet(record, payload_plan, editable=bool(payload_plan["editable_regions"]))
-        for record, payload_plan in zip(records, payload_plans)
-    ]
-    prompt_units = build_base_prompt_units(
-        experiment_id=experiment_id,
-        source_packet_json=source_packet_json,
-        source_packet_json_schema_version=source_packet_json_schema_version,
-        group_metadata=group_metadata,
-        parent_group_id=parent_group_id,
-        unit_type=unit_type,
-        base_packets=base_packets,
-        physical_packets=compact_physical_packets,
-        token_config=token_config,
-        modification_strategy=modification_strategy,
-    )
-
-    window_counter = 0
-    for record_index, (record, payload_plan) in enumerate(zip(records, payload_plans), start=1):
-        for payload_window in payload_plan["payload_windows"]:
-            new_prompt_units, next_window_counter = build_budgeted_payload_window_prompt_units(
-                experiment_id=experiment_id,
-                source_packet_json=source_packet_json,
-                source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=group_metadata,
-                parent_group_id=parent_group_id,
-                next_prompt_unit_index=window_counter + 1,
-                source_index=record_index - 1,
-                records=records,
-                payload_plans=payload_plans,
-                payload_window=payload_window,
-                token_config=token_config,
-                modification_strategy=modification_strategy,
-            )
-            prompt_units.extend(new_prompt_units)
-            window_counter = next_window_counter - 1
-        if heartbeat:
-            heartbeat(
-                f"building_parent_group={parent_group_id}, "
-                f"payload_window_source_regions={record_index}/{len(records)}, "
-                f"payload_window_units={window_counter}"
-            )
-    return prompt_units
-
-
-#This function builds the manifest entry for one compact prompt unit.
 def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -> dict[str, Any]:
     group_metadata = prompt_unit.get("group_metadata", {})
     summary = {
@@ -1883,12 +1291,6 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "modification_unit_id": prompt_unit["modification_unit_id"],
         "unit_type": prompt_unit["unit_type"],
         "modification_unit_file": str(prompt_unit_path),
-        "canonical_region_ids": prompt_unit["canonical_region_ids"],
-        "editable_canonical_region_ids": prompt_unit["editable_canonical_region_ids"],
-        "context_canonical_region_ids": prompt_unit["context_canonical_region_ids"],
-        "packet_ids": prompt_unit["packet_ids"],
-        "editable_packet_ids": prompt_unit["editable_packet_ids"],
-        "context_packet_ids": prompt_unit["context_packet_ids"],
         "estimated_input_tokens": prompt_unit["estimated_input_tokens"],
         "token_plan": prompt_unit.get("token_plan"),
         "token_planning_validation_status": prompt_unit.get("token_planning_validation_status"),
@@ -1897,9 +1299,7 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
             int(packet.get("editable_header_region_count") or 0)
             for packet in prompt_unit.get("physical_packets", [])
         ),
-        "payload_window_count": prompt_unit["payload_window_count"],
         "editable_region_count": prompt_unit["editable_region_count"],
-        "token_estimation": prompt_unit.get("token_estimation"),
         "context_truncation": prompt_unit["context_truncation"],
         "fragment_flow_context": prompt_unit.get("fragment_flow_context"),
         "fragment_compact_unit_context": prompt_unit.get("fragment_compact_unit_context"),
@@ -1939,68 +1339,6 @@ def build_over_budget_summary(prompt_unit_summaries: list[dict[str, Any]]) -> di
     return summary
 
 
-#This function enforces unique canonical editable ownership while prompt-unit files are being produced.
-def validate_prompt_unit_ownership(
-    prompt_unit: dict[str, Any],
-    canonical_lengths: dict[str, int],
-    editable_intervals: dict[str, list[tuple[int, int, str]]],
-) -> None:
-    for compact_region in prompt_unit.get("packets", []):
-        canonical_region_id = str(compact_region.get("canonical_region_id", ""))
-        if canonical_region_id not in canonical_lengths:
-            raise ValueError(
-                f"Modification unit {prompt_unit['modification_unit_id']!r} references unknown canonical region "
-                f"{canonical_region_id!r}."
-            )
-        if str(compact_region.get("packet_id")) != canonical_region_id:
-            raise ValueError("The Step 16 compatibility packet_id must equal canonical_region_id.")
-        for editable_region in compact_region.get("editable_regions", []):
-            if str(editable_region.get("canonical_region_id")) != canonical_region_id:
-                raise ValueError(f"Editable region owner mismatch for {canonical_region_id!r}.")
-            start = int(editable_region.get("start_offset_bytes") or 0)
-            end = int(editable_region.get("end_offset_bytes") or 0)
-            if start < 0 or end <= start or end > canonical_lengths[canonical_region_id]:
-                raise ValueError(
-                    f"Editable interval [{start}, {end}) is outside canonical region "
-                    f"{canonical_region_id!r}."
-                )
-            existing = editable_intervals.setdefault(canonical_region_id, [])
-            if any(start < previous_end and previous_start < end for previous_start, previous_end, _ in existing):
-                raise ValueError(
-                    f"Canonical region {canonical_region_id!r} has overlapping editable ownership "
-                    f"in modification unit {prompt_unit['modification_unit_id']!r}."
-                )
-            existing.append((start, end, str(editable_region.get("region_id", ""))))
-
-
-#This function confirms that every canonical region has at least one non-overlapping editable interval.
-def build_canonical_ownership_summary(
-    canonical_lengths: dict[str, int],
-    editable_intervals: dict[str, list[tuple[int, int, str]]],
-    modification_strategy: str,
-) -> dict[str, Any]:
-    if not editable_payload_regions_enabled(modification_strategy):
-        return {
-            "canonical_region_count": len(canonical_lengths),
-            "canonical_regions_with_editable_ownership": 0,
-            "editable_interval_count": 0,
-            "duplicate_or_overlapping_editable_interval_count": 0,
-            "editable_payload_regions_enabled": False,
-            "policy": "canonical_payload_editing_disabled_by_header_only_strategy",
-        }
-    missing = sorted(set(canonical_lengths) - set(editable_intervals))
-    if missing:
-        raise ValueError(f"Canonical regions without editable ownership: {missing[:10]}")
-    return {
-        "canonical_region_count": len(canonical_lengths),
-        "canonical_regions_with_editable_ownership": len(editable_intervals),
-        "editable_interval_count": sum(len(intervals) for intervals in editable_intervals.values()),
-        "duplicate_or_overlapping_editable_interval_count": 0,
-        "editable_payload_regions_enabled": True,
-    }
-
-
-#This function confirms that physical parent groups cover every source packet exactly once.
 def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]], ordered_packets: list[dict[str, Any]]) -> dict[str, Any]:
     expected_packet_ids = [str(packet["packet_id"]) for packet in ordered_packets]
     seen_packet_ids: list[str] = []
@@ -2029,12 +1367,21 @@ def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]],
 def validate_header_only_prompt_unit(prompt_unit: dict[str, Any]) -> None:
     if prompt_unit.get("schema_version") != HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION:
         raise ValueError("Header-only Step 15 units must use compact_modification_unit_v2.")
-    if prompt_unit.get("packets") != []:
-        raise ValueError("Header-only Step 15 units must not contain canonical payload packet entries.")
-    if prompt_unit.get("payload_window_count") != 0:
-        raise ValueError("Header-only Step 15 units must not contain canonical payload windows.")
-    if prompt_unit.get("editable_payload_region_count") != 0:
-        raise ValueError("Header-only Step 15 units must not expose editable payload regions.")
+    forbidden_payload_fields = {
+        "packets",
+        "canonical_region_ids",
+        "editable_canonical_region_ids",
+        "context_canonical_region_ids",
+        "packet_ids",
+        "editable_packet_ids",
+        "context_packet_ids",
+        "payload_window_count",
+        "editable_payload_region_count",
+        "payload_strategy_version",
+    }
+    present_forbidden_fields = sorted(forbidden_payload_fields.intersection(prompt_unit))
+    if present_forbidden_fields:
+        raise ValueError(f"V2 header-only unit contains retired V1 payload fields: {present_forbidden_fields}")
     for physical_packet in prompt_unit.get("physical_packets", []):
         for region in physical_packet.get("header_field_classifications", []):
             if not region.get("editable"):
@@ -2063,26 +1410,22 @@ def build_manifest(
     parent_group_count: int,
     parent_group_stats: dict[str, Any],
     prompt_unit_summaries: list[dict[str, Any]],
-    payload_mode_counts: Counter[str],
-    canonical_ownership_summary: dict[str, Any],
     header_classification_artifacts: dict[str, Any],
-    modification_strategy: str,
     physical_parent_group_coverage: dict[str, Any],
 ) -> dict[str, Any]:
-    header_only = modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY
     return {
         "metadata": {
-            "schema_version": modification_units_manifest_schema_version(modification_strategy),
+            "schema_version": HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "source_packet_json": str(input_json_path),
             "source_packet_json_schema_version": packet_json.get("metadata", {}).get("schema_version"),
             "output_dir": str(output_dir),
-            "strategy": modification_strategy,
-            "modification_strategy": modification_strategy,
-            "header_only": header_only,
-            "editable_payload_regions_enabled": editable_payload_regions_enabled(modification_strategy),
+            "strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
+            "modification_strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
+            "header_only": True,
+            "editable_payload_regions_enabled": False,
             "editable_header_regions_enabled": True,
             "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
             "grouping_policy": grouping_policy,
@@ -2095,8 +1438,7 @@ def build_manifest(
             "modification_unit_count": len(prompt_unit_summaries),
             "total_packet_count": len(packet_json["traffic"]),
             "total_canonical_region_count": len(packet_json["canonical_tcp_regions"]),
-            "compact_view_schema_version": modification_unit_schema_version(modification_strategy),
-            "payload_strategy_version": modification_strategy,
+            "compact_view_schema_version": HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION,
             "header_editability_policy": {
                 "schema_version": header_policy["schema_version"],
                 "policy_id": header_policy["policy_id"],
@@ -2109,16 +1451,20 @@ def build_manifest(
                 "classification_counts": header_classification_artifacts["classification_counts"],
                 "editable_header_region_count": header_classification_artifacts["editable_header_region_count"],
             },
-            "token_budget_config": token_config,
+            "token_budget_config": {
+                "policy": TOKEN_BUDGET_POLICY,
+                "prompt_target_context": int(token_config["prompt_target_context"]),
+                "runtime_max_model_len": int(token_config["runtime_max_model_len"]),
+                "chars_per_token_estimate": float(token_config["chars_per_token_estimate"]),
+                "output_token_estimation_safety_factor": float(
+                    token_config["output_token_estimation_safety_factor"]
+                ),
+                "prompt_input_profile": token_config["prompt_input_structure"]["profile"],
+                "prompt_instructions_profile": token_config["prompt_instructions_profile"],
+            },
             "token_budget_policy": TOKEN_BUDGET_POLICY,
-            "token_planning_validation_status": (
-                "validated_header_only_planning_path"
-                if header_only
-                else "payload_hybrid_planning_hook_not_revalidated"
-            ),
+            "token_planning_validation_status": "validated_header_only_planning_path",
             "over_budget_summary": build_over_budget_summary(prompt_unit_summaries),
-            "payload_mode_counts": dict(sorted(payload_mode_counts.items())),
-            "canonical_ownership_summary": canonical_ownership_summary,
             "physical_parent_group_coverage": physical_parent_group_coverage,
             "immutable_fields": packet_json.get("immutable_fields", []),
         },
@@ -2148,7 +1494,6 @@ def run_grouping(
     config = load_json_config(config_path)
     validate_config(config)
 
-    modification_strategy = get_modification_strategy(config)
     grouping_policy = str(config["pipeline"]["grouping_policy"]).strip()
     paths = default_paths(config)
     input_json_path = Path(input_json).expanduser() if input_json else paths["input_json"]
@@ -2174,16 +1519,7 @@ def run_grouping(
         tcp_connections=packet_json["tcp_connections"],
     )
     physical_parent_group_coverage = validate_physical_parent_group_coverage(parent_groups, ordered_traffic)
-    canonical_records = build_canonical_region_records(packet_json)
-    canonical_records.sort(
-        key=lambda record: (
-            int(record["first_reduced_packet_index"]),
-            str(record["tcp_stream_id"]),
-            int(record["stream_start"]),
-            str(record["canonical_region_id"]),
-        )
-    )
-    assign_canonical_records_to_owner_groups(canonical_records=canonical_records, parent_groups=parent_groups)
+    canonical_region_count = len(packet_json["canonical_tcp_regions"])
     parent_group_stats = parent_group_size_statistics(parent_groups)
     start_time = time.monotonic()
     last_heartbeat_time = [start_time]
@@ -2200,7 +1536,7 @@ def run_grouping(
 
     heartbeat(
         f"parent_groups_identified={len(parent_groups)}, "
-        f"canonical_regions={len(canonical_records)}, "
+        f"canonical_regions={canonical_region_count}, "
         f"source_packets={len(traffic)}, "
         f"grouping_policy={grouping_policy}, "
         f"output_dir={output_group_dir}",
@@ -2222,48 +1558,31 @@ def run_grouping(
         force=True,
     )
     prompt_unit_summaries = []
-    payload_mode_counts: Counter[str] = Counter()
-    canonical_lengths = {
-        str(record["canonical_region_id"]): int(record["payload_length_bytes"])
-        for record in canonical_records
-    }
-    editable_intervals: dict[str, list[tuple[int, int, str]]] = {}
     experiment_id = config["experiment"]["experiment_id"]
     source_schema = str(packet_json.get("metadata", {}).get("schema_version", ""))
 
     for processed_parent_groups, parent_group in enumerate(parent_groups, start=1):
-        records = parent_group["records"]
         heartbeat(
             f"processing_parent_group={parent_group['parent_group_id']}, "
             f"parent_group_index={processed_parent_groups}/{len(parent_groups)}, "
             f"parent_group_physical_packets={len(parent_group.get('physical_packets', []))}, "
-            f"owned_canonical_regions={len(records)}, "
             f"modification_units_written={len(prompt_unit_summaries)}"
         )
-        prompt_units = build_prompt_units_for_group(
+        prompt_units = build_header_only_prompt_units_for_group(
             experiment_id=experiment_id,
             source_packet_json=input_json_path,
             source_packet_json_schema_version=source_schema,
             parent_group_id=parent_group["parent_group_id"],
             group_index=parent_group["group_index"],
-            unit_type=parent_group["unit_type"],
-            records=records,
             grouping_policy=grouping_policy,
             group_size_packets=effective_group_size,
             parent_group=parent_group,
             header_field_definitions=packet_json["header_field_definitions"],
             header_policy=header_policy,
             token_config=token_config,
-            modification_strategy=modification_strategy,
-            heartbeat=heartbeat,
         )
         for prompt_unit in prompt_units:
-            if modification_strategy == HEADER_ONLY_MODIFICATION_STRATEGY:
-                validate_header_only_prompt_unit(prompt_unit)
-            else:
-                validate_prompt_unit_ownership(prompt_unit, canonical_lengths, editable_intervals)
-            for packet in prompt_unit["packets"]:
-                payload_mode_counts[str(packet.get("payload_view", {}).get("mode", "unknown"))] += 1
+            validate_header_only_prompt_unit(prompt_unit)
             prompt_unit_path = output_group_dir / f"{prompt_unit['modification_unit_id']}.json"
             write_json(prompt_unit_path, prompt_unit)
             prompt_unit_summaries.append(summarize_prompt_unit(prompt_unit, prompt_unit_path))
@@ -2272,11 +1591,6 @@ def run_grouping(
             f"modification_units_written={len(prompt_unit_summaries)}"
         )
 
-    canonical_ownership_summary = build_canonical_ownership_summary(
-        canonical_lengths,
-        editable_intervals,
-        modification_strategy,
-    )
     manifest = build_manifest(
         config=config,
         input_json_path=input_json_path,
@@ -2289,13 +1603,10 @@ def run_grouping(
         parent_group_count=len(parent_groups),
         parent_group_stats=parent_group_stats,
         prompt_unit_summaries=prompt_unit_summaries,
-        payload_mode_counts=payload_mode_counts,
-        canonical_ownership_summary=canonical_ownership_summary,
         header_classification_artifacts=header_classification_artifacts,
-        modification_strategy=modification_strategy,
         physical_parent_group_coverage=physical_parent_group_coverage,
     )
-    manifest_path = output_group_dir / modification_units_manifest_filename(modification_strategy)
+    manifest_path = output_group_dir / "compact_modification_units_manifest_v2.json"
     write_json(manifest_path, manifest)
 
     return {
@@ -2306,11 +1617,11 @@ def run_grouping(
         "parent_group_count": len(parent_groups),
         "modification_unit_count": len(prompt_unit_summaries),
         "packet_count": len(traffic),
-        "canonical_region_count": len(canonical_records),
+        "canonical_region_count": canonical_region_count,
         "group_size_packets": effective_group_size,
         "parent_group_size_statistics": parent_group_stats,
-        "modification_strategy": modification_strategy,
-        "manifest_schema_version": modification_units_manifest_schema_version(modification_strategy),
+        "modification_strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
+        "manifest_schema_version": HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
     }
 
 

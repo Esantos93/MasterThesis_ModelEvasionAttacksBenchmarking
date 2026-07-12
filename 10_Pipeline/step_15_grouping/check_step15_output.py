@@ -12,8 +12,6 @@ from typing import Any
 HEADER_ONLY_STRATEGY = "header_only_strategy_v1"
 HEADER_ONLY_MANIFEST_SCHEMA = "compact_modification_units_manifest_v2"
 HEADER_ONLY_UNIT_SCHEMA = "compact_modification_unit_v2"
-HYBRID_MANIFEST_SCHEMA = "compact_modification_units_manifest_v1"
-HYBRID_UNIT_SCHEMA = "compact_modification_unit_v1"
 PACKET_JSON_SCHEMA = "packet_json_v4"
 
 
@@ -36,23 +34,12 @@ def resolve_existing_path(path_value: Any, base_dir: Path) -> Path:
     raise FileNotFoundError(f"Could not resolve artifact path: {path_value}")
 
 
-#Find the Step 15 manifest expected for the selected strategy.
-def find_manifest(output_dir: Path, expected_strategy: str | None) -> Path:
-    if expected_strategy == HEADER_ONLY_STRATEGY:
-        candidate = output_dir / "compact_modification_units_manifest_v2.json"
-        if candidate.exists():
-            return candidate
-    candidates = [
-        output_dir / "compact_modification_units_manifest_v2.json",
-        output_dir / "compact_modification_units_manifest_v1.json",
-    ]
-    existing = [path for path in candidates if path.exists()]
-    if len(existing) != 1:
-        raise FileNotFoundError(
-            "Expected exactly one Step 15 manifest in the output directory; "
-            f"found {[str(path) for path in existing]}"
-        )
-    return existing[0]
+#Find the only manifest supported by active Step 15.
+def find_manifest(output_dir: Path) -> Path:
+    manifest_path = output_dir / "compact_modification_units_manifest_v2.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Step 15 V2 manifest not found: {manifest_path}")
+    return manifest_path
 
 
 #Check that header classification side artifacts match the manifest metadata.
@@ -157,8 +144,6 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     region_type_counts: Counter[str] = Counter()
     field_counts: Counter[str] = Counter()
     physical_packet_ids: list[str] = []
-    payload_window_count = 0
-    editable_payload_region_count = 0
     flow_fragments_by_parent: dict[str, list[tuple[dict[str, Any], dict[str, Any], int]]] = {}
     token_plan_policy_counts: Counter[str] = Counter()
     token_plan_overflow_count = 0
@@ -169,12 +154,21 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         unit_schema_counts[str(unit.get("schema_version"))] += 1
         if unit.get("schema_version") != HEADER_ONLY_UNIT_SCHEMA:
             raise ValueError(f"Unit {unit_path} has wrong schema {unit.get('schema_version')!r}.")
-        if unit.get("packets") != []:
-            raise ValueError(f"Header-only unit {unit_path} must have packets=[].")
-        if unit.get("payload_window_count") != 0:
-            raise ValueError(f"Header-only unit {unit_path} contains payload windows.")
-        if unit.get("editable_payload_region_count") != 0:
-            raise ValueError(f"Header-only unit {unit_path} contains editable payload regions.")
+        retired_v1_fields = {
+            "packets",
+            "canonical_region_ids",
+            "editable_canonical_region_ids",
+            "context_canonical_region_ids",
+            "packet_ids",
+            "editable_packet_ids",
+            "context_packet_ids",
+            "payload_window_count",
+            "editable_payload_region_count",
+            "payload_strategy_version",
+        }
+        present_retired_fields = sorted(retired_v1_fields.intersection(unit))
+        if present_retired_fields:
+            raise ValueError(f"V2 unit {unit_path} contains retired V1 fields: {present_retired_fields}")
         token_plan = unit.get("token_plan")
         if not isinstance(token_plan, dict):
             raise ValueError(f"Header-only unit {unit_path} lacks token_plan.")
@@ -190,8 +184,6 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
             raise ValueError(f"Header-only unit {unit_path} has an inconsistent token plan.")
         if total_planned_tokens > int(token_plan.get("prompt_target_context") or 0):
             token_plan_overflow_count += 1
-        payload_window_count += int(unit.get("payload_window_count") or 0)
-        editable_payload_region_count += int(unit.get("editable_payload_region_count") or 0)
         editable_region_distribution[int(unit.get("editable_region_count") or 0)] += 1
 
         if metadata.get("grouping_policy") == "flow_context_aware":
@@ -279,8 +271,6 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         "editable_region_distribution": dict(sorted(editable_region_distribution.items())),
         "region_type_counts": dict(sorted(region_type_counts.items())),
         "field_counts": dict(sorted(field_counts.items())),
-        "payload_window_count": payload_window_count,
-        "editable_payload_region_count": editable_payload_region_count,
         "physical_packet_units_covered": len(physical_packet_ids),
         "flow_context_parent_count": len(flow_fragments_by_parent),
         "flow_context_fragment_count": sum(len(fragments) for fragments in flow_fragments_by_parent.values()),
@@ -289,33 +279,11 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     }
 
 
-#Validate hybrid modification units and canonical payload-window counts.
-def check_hybrid_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
-    metadata = manifest["metadata"]
-    if metadata.get("schema_version") != HYBRID_MANIFEST_SCHEMA:
-        raise ValueError(f"Hybrid manifest must use {HYBRID_MANIFEST_SCHEMA}.")
-    if metadata.get("compact_view_schema_version") != HYBRID_UNIT_SCHEMA:
-        raise ValueError(f"Hybrid units must use {HYBRID_UNIT_SCHEMA}.")
-    unit_schema_counts: Counter[str] = Counter()
-    payload_window_count = 0
-    for entry in manifest["compact_modification_units"]:
-        unit_path = resolve_existing_path(entry.get("modification_unit_file"), manifest_path.parent)
-        unit = read_json(unit_path)
-        unit_schema_counts[str(unit.get("schema_version"))] += 1
-        if unit.get("schema_version") != HYBRID_UNIT_SCHEMA:
-            raise ValueError(f"Unit {unit_path} has wrong schema {unit.get('schema_version')!r}.")
-        payload_window_count += int(unit.get("payload_window_count") or 0)
-    return {
-        "unit_schema_counts": dict(sorted(unit_schema_counts.items())),
-        "payload_window_count": payload_window_count,
-    }
-
-
 #Parse command-line arguments for the Step 15 checker.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate Step 15 compact modification-unit outputs.")
     parser.add_argument("--output-dir", required=True, help="Step 15 policy output directory, e.g. 05_groups/fixed_packet_count_size_006.")
-    parser.add_argument("--expected-strategy", choices=[HEADER_ONLY_STRATEGY, "hybrid"], help="Expected Step 15 strategy.")
+    parser.add_argument("--expected-strategy", choices=[HEADER_ONLY_STRATEGY], help="Expected Step 15 strategy.")
     parser.add_argument("--expected-packet-count", type=int, help="Expected physical source packet count.")
     parser.add_argument("--expected-group-size", type=int, help="Expected fixed physical packet group size.")
     parser.add_argument("--expected-grouping-policy", choices=["fixed_packet_count", "flow_context_aware"])
@@ -327,8 +295,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser()
-    expected_strategy = None if args.expected_strategy == "hybrid" else args.expected_strategy
-    manifest_path = find_manifest(output_dir, expected_strategy)
+    expected_strategy = args.expected_strategy or HEADER_ONLY_STRATEGY
+    manifest_path = find_manifest(output_dir)
     manifest = read_json(manifest_path)
     metadata = manifest.get("metadata", {})
     if args.expected_grouping_policy and metadata.get("grouping_policy") != args.expected_grouping_policy:
@@ -352,10 +320,7 @@ def main() -> None:
         expected_group_size=args.expected_group_size,
     )
     strategy = manifest["metadata"].get("strategy")
-    if strategy == HEADER_ONLY_STRATEGY:
-        contract_summary = check_header_only_units(manifest, manifest_path)
-    else:
-        contract_summary = check_hybrid_units(manifest, manifest_path)
+    contract_summary = check_header_only_units(manifest, manifest_path)
     metadata = manifest["metadata"]
     summary = {
         "status": "ok",
