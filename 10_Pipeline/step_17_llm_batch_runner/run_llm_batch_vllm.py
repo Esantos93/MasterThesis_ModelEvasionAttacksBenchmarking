@@ -20,7 +20,6 @@ import run_llm_batch as base_step17  # noqa: E402
 VLLM_MODEL_IDS: list[str] | None = None
 VLLM_DTYPE: str = "auto"
 VLLM_GPU_MEMORY_UTILIZATION: float = 0.90
-VLLM_MAX_MODEL_LEN: int | None = None
 VLLM_TRUST_REMOTE_CODE: bool = False
 VLLM_CHAT_TEMPLATE_KWARGS: dict[str, Any] | None = None
 
@@ -170,7 +169,7 @@ def collect_vllm_model_paths(
 
 #This function loads one selected vLLM model through the adapter.
 def load_vllm_model(model_path: Path, generation_params: dict[str, Any]) -> VllmChatCompletionAdapter:
-    max_model_len = VLLM_MAX_MODEL_LEN or int(generation_params["n_ctx"])
+    max_model_len = int(generation_params["runtime_max_model_len"])
     return VllmChatCompletionAdapter(str(model_path), max_model_len=max_model_len)
 
 
@@ -185,7 +184,7 @@ def run_vllm_per_request_sampling_probe(args: argparse.Namespace) -> None:
         model_filters=args.model_filter,
     )
     model_path = model_paths[0]
-    max_model_len = VLLM_MAX_MODEL_LEN or args.vllm_max_model_len or args.runtime_max_model_len or 2048
+    max_model_len = args.runtime_max_model_len or 2048
     adapter = VllmChatCompletionAdapter(str(model_path), max_model_len=max_model_len)
     messages_batch = [
         [{"role": "user", "content": "Reply with exactly one token: A"}],
@@ -224,7 +223,6 @@ def parse_rise_cloud_args() -> argparse.Namespace:
     extra_parser.add_argument("--hf-model-id", action="append", help="Hugging Face model id to load with vLLM. Can be repeated.")
     extra_parser.add_argument("--vllm-dtype", default="auto", help="vLLM dtype, for example auto, half, bfloat16, or float16.")
     extra_parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
-    extra_parser.add_argument("--vllm-max-model-len", type=int)
     extra_parser.add_argument("--trust-remote-code", action="store_true")
     extra_parser.add_argument(
         "--disable-thinking",
@@ -255,24 +253,13 @@ def main() -> None:
     global VLLM_MODEL_IDS
     global VLLM_DTYPE
     global VLLM_GPU_MEMORY_UTILIZATION
-    global VLLM_MAX_MODEL_LEN
     global VLLM_TRUST_REMOTE_CODE
     global VLLM_CHAT_TEMPLATE_KWARGS
 
     args = parse_rise_cloud_args()
-    if (
-        args.vllm_max_model_len is not None
-        and args.runtime_max_model_len is not None
-        and args.vllm_max_model_len != args.runtime_max_model_len
-    ):
-        raise ValueError(
-            "--vllm-max-model-len and --runtime-max-model-len must match so Step 17 validates "
-            "against the actual backend context boundary."
-        )
     VLLM_MODEL_IDS = args.hf_model_id
     VLLM_DTYPE = args.vllm_dtype
     VLLM_GPU_MEMORY_UTILIZATION = args.vllm_gpu_memory_utilization
-    VLLM_MAX_MODEL_LEN = args.vllm_max_model_len
     VLLM_TRUST_REMOTE_CODE = args.trust_remote_code
     VLLM_CHAT_TEMPLATE_KWARGS = {"enable_thinking": False} if args.disable_thinking else None
     if args.probe_vllm_per_request_sampling:

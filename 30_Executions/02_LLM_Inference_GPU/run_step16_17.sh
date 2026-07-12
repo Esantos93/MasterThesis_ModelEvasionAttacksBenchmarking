@@ -39,9 +39,7 @@ STEP17_BACKEND="${STEP17_BACKEND:-vllm}"
 BATCH_SIZE="${BATCH_SIZE:-168}"
 LIMIT_PROMPTS_S16="${LIMIT_PROMPTS_S16:-}"
 LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-}"
-if [[ -z "${RUNTIME_MAX_MODEL_LEN+x}" ]]; then
-  RUNTIME_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-12288}"
-fi
+RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN:-12288}"
 if [[ -n "${EXPECTED_OUTPUT_PATCH_TOKENS:-}" ]]; then
   echo "EXPECTED_OUTPUT_PATCH_TOKENS is obsolete. Step 17 uses each prompt unit's token_plan.planned_output_tokens."
   exit 1
@@ -50,11 +48,6 @@ PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-30}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
-VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-${RUNTIME_MAX_MODEL_LEN}}"
-if [[ "${VLLM_MAX_MODEL_LEN}" != "${RUNTIME_MAX_MODEL_LEN}" ]]; then
-  echo "VLLM_MAX_MODEL_LEN and RUNTIME_MAX_MODEL_LEN must match."
-  exit 1
-fi
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 DISABLE_THINKING="${DISABLE_THINKING:-0}"
 
@@ -273,7 +266,6 @@ echo "vLLM virtual environment: ${VLLM_VENV}"
 echo "Step 17 runner: ${STEP17_RUNNER:-<skipped>}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Runtime max model len: ${RUNTIME_MAX_MODEL_LEN}"
-echo "vLLM max model len: ${VLLM_MAX_MODEL_LEN}"
 echo "Output token budget source: prompt_unit.token_plan.planned_output_tokens"
 echo "Disable thinking: ${DISABLE_THINKING}"
 echo "Limit Step 16: ${LIMIT_PROMPTS_S16:-<none>}"
@@ -359,7 +351,6 @@ if [[ "${SKIP_STEP17}" != "1" ]]; then
   if [[ "${STEP17_BACKEND}" == "vllm" ]]; then
     step17_args+=(--vllm-dtype "${VLLM_DTYPE}")
     step17_args+=(--vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}")
-    step17_args+=(--vllm-max-model-len "${VLLM_MAX_MODEL_LEN}")
     if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
       step17_args+=(--trust-remote-code)
     fi
