@@ -138,6 +138,11 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
                         "prompt_version": "compact_patch_prompting_v2",
                         "prompt_input_json_data_profile": "baseline_minimal_canonical_patch_v1",
                         "prompt_instructions_profile": "compact_patch_baseline_v1",
+                        "token_budget": {
+                            "policy": "compact_patch_token_budget_v2",
+                            "chars_per_token_estimate": 3.0,
+                            "output_token_estimation_safety_factor": 1.2,
+                        },
                     },
                 },
             )
@@ -206,6 +211,8 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
             self.assertEqual(prompt_unit["token_estimation"], expected_estimation)
             self.assertEqual(prompt_unit["estimated_input_tokens"], expected_estimation["estimated_input_tokens"])
             self.assertEqual(prompt_unit["token_plan"]["policy"], "compact_patch_token_budget_v2")
+            self.assertEqual(prompt_unit["token_plan"]["chars_per_token_estimate"], 3.0)
+            self.assertEqual(prompt_unit["token_plan"]["output_token_estimation_safety_factor"], 1.2)
             self.assertGreater(prompt_unit["token_plan"]["planned_output_tokens"], 0)
             self.assertEqual(
                 prompt_unit["token_plan"]["max_tokens"],
@@ -247,6 +254,11 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
                     "prompt_version": "compact_patch_prompting_v2",
                     "prompt_input_json_data_profile": "baseline_minimal_canonical_patch_v1",
                     "prompt_instructions_profile": "compact_patch_baseline_v1",
+                    "token_budget": {
+                        "policy": "compact_patch_token_budget_v2",
+                        "chars_per_token_estimate": 3.0,
+                        "output_token_estimation_safety_factor": 1.2,
+                    },
                 },
             },
             prompt_source_unit,
@@ -265,7 +277,14 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
         token_estimation = build_prompts.estimate_prompt_unit_input_tokens(
             {
                 "experiment": {"experiment_id": "exp_cicids2017_baseline_flow_context_aware_Llama31_8B"},
-                "llm": {"prompt_version": "compact_patch_prompting_v2"},
+                "llm": {
+                    "prompt_version": "compact_patch_prompting_v2",
+                    "token_budget": {
+                        "policy": "compact_patch_token_budget_v2",
+                        "chars_per_token_estimate": 3.0,
+                        "output_token_estimation_safety_factor": 1.2,
+                    },
+                },
             },
             prompt_source_unit,
         )

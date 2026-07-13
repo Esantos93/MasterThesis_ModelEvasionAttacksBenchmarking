@@ -16,6 +16,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 from common import prompt_projection
+from common.token_budget import TOKEN_BUDGET_POLICY, load_token_budget_config
 
 
 #These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contracts.
@@ -24,7 +25,6 @@ PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
 SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2 = "compact_modification_unit_v2"
 SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2 = "compact_modification_units_manifest_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
-TOKEN_BUDGET_POLICY = "compact_patch_token_budget_v2"
 
 SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS = {
     SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2,
@@ -716,23 +716,12 @@ def build_compact_patch_messages(
 def estimate_prompt_unit_input_tokens(config: dict[str, Any], prompt_unit: dict[str, Any]) -> dict[str, Any]:
     prompt_input_structure = load_prompt_input_json_data_structure(config)
     _, instruction_lines = load_prompt_instructions_profile(config)
-    llm_config = config.get("llm", {}) if isinstance(config.get("llm"), dict) else {}
-    pipeline_config = config.get("pipeline", {}) if isinstance(config.get("pipeline"), dict) else {}
-    token_budget = prompt_unit.get("token_budget", {}) if isinstance(prompt_unit.get("token_budget"), dict) else {}
-    chars_per_token_estimate = float(
-        llm_config.get(
-            "chars_per_token_estimate",
-            pipeline_config.get(
-                "chars_per_token_estimate",
-                token_budget.get("chars_per_token_estimate", 3.0),
-            ),
-        )
-    )
+    token_budget_config = load_token_budget_config(config)
     return prompt_projection.estimate_compact_patch_prompt_tokens(
         prompt_unit=prompt_unit,
         prompt_input_structure=prompt_input_structure,
         instruction_lines=instruction_lines,
-        chars_per_token_estimate=chars_per_token_estimate,
+        chars_per_token_estimate=float(token_budget_config["chars_per_token_estimate"]),
     )
 
 
