@@ -52,7 +52,7 @@
     "prompt_instructions_profile": "compact_patch_baseline_v1",
     "temperature": 0.0,
     "top_p": 0.95,
-    "prompt_target_context": 8192,
+    "prompt_target_context": 4096,
     "prompt_template_overhead_tokens": 500,
     "runtime_max_model_len": 12288,
     "token_budget_safety_factor": 0.85,
