@@ -2,15 +2,14 @@
 set -Eeuo pipefail
 
 if [[ $# -ne 4 ]]; then
-  echo "Usage: $0 <experiment_output_dir> <grouping_label> <run_id> <archive_path>"
+  echo "Usage: $0 <experiment_output_dir> <step17_output_root> <run_id> <archive_path>"
   exit 2
 fi
 
 experiment_output_dir="${1%/}"
-grouping_label="$2"
+step17_root="${2%/}"
 run_id="$3"
 archive_path="$4"
-step17_root="${experiment_output_dir}/07_llm_outputs/${grouping_label}"
 
 if ! command -v tar >/dev/null 2>&1; then
   echo "Required command not found: tar"
@@ -31,6 +30,13 @@ fi
 
 experiment_output_dir="$(cd "${experiment_output_dir}" && pwd -P)"
 step17_root="$(cd "${step17_root}" && pwd -P)"
+case "${step17_root}" in
+  "${experiment_output_dir}"/*) ;;
+  *)
+    echo "Step 17 output root must be inside the experiment output directory: ${step17_root}"
+    exit 1
+    ;;
+esac
 mapfile -t model_run_dirs < <(
   find "${step17_root}" -mindepth 2 -maxdepth 2 -type d -name "${run_id}" | sort
 )

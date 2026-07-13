@@ -411,7 +411,7 @@ if [[ "${SKIP_STEP17}" != "1" && "${COMPRESS_STEP17}" == "1" ]]; then
   write_status "running"
   bash "${STEP17_COMPRESSION_SCRIPT}" \
     "${EXPERIMENT_OUTPUT_DIR}" \
-    "${GROUPING_LABEL}" \
+    "${STEP17_OUTPUT_ROOT}" \
     "${RUN_ID}" \
     "${STEP17_ARCHIVE}"
 elif [[ "${SKIP_STEP17}" != "1" ]]; then
