@@ -12,6 +12,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.token_budget import load_token_budget_config
 from common.io_utils import write_json
 from common.paths import create_experiment_dirs
 
@@ -39,6 +40,7 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         "snort",
     )
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
+    load_token_budget_config(config)
     require_keys(
         config["pipeline"],
         [
