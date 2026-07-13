@@ -212,3 +212,24 @@ SKIP_STEP16=1 \
 PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<experiment_id>/06_prompts/<grouping_label>/<run_id>" \
 /tf/thesis_Santos/04_Steps/run_step16_17.sh
 ```
+
+For comparisons between differently fragmented Flow-context-aware prompt
+populations, use `build_paired_prompt_manifest_samples.py`. Unlike the
+single-manifest sampler, it selects only common fragment-boundary blocks and
+verifies that every output manifest covers exactly the same physical packet
+IDs. The sample is deterministic and stratified by parent-flow packet count:
+
+```bash
+python3 /tf/thesis_Santos/04_Steps/build_paired_prompt_manifest_samples.py \
+  --variant ctx4096=/path/to/ctx4096/prompt_units_manifest_v1.json \
+  --variant ctx6144=/path/to/ctx6144/prompt_units_manifest_v1.json \
+  --output-dir /path/to/paired_same_traffic_10000 \
+  --target-packet-count 10000 \
+  --seed flow_context_target_comparison_v1
+```
+
+The selected physical-packet count can differ slightly from the requested
+target because the selector never cuts a Prompt Unit. Check
+`paired_prompt_manifest_sample_report.json` before inference. The two output
+manifests may contain different Prompt Unit counts; their physical packet sets
+must be identical.
