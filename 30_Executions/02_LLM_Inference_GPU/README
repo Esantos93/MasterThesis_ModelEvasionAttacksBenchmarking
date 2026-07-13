@@ -5,8 +5,8 @@ The active scripts are:
 ```text
 run_step16_17.sh
 run_multi_model_inference.sh
-compression_step_16.sh
-compression_step_17.sh
+compression/compression_step_16.sh
+compression/compression_step_17.sh
 calibrate_step17_batch_sizes.sh
 compare_step17_batch_calibration.py
 build_prompt_manifest_sample.py
@@ -136,8 +136,8 @@ Recommended first RISE smoke:
 ```bash
 chmod +x \
   /tf/thesis_Santos/04_Steps/run_step16_17.sh \
-  /tf/thesis_Santos/04_Steps/compression_step_16.sh \
-  /tf/thesis_Santos/04_Steps/compression_step_17.sh
+  /tf/thesis_Santos/04_Steps/compression/compression_step_16.sh \
+  /tf/thesis_Santos/04_Steps/compression/compression_step_17.sh
 
 CLOUD_ROOT="/tf/thesis_Santos" \
 EXPERIMENT_ID="exp_cicids2017_thursday_baseline_003" \
