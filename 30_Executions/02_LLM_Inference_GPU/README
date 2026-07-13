@@ -4,12 +4,42 @@ The active scripts are:
 
 ```text
 run_step16_17.sh
+run_multi_model_inference.sh
 compression_step_16.sh
 compression_step_17.sh
 calibrate_step17_batch_sizes.sh
 compare_step17_batch_calibration.py
 build_prompt_manifest_sample.py
 ```
+
+`run_multi_model_inference.sh` is the sequential multi-model orchestrator. Its
+first section is intentionally edited before each experiment and controls:
+
+- enabled models;
+- `smoke` or `full` execution;
+- smoke limits, including a separate Qwen limit;
+- experiment/config/model paths and model-specific batch sizes;
+- whether the queue continues after one model fails.
+
+The safe default is a smoke queue: 100 prompts for Llama/Gemma and 50 for
+Qwen. Both Step 16 and Step 17 receive the same limit. In `full` mode, neither
+step receives a prompt limit. The script preflights every enabled model before
+starting the first run, invokes `run_step16_17.sh` sequentially, and writes a
+master queue log and status file under:
+
+```text
+02_OutputFiles/multi_model_logs/<queue_id>/
+```
+
+Run it inside an existing tmux session:
+
+```bash
+chmod +x /tf/thesis_Santos/04_Steps/run_multi_model_inference.sh
+bash /tf/thesis_Santos/04_Steps/run_multi_model_inference.sh
+```
+
+The orchestrator does not create tmux sessions and never executes enabled
+models concurrently on the same GPU.
 
 It is designed for the new RISE container/host workflow and does not use
 Google Cloud, GCS, SSH, Docker, or bucket transfers.
