@@ -146,7 +146,11 @@ def config(
         },
         "llm": {
             "prompt_target_context": 4096,
-            "chars_per_token_estimate": 3.0,
+            "token_budget": {
+                "policy": "compact_patch_token_budget_v2",
+                "chars_per_token_estimate": 3.0,
+                "output_token_estimation_safety_factor": 1.2,
+            },
             "small_payload_min_bytes": 64,
             "small_payload_max_bytes": 512,
             "small_full_token_budget_fraction": 0.05,

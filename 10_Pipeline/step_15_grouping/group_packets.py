@@ -53,7 +53,6 @@ SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_context_aware"]
 #Experiment-level budget values that affect the LLM contract must come from the active config.
 DEFAULT_TOKEN_BUDGET_CONFIG = {
     "prompt_target_context": 4096,
-    "chars_per_token_estimate": 3.0,
     "small_payload_min_bytes": 64,
     "small_payload_max_bytes": 512,
     "small_full_token_budget_fraction": 0.05,
