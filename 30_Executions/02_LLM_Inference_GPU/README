@@ -21,11 +21,15 @@ first section is intentionally edited before each experiment and controls:
 - experiment/config/model paths and model-specific batch sizes;
 - whether the queue continues after one model fails.
 
-The safe default is a smoke queue: 100 prompts for Llama/Gemma and 50 for
-Qwen. Both Step 16 and Step 17 receive the same limit. In `full` mode, neither
-step receives a prompt limit. The script preflights every enabled model before
-starting the first run, invokes `run_step16_17.sh` sequentially, and writes a
-master queue log and status file under:
+The active Flow-context-aware `prompt_target_context = 4096` smoke profile uses
+batch size `192` for Llama-3.1-8B, `224` for both Gemma models, and `8` for
+Qwen3-32B. The safe default smoke queue processes 256 prompts for Llama/Gemma,
+which exercises one complete Gemma batch of 224 plus a 32-prompt tail. Qwen
+processes 64 prompts, producing eight complete batches of 8. Both Step 16 and
+Step 17 receive the same limit. In `full` mode, neither step receives a prompt
+limit. The script preflights every enabled model before starting the first run,
+invokes `run_step16_17.sh` sequentially, and writes a master queue log and
+status file under:
 
 ```text
 02_OutputFiles/multi_model_logs/<queue_id>/

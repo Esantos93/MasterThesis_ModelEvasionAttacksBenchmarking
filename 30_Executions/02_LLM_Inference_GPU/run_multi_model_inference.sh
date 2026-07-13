@@ -20,12 +20,13 @@ RUN_LABEL="baseline_flow_context_aware"
 ENABLE_LLAMA31=0
 ENABLE_GEMMA12=1
 ENABLE_GEMMA26=1
-ENABLE_QWEN32=1
+ENABLE_QWEN32=0
 
-# Smoke limits are applied equally to Steps 16 and 17. Qwen uses a smaller
-# default because its known-safe batch size and throughput differ materially.
-SMOKE_PROMPTS_DEFAULT=100
-SMOKE_PROMPTS_QWEN32=50
+# Smoke limits are applied equally to Steps 16 and 17. The Gemma default
+# exercises one complete batch of 224 plus a 32-prompt tail. Qwen uses eight
+# complete batches of 8 because its throughput differs materially.
+SMOKE_PROMPTS_DEFAULT=256
+SMOKE_PROMPTS_QWEN32=64
 
 # Continue with later enabled models when one run fails.
 CONTINUE_ON_ERROR=1
@@ -43,21 +44,21 @@ COMPRESS_STEP17=1
 LLAMA31_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_Llama31_8B"
 LLAMA31_CONFIG="config_LLM_baseline_flow_context_aware_Llama31_8B.json"
 LLAMA31_MODEL_PATH="/models_root/Llama-3.1-8B-Instruct/"
-LLAMA31_BATCH_SIZE=224
+LLAMA31_BATCH_SIZE=192
 LLAMA31_DISABLE_THINKING=0
 
 # Gemma 4 12B
 GEMMA12_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_gemma-4-12B-it"
 GEMMA12_CONFIG="config_LLM_baseline_flow_context_aware_gemma-4-12B-it.json"
 GEMMA12_MODEL_PATH="/models_root/gemma-4-12B-it/"
-GEMMA12_BATCH_SIZE=224
+GEMMA12_BATCH_SIZE=192
 GEMMA12_DISABLE_THINKING=0
 
 # Gemma 4 26B-A4B
 GEMMA26_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_gemma-4-26B-A4B-it"
 GEMMA26_CONFIG="config_LLM_baseline_flow_context_aware_gemma-4-26B-A4B-it.json"
 GEMMA26_MODEL_PATH="/models_root/gemma-4-26B-A4B-it/"
-GEMMA26_BATCH_SIZE=224
+GEMMA26_BATCH_SIZE=192
 GEMMA26_DISABLE_THINKING=0
 
 # Qwen3 32B. The path matches the completed fixed-group experiment.
