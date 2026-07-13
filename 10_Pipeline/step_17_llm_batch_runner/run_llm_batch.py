@@ -18,6 +18,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.token_budget import TOKEN_BUDGET_POLICY, load_token_budget_config
 
 
 #This is the fixed RISE cloud root agreed for the LLM-side pipeline steps.
@@ -32,7 +33,6 @@ PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
 ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
-TOKEN_BUDGET_POLICY = "compact_patch_token_budget_v2"
 FIELD_ALIASES = {
     "region_type": ["region_type", "type"],
     "operation": ["operation", "op"],
@@ -58,6 +58,7 @@ def write_text(path: str | Path, text: str) -> None:
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "llm"], "config")
     require_keys(config["experiment"], ["experiment_id"], "experiment")
+    load_token_budget_config(config)
 
 
 #This function builds the default cloud-side paths for Step 17.
@@ -242,6 +243,7 @@ def prepare_model_output_dirs(output_root: Path, model_name: str, run_id: str) -
 #This function returns the generation parameters used by the active Step 17 backend.
 def build_generation_params(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     llm_config = config.get("llm", {})
+    token_budget_config = load_token_budget_config(config)
     runtime_max_model_len = (
         args.runtime_max_model_len
         if args.runtime_max_model_len is not None
@@ -254,11 +256,7 @@ def build_generation_params(config: dict[str, Any], args: argparse.Namespace) ->
         "runtime_max_model_len": runtime_max_model_len,
         "n_ctx": runtime_max_model_len,
         "n_ctx_mode": "runtime_max_model_len",
-        "chars_per_token_estimate": (
-            args.chars_per_token_estimate
-            if args.chars_per_token_estimate is not None
-            else float(llm_config.get("chars_per_token_estimate", 3.0))
-        ),
+        "chars_per_token_estimate": float(token_budget_config["chars_per_token_estimate"]),
     }
 
 
@@ -1700,8 +1698,6 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("llm.prompt_target_context must be a positive integer.")
     if generation_params["runtime_max_model_len"] <= 0:
         raise ValueError("llm.runtime_max_model_len or --runtime-max-model-len must be a positive integer.")
-    if generation_params["chars_per_token_estimate"] <= 0:
-        raise ValueError("llm.chars_per_token_estimate or --chars-per-token-estimate must be greater than zero.")
     n_ctx_plan = estimate_dynamic_n_ctx(prompt_paths, generation_params)
     generation_params["n_ctx"] = n_ctx_plan["n_ctx"]
     generation_params["n_ctx_plan"] = n_ctx_plan
@@ -1781,11 +1777,6 @@ def parse_cli_args() -> argparse.Namespace:
         "--runtime-max-model-len",
         type=int,
         help="Hard backend context cap used by vLLM max_model_len.",
-    )
-    parser.add_argument(
-        "--chars-per-token-estimate",
-        type=float,
-        help="Override llm.chars_per_token_estimate for dynamic n_ctx preflight before model loading.",
     )
     parser.add_argument("--llm-batch-size", type=int, default=1, help="Maximum number of real LLM prompt units per generation batch.")
     return parser.parse_args()
