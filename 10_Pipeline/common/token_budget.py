@@ -272,24 +272,51 @@ def estimate_worst_case_output_tokens(
 
 
 def load_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
-    llm_config = config.get("llm", {})
-    token_budget_config = llm_config.get("token_budget", {})
+    llm_config = config.get("llm")
+    if not isinstance(llm_config, dict):
+        raise ValueError("Active V2 configs require an llm object.")
+    if "chars_per_token_estimate" in llm_config:
+        raise ValueError(
+            "llm.chars_per_token_estimate is obsolete; use "
+            "llm.token_budget.chars_per_token_estimate."
+        )
+    if "token_budget_safety_factor" in llm_config:
+        raise ValueError(
+            "llm.token_budget_safety_factor is obsolete and must not be used by the V2 token plan."
+        )
+
+    token_budget_config = llm_config.get("token_budget")
     if not isinstance(token_budget_config, dict):
-        token_budget_config = {}
+        raise ValueError("Active V2 configs require an llm.token_budget object.")
+    required_fields = (
+        "policy",
+        "chars_per_token_estimate",
+        "output_token_estimation_safety_factor",
+    )
+    missing_fields = [field for field in required_fields if field not in token_budget_config]
+    if missing_fields:
+        raise ValueError(
+            "llm.token_budget is missing required V2 fields: " + ", ".join(missing_fields)
+        )
+
+    policy = str(token_budget_config["policy"])
+    if policy != TOKEN_BUDGET_POLICY:
+        raise ValueError(
+            f"llm.token_budget.policy must be {TOKEN_BUDGET_POLICY!r}; found {policy!r}."
+        )
+    chars_per_token_estimate = float(token_budget_config["chars_per_token_estimate"])
+    if chars_per_token_estimate <= 0:
+        raise ValueError("llm.token_budget.chars_per_token_estimate must be greater than zero.")
+    output_safety_factor = float(token_budget_config["output_token_estimation_safety_factor"])
+    if output_safety_factor < 1.0:
+        raise ValueError(
+            "llm.token_budget.output_token_estimation_safety_factor must be greater than or equal to 1.0."
+        )
+
     return {
-        "policy": str(token_budget_config.get("policy", TOKEN_BUDGET_POLICY)),
-        "chars_per_token_estimate": float(
-            token_budget_config.get(
-                "chars_per_token_estimate",
-                llm_config.get("chars_per_token_estimate", DEFAULT_CHARS_PER_TOKEN_ESTIMATE),
-            )
-        ),
-        "output_token_estimation_safety_factor": float(
-            token_budget_config.get(
-                "output_token_estimation_safety_factor",
-                DEFAULT_OUTPUT_TOKEN_ESTIMATION_SAFETY_FACTOR,
-            )
-        ),
+        "policy": policy,
+        "chars_per_token_estimate": chars_per_token_estimate,
+        "output_token_estimation_safety_factor": output_safety_factor,
         "payload_replacement_size_policy": token_budget_config.get(
             "payload_replacement_size_policy",
             DEFAULT_PAYLOAD_REPLACEMENT_SIZE_POLICY,
@@ -343,6 +370,7 @@ def build_compact_patch_token_plan(
         "fits_prompt_target_context": overflow_tokens == 0,
         "overflow_tokens": overflow_tokens,
         "chars_per_token_estimate": chars_per_token_estimate,
+        "output_token_estimation_safety_factor": output_token_estimation_safety_factor,
         "breakdown": {
             "prompt_input_chars": len(parts["json_prompt_input_text"]),
             "fixed_prompt_chars": len(parts["fixed_prompt_text"]),
