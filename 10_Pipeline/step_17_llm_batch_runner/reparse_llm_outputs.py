@@ -253,7 +253,8 @@ def main() -> None:
 
     projected_status_counts = dict(original_status_counts)
     normalized_output_count = 0
-    normalized_edit_count = 0
+    normalized_region_id_alias_count = 0
+    normalized_numeric_string_count = 0
     remaining_failure_reasons: dict[str, int] = {}
     for result in results:
         original_status = result.get("original_status")
@@ -263,9 +264,20 @@ def main() -> None:
             projected_status_counts[new_status] = projected_status_counts.get(new_status, 0) + 1
         normalization = result.get("output_normalization")
         alias_details = normalization.get("region_id_field_alias") if isinstance(normalization, dict) else None
+        numeric_details = (
+            normalization.get("replacement_uint_numeric_string")
+            if isinstance(normalization, dict)
+            else None
+        )
+        normalization_applied = False
         if isinstance(alias_details, dict) and alias_details.get("applied"):
+            normalization_applied = True
+            normalized_region_id_alias_count += int(alias_details.get("normalized_edit_count") or 0)
+        if isinstance(numeric_details, dict) and numeric_details.get("applied"):
+            normalization_applied = True
+            normalized_numeric_string_count += int(numeric_details.get("normalized_edit_count") or 0)
+        if normalization_applied:
             normalized_output_count += 1
-            normalized_edit_count += int(alias_details.get("normalized_edit_count") or 0)
         if new_status == "failed":
             reason = str(result.get("new_failure_reason") or "unknown")
             remaining_failure_reasons[reason] = remaining_failure_reasons.get(reason, 0) + 1
@@ -277,7 +289,8 @@ def main() -> None:
     print(f"Status counts before: {original_status_counts}")
     print(f"Status counts after: {projected_status_counts}")
     print(f"Outputs normalized: {normalized_output_count}")
-    print(f"Header edits normalized: {normalized_edit_count}")
+    print(f"Header region-id aliases normalized: {normalized_region_id_alias_count}")
+    print(f"Header replacement numeric strings normalized: {normalized_numeric_string_count}")
     print(f"Remaining failures by reason: {remaining_failure_reasons}")
     print(f"Accepted outputs with stale failure artifacts: {accepted_with_stale_failure_artifacts}")
     if args.write:

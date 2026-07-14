@@ -406,6 +406,71 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
             },
         )
 
+    def test_compact_header_edit_decimal_string_is_canonicalized_to_integer(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "ipv4.ttl", "128"]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+        self.assertEqual(parsed_output["patches"][0]["replacement"], 128)
+        self.assertEqual(
+            result["output_normalization"]["replacement_uint_numeric_string"],
+            {
+                "applied": True,
+                "normalized_edit_count": 1,
+                "parser": "strict_decimal_uint_string_v1",
+            },
+        )
+
+    def test_compact_header_edit_region_alias_and_decimal_string_are_both_canonicalized(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", "128"]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+        self.assertTrue(result["output_normalization"]["region_id_field_alias"]["applied"])
+        self.assertTrue(result["output_normalization"]["replacement_uint_numeric_string"]["applied"])
+
+    def test_compact_header_edit_decimal_string_is_range_checked_after_conversion(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [["packet_000001", "ipv4.ttl", "256"]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "replacement_uint_above_max")
+
+    def test_compact_header_edit_non_decimal_strings_remain_rejected(self) -> None:
+        for replacement in ["-1", "128.0", " 128 ", "0x80", "one"]:
+            with self.subTest(replacement=replacement):
+                parsed_output = {
+                    "schema_version": "patch_output_v1",
+                    "parent_group_id": "parent_001",
+                    "prompt_unit_id": "unit_header_001",
+                    "header_edits": [["packet_000001", "ipv4.ttl", replacement]],
+                }
+
+                result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["reason"], "replacement_uint_not_integer")
+
     def test_compact_header_edit_region_id_alias_rejects_other_packet(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
@@ -506,6 +571,22 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
   "parent_group_id": "parent_001",
   "prompt_unit_id": "unit_header_001",
   "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", 128]]
+}
+```"""
+
+        parsed_output = run_llm_batch.parse_model_json(raw_text)
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+
+    def test_fenced_json_header_region_alias_and_decimal_string_are_canonicalized(self) -> None:
+        raw_text = """```json
+{
+  "schema_version": "patch_output_v1",
+  "parent_group_id": "parent_001",
+  "prompt_unit_id": "unit_header_001",
+  "header_edits": [["packet_000001", "packet_000001:ipv4.ttl", "128"]]
 }
 ```"""
 

@@ -606,14 +606,23 @@ def validate_uint_replacement(
     return None
 
 
-#This function builds metadata for strict header region-id alias normalization.
-def build_header_alias_normalization(normalized_edit_count: int) -> dict[str, Any]:
+#This function builds metadata for the strict compact-header normalizations.
+def build_header_output_normalization(
+    *,
+    region_id_alias_count: int,
+    numeric_string_count: int,
+) -> dict[str, Any]:
     return {
         "region_id_field_alias": {
-            "applied": normalized_edit_count > 0,
-            "normalized_edit_count": normalized_edit_count,
+            "applied": region_id_alias_count > 0,
+            "normalized_edit_count": region_id_alias_count,
             "parser": "strict_header_region_id_alias_v1",
-        }
+        },
+        "replacement_uint_numeric_string": {
+            "applied": numeric_string_count > 0,
+            "normalized_edit_count": numeric_string_count,
+            "parser": "strict_decimal_uint_string_v1",
+        },
     }
 
 
@@ -649,7 +658,14 @@ def expand_compact_header_edits(
         )
     ]
     patches = parsed_output["patches"]
-    normalized_edit_count = 0
+    normalized_region_id_alias_count = 0
+    normalized_numeric_string_count = 0
+
+    def current_normalization() -> dict[str, Any]:
+        return build_header_output_normalization(
+            region_id_alias_count=normalized_region_id_alias_count,
+            numeric_string_count=normalized_numeric_string_count,
+        )
 
     for edit_index, header_edit in enumerate(header_edits, start=1):
         if not isinstance(header_edit, list) or len(header_edit) != 3:
@@ -657,20 +673,20 @@ def expand_compact_header_edits(
                 "accepted": False,
                 "reason": "header_edit_invalid_shape",
                 "header_edit_index": edit_index,
-            }, build_header_alias_normalization(normalized_edit_count)
+            }, current_normalization()
         packet_id, field, replacement = header_edit
         if not isinstance(packet_id, str):
             return {
                 "accepted": False,
                 "reason": "header_edit_packet_id_not_string",
                 "header_edit_index": edit_index,
-            }, build_header_alias_normalization(normalized_edit_count)
+            }, current_normalization()
         if not isinstance(field, str):
             return {
                 "accepted": False,
                 "reason": "header_edit_field_not_string",
                 "header_edit_index": edit_index,
-            }, build_header_alias_normalization(normalized_edit_count)
+            }, current_normalization()
         packet_id_text = str(packet_id)
         matching_regions = [
             region
@@ -697,7 +713,7 @@ def expand_compact_header_edits(
                     "reason": "header_edit_region_id_alias_ambiguous",
                     "header_edit_index": edit_index,
                     "region_id": field,
-                }, build_header_alias_normalization(normalized_edit_count)
+                }, current_normalization()
             if len(alias_regions) == 1 and str(alias_regions[0].get("packet_id")) != packet_id_text:
                 return {
                     "accepted": False,
@@ -706,7 +722,7 @@ def expand_compact_header_edits(
                     "packet_id": packet_id_text,
                     "region_id": field,
                     "region_packet_id": str(alias_regions[0].get("packet_id")),
-                }, build_header_alias_normalization(normalized_edit_count)
+                }, current_normalization()
             matching_regions = alias_regions
             used_region_id_alias = len(matching_regions) == 1
         if len(matching_regions) != 1:
@@ -721,7 +737,7 @@ def expand_compact_header_edits(
                 "header_edit_index": edit_index,
                 "packet_id": packet_id_text,
                 "field": field,
-            }, build_header_alias_normalization(normalized_edit_count)
+            }, current_normalization()
         region = matching_regions[0]
         region_id = str(region["region_id"])
         canonical_field = region.get("field")
@@ -731,18 +747,27 @@ def expand_compact_header_edits(
                 "reason": "editable_header_region_missing_field",
                 "header_edit_index": edit_index,
                 "region_id": region_id,
-            }, build_header_alias_normalization(normalized_edit_count)
+            }, current_normalization()
+
+        normalized_replacement = replacement
+        used_numeric_string_alias = False
+        if isinstance(replacement, str) and re.fullmatch(r"[0-9]+", replacement):
+            normalized_replacement = int(replacement)
+            used_numeric_string_alias = True
         replacement_error = validate_uint_replacement(
-            patch={"replacement_format": "uint", "replacement": replacement},
+            patch={"replacement_format": "uint", "replacement": normalized_replacement},
             region=region,
             patch_index=edit_index,
         )
         if replacement_error:
             replacement_error["header_edit_index"] = edit_index
-            return replacement_error, build_header_alias_normalization(normalized_edit_count)
+            return replacement_error, current_normalization()
         if used_region_id_alias:
-            header_edits[edit_index - 1] = [packet_id_text, canonical_field, replacement]
-            normalized_edit_count += 1
+            normalized_region_id_alias_count += 1
+        if used_numeric_string_alias:
+            normalized_numeric_string_count += 1
+        if used_region_id_alias or used_numeric_string_alias:
+            header_edits[edit_index - 1] = [packet_id_text, canonical_field, normalized_replacement]
         patches.append(
             {
                 "packet_id": packet_id_text,
@@ -750,11 +775,12 @@ def expand_compact_header_edits(
                 "region_type": "header_field",
                 "operation": "replace_uint",
                 "replacement_format": "uint",
-                "replacement": replacement,
+                "replacement": normalized_replacement,
             }
         )
-    normalization = build_header_alias_normalization(normalized_edit_count)
-    return None, normalization if normalized_edit_count > 0 else None
+    normalization = current_normalization()
+    was_normalized = normalized_region_id_alias_count > 0 or normalized_numeric_string_count > 0
+    return None, normalization if was_normalized else None
 
 
 #This function validates the patch_output_v1 contract using the Step 16 editable-region index.
