@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_baseline_gemma-4-12B-it",
+    "experiment_id": "exp_cicids2017_baseline_fixed-size_gemma-4-12B-it",
     "description": "Header-only CICIDS2017 baseline using six-physical-packet parent groups and the conservative header editability policy. Model used gemma-4-12B-it.",
     "output_root": "/home/santos/Experiments"
   },

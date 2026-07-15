@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_baseline_Qwen3_32B",
+    "experiment_id": "exp_cicids2017_baseline_fixed-size_Qwen3_32B",
     "description": "Header-only CICIDS2017 baseline using six-physical-packet parent groups and the conservative header editability policy. Model used Qwen/Qwen3-32B.",
     "output_root": "/home/santos/Experiments"
   },
