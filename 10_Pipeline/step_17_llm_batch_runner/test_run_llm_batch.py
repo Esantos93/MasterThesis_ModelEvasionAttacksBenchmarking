@@ -443,6 +443,77 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertTrue(result["output_normalization"]["region_id_field_alias"]["applied"])
         self.assertTrue(result["output_normalization"]["replacement_uint_numeric_string"]["applied"])
 
+    def test_redundant_header_region_id_and_field_are_strictly_canonicalized(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [
+                ["packet_000001", "packet_000001:ipv4.ttl", "ipv4.ttl", 128]
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+        self.assertEqual(parsed_output["patches"][0]["region_id"], "packet_000001:ipv4.ttl")
+        self.assertEqual(
+            result["output_normalization"]["redundant_region_id_and_field"],
+            {
+                "applied": True,
+                "normalized_edit_count": 1,
+                "parser": "strict_redundant_header_region_field_v1",
+            },
+        )
+
+    def test_redundant_header_region_id_and_field_reject_mismatched_field(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [
+                ["packet_000001", "packet_000001:ipv4.ttl", "tcp.window", 128]
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_redundant_region_id_field_mismatch")
+
+    def test_redundant_header_region_id_and_field_reject_other_packet(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [
+                ["packet_999999", "packet_000001:ipv4.ttl", "ipv4.ttl", 128]
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edit_redundant_region_id_packet_mismatch")
+
+    def test_redundant_header_region_id_field_and_decimal_string_are_canonicalized(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [
+                ["packet_000001", "packet_000001:ipv4.ttl", "ipv4.ttl", "128"]
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(parsed_output["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+        self.assertTrue(result["output_normalization"]["redundant_region_id_and_field"]["applied"])
+        self.assertTrue(result["output_normalization"]["replacement_uint_numeric_string"]["applied"])
+
     def test_compact_header_edit_decimal_string_is_range_checked_after_conversion(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",

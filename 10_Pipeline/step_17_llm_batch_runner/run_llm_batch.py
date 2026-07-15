@@ -610,6 +610,7 @@ def validate_uint_replacement(
 def build_header_output_normalization(
     *,
     region_id_alias_count: int,
+    redundant_region_id_field_count: int,
     numeric_string_count: int,
 ) -> dict[str, Any]:
     return {
@@ -617,6 +618,11 @@ def build_header_output_normalization(
             "applied": region_id_alias_count > 0,
             "normalized_edit_count": region_id_alias_count,
             "parser": "strict_header_region_id_alias_v1",
+        },
+        "redundant_region_id_and_field": {
+            "applied": redundant_region_id_field_count > 0,
+            "normalized_edit_count": redundant_region_id_field_count,
+            "parser": "strict_redundant_header_region_field_v1",
         },
         "replacement_uint_numeric_string": {
             "applied": numeric_string_count > 0,
@@ -659,22 +665,28 @@ def expand_compact_header_edits(
     ]
     patches = parsed_output["patches"]
     normalized_region_id_alias_count = 0
+    normalized_redundant_region_id_field_count = 0
     normalized_numeric_string_count = 0
 
     def current_normalization() -> dict[str, Any]:
         return build_header_output_normalization(
             region_id_alias_count=normalized_region_id_alias_count,
+            redundant_region_id_field_count=normalized_redundant_region_id_field_count,
             numeric_string_count=normalized_numeric_string_count,
         )
 
     for edit_index, header_edit in enumerate(header_edits, start=1):
-        if not isinstance(header_edit, list) or len(header_edit) != 3:
+        if not isinstance(header_edit, list) or len(header_edit) not in {3, 4}:
             return {
                 "accepted": False,
                 "reason": "header_edit_invalid_shape",
                 "header_edit_index": edit_index,
             }, current_normalization()
-        packet_id, field, replacement = header_edit
+        redundant_region_id = None
+        if len(header_edit) == 3:
+            packet_id, field, replacement = header_edit
+        else:
+            packet_id, redundant_region_id, field, replacement = header_edit
         if not isinstance(packet_id, str):
             return {
                 "accepted": False,
@@ -687,18 +699,60 @@ def expand_compact_header_edits(
                 "reason": "header_edit_field_not_string",
                 "header_edit_index": edit_index,
             }, current_normalization()
+        if redundant_region_id is not None and not isinstance(redundant_region_id, str):
+            return {
+                "accepted": False,
+                "reason": "header_edit_region_id_not_string",
+                "header_edit_index": edit_index,
+            }, current_normalization()
         packet_id_text = str(packet_id)
-        matching_regions = [
-            region
-            for region in editable_regions
-            if str(region.get("packet_id")) == packet_id_text
-            and region.get("identity_type") == "physical_header_region"
-            and region.get("region_type") == "header_field"
-            and "replace_uint" in (region.get("allowed_operations") or [])
-            and region.get("field") == field
-        ]
         used_region_id_alias = False
-        if len(matching_regions) == 0:
+        used_redundant_region_id_field = redundant_region_id is not None
+        if used_redundant_region_id_field:
+            matching_regions = [
+                region
+                for region in editable_regions
+                if region.get("region_id") == redundant_region_id
+                and region.get("identity_type") == "physical_header_region"
+                and region.get("region_type") == "header_field"
+                and "replace_uint" in (region.get("allowed_operations") or [])
+            ]
+            if len(matching_regions) > 1:
+                return {
+                    "accepted": False,
+                    "reason": "header_edit_redundant_region_id_ambiguous",
+                    "header_edit_index": edit_index,
+                    "region_id": redundant_region_id,
+                }, current_normalization()
+            if len(matching_regions) == 1 and str(matching_regions[0].get("packet_id")) != packet_id_text:
+                return {
+                    "accepted": False,
+                    "reason": "header_edit_redundant_region_id_packet_mismatch",
+                    "header_edit_index": edit_index,
+                    "packet_id": packet_id_text,
+                    "region_id": redundant_region_id,
+                    "region_packet_id": str(matching_regions[0].get("packet_id")),
+                }, current_normalization()
+            if len(matching_regions) == 1 and matching_regions[0].get("field") != field:
+                return {
+                    "accepted": False,
+                    "reason": "header_edit_redundant_region_id_field_mismatch",
+                    "header_edit_index": edit_index,
+                    "region_id": redundant_region_id,
+                    "field": field,
+                    "region_field": matching_regions[0].get("field"),
+                }, current_normalization()
+        else:
+            matching_regions = [
+                region
+                for region in editable_regions
+                if str(region.get("packet_id")) == packet_id_text
+                and region.get("identity_type") == "physical_header_region"
+                and region.get("region_type") == "header_field"
+                and "replace_uint" in (region.get("allowed_operations") or [])
+                and region.get("field") == field
+            ]
+        if not used_redundant_region_id_field and len(matching_regions) == 0:
             alias_regions = [
                 region
                 for region in editable_regions
@@ -764,9 +818,11 @@ def expand_compact_header_edits(
             return replacement_error, current_normalization()
         if used_region_id_alias:
             normalized_region_id_alias_count += 1
+        if used_redundant_region_id_field:
+            normalized_redundant_region_id_field_count += 1
         if used_numeric_string_alias:
             normalized_numeric_string_count += 1
-        if used_region_id_alias or used_numeric_string_alias:
+        if used_region_id_alias or used_redundant_region_id_field or used_numeric_string_alias:
             header_edits[edit_index - 1] = [packet_id_text, canonical_field, normalized_replacement]
         patches.append(
             {
@@ -779,7 +835,11 @@ def expand_compact_header_edits(
             }
         )
     normalization = current_normalization()
-    was_normalized = normalized_region_id_alias_count > 0 or normalized_numeric_string_count > 0
+    was_normalized = (
+        normalized_region_id_alias_count > 0
+        or normalized_redundant_region_id_field_count > 0
+        or normalized_numeric_string_count > 0
+    )
     return None, normalization if was_normalized else None
 
 
