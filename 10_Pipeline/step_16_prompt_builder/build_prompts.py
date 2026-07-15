@@ -45,12 +45,12 @@ DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 #This list records the prompt versions that the current Step 16 implementation knows how to build.
 SUPPORTED_PROMPT_VERSIONS = [COMPACT_PATCH_PROMPT_VERSION]
 
-DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_minimal_canonical_patch_v1"
-DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "compact_patch_baseline_v1"
+DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_input_profile_v1"
+DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "baseline_instructions_profile_v1"
 
 PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
-    "baseline_minimal_canonical_patch_v1": {
-        "profile": "baseline_minimal_canonical_patch_v1",
+    "baseline_input_profile_v1": {
+        "profile": "baseline_input_profile_v1",
         "top_level_fields": [
             "schema_version",
             "experiment_id",
@@ -89,7 +89,7 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
-    "compact_patch_baseline_v1": [
+    "baseline_instructions_profile_v1": [
         "You modify compact network traffic prompt units to reduce Snort 3 detection.",
         "Return valid JSON only. Do not include Markdown, comments, or explanations.",
         "Do not return full packets. Return only patches/deltas.",

@@ -99,9 +99,9 @@ def build_v2_modification_unit() -> dict:
     unit["token_plan"] = build_compact_patch_token_plan(
         prompt_unit=unit,
         prompt_input_structure=build_prompts.PROMPT_INPUT_JSON_DATA_PROFILES[
-            "baseline_minimal_canonical_patch_v1"
+            "baseline_input_profile_v1"
         ],
-        instruction_lines=build_prompts.PROMPT_INSTRUCTIONS_PROFILES["compact_patch_baseline_v1"],
+        instruction_lines=build_prompts.PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"],
         prompt_target_context=8192,
         runtime_max_model_len=12288,
         chars_per_token_estimate=3.0,
@@ -136,8 +136,8 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
                     "experiment": {"experiment_id": "exp_cicids2017_baseline_004"},
                     "llm": {
                         "prompt_version": "compact_patch_prompting_v2",
-                        "prompt_input_json_data_profile": "baseline_minimal_canonical_patch_v1",
-                        "prompt_instructions_profile": "compact_patch_baseline_v1",
+                        "prompt_input_json_data_profile": "baseline_input_profile_v1",
+                        "prompt_instructions_profile": "baseline_instructions_profile_v1",
                         "token_budget": {
                             "policy": "compact_patch_token_budget_v2",
                             "chars_per_token_estimate": 3.0,
@@ -252,8 +252,8 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
                 "experiment": {"experiment_id": "exp_cicids2017_baseline_flow_context_aware_Llama31_8B"},
                 "llm": {
                     "prompt_version": "compact_patch_prompting_v2",
-                    "prompt_input_json_data_profile": "baseline_minimal_canonical_patch_v1",
-                    "prompt_instructions_profile": "compact_patch_baseline_v1",
+                    "prompt_input_json_data_profile": "baseline_input_profile_v1",
+                    "prompt_instructions_profile": "baseline_instructions_profile_v1",
                     "token_budget": {
                         "policy": "compact_patch_token_budget_v2",
                         "chars_per_token_estimate": 3.0,
