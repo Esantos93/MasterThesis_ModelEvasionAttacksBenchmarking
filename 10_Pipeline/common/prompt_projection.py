@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from common.ids_context import project_ids_context
+
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_input_profile_v1"
@@ -46,6 +48,15 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
             "value",
         ],
     },
+}
+
+PROMPT_INPUT_JSON_DATA_PROFILES["prompt_engineering_input_profile_v1"] = {
+    **PROMPT_INPUT_JSON_DATA_PROFILES["baseline_input_profile_v1"],
+    "profile": "prompt_engineering_input_profile_v1",
+    "top_level_fields": list(
+        PROMPT_INPUT_JSON_DATA_PROFILES["baseline_input_profile_v1"]["top_level_fields"]
+    ),
+    "ids_context_field_name": "ids_context",
 }
 
 PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
@@ -300,6 +311,12 @@ def build_compact_prompt_input(
         if projected_physical_packets:
             prompt_input[physical_packet_container_name] = projected_physical_packets
     prompt_input[region_container_name] = projected_canonical_regions
+    ids_context_field_name = structure.get("ids_context_field_name")
+    if ids_context_field_name is not None:
+        if not isinstance(ids_context_field_name, str) or not ids_context_field_name:
+            raise ValueError("Prompt input structure ids_context_field_name must be a non-empty string.")
+        if ids_context_field_name in prompt_unit:
+            prompt_input[ids_context_field_name] = project_ids_context(prompt_unit[ids_context_field_name])
     return prompt_input
 
 
