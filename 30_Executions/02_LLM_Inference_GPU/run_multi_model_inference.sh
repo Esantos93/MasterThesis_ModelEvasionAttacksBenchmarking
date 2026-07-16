@@ -48,21 +48,21 @@ COMPRESS_STEP17=1
 LLAMA31_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_Llama31_8B"
 LLAMA31_CONFIG="config_LLM_baseline_flow_context_aware_Llama31_8B.json"
 LLAMA31_MODEL_PATH="/models_root/Llama-3.1-8B-Instruct/"
-LLAMA31_BATCH_SIZE=192
+LLAMA31_BATCH_SIZE=192 #224 for fixe-sized-006, 192 for flow_context_aware
 LLAMA31_DISABLE_THINKING=0
 
 # Gemma 4 12B
 GEMMA12_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_gemma-4-12B-it"
 GEMMA12_CONFIG="config_LLM_baseline_flow_context_aware_gemma-4-12B-it.json"
 GEMMA12_MODEL_PATH="/models_root/gemma-4-12B-it/"
-GEMMA12_BATCH_SIZE=192
+GEMMA12_BATCH_SIZE=192 #224 for fixe-sized-006, 192 for flow_context_aware
 GEMMA12_DISABLE_THINKING=0
 
 # Gemma 4 26B-A4B
 GEMMA26_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_gemma-4-26B-A4B-it"
 GEMMA26_CONFIG="config_LLM_baseline_flow_context_aware_gemma-4-26B-A4B-it.json"
 GEMMA26_MODEL_PATH="/models_root/gemma-4-26B-A4B-it/"
-GEMMA26_BATCH_SIZE=192
+GEMMA26_BATCH_SIZE=192 #224 for fixe-sized-006, 192 for flow_context_aware
 GEMMA26_DISABLE_THINKING=0
 
 # Qwen3 32B. The path matches the completed fixed-group experiment.
