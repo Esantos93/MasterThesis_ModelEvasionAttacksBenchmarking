@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_prompt_engineering_fixed-size_Llama31_8B",
+    "experiment_id": "exp_cicids2017_pe_fixed-size_Llama31_8B",
     "description": "Header-only CICIDS2017 prompt-engineering experiment using six-physical-packet parent groups and compact IDS context. Model used Llama-3.1-8B-Instruct.",
     "output_root": "/home/santos/Experiments"
   },
