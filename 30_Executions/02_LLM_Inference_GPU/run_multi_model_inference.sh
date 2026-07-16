@@ -10,17 +10,21 @@ set -Eeuo pipefail
 # =============================================================================
 
 CLOUD_ROOT="/tf/thesis_Santos"
+# "flow_context_aware" or "fixed_packet_count_size_006"
 GROUPING_LABEL="flow_context_aware"
 
 # Allowed values: smoke, full. Smoke is the safe default.
 RUN_MODE="smoke"
+
+# Experiment category + _fixed-sized-006 o  _flow_context_aware. This is used to create a unique run ID and log directory.
+# Ejemplo: baseline_fixed-sized-006 o baseline_flow_context_aware
 RUN_LABEL="baseline_flow_context_aware"
 
 # Select the models to execute: 1 = enabled, 0 = disabled.
-ENABLE_LLAMA31=0
+ENABLE_LLAMA31=1
 ENABLE_GEMMA12=1
 ENABLE_GEMMA26=1
-ENABLE_QWEN32=0
+ENABLE_QWEN32=1
 
 # Smoke limits are applied equally to Steps 16 and 17. The Gemma default
 # exercises one complete batch of 224 plus a 32-prompt tail. Qwen uses eight
