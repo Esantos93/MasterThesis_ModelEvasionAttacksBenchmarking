@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import build_prompts
+from common import prompt_projection
 from common.prompt_projection import (
     estimate_compact_patch_prompt_tokens,
     load_prompt_input_json_data_structure_from_config,
@@ -98,10 +99,12 @@ def build_v2_modification_unit() -> dict:
     }
     unit["token_plan"] = build_compact_patch_token_plan(
         prompt_unit=unit,
-        prompt_input_structure=build_prompts.PROMPT_INPUT_JSON_DATA_PROFILES[
+        prompt_input_structure=prompt_projection.load_prompt_input_json_data_structure(
             "baseline_input_profile_v1"
-        ],
-        instruction_lines=build_prompts.PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"],
+        ),
+        instruction_lines=prompt_projection.load_prompt_instructions_profile(
+            "baseline_instructions_profile_v1"
+        )[1],
         prompt_target_context=8192,
         runtime_max_model_len=12288,
         chars_per_token_estimate=3.0,
@@ -110,7 +113,151 @@ def build_v2_modification_unit() -> dict:
     return unit
 
 
+def build_ids_context() -> dict:
+    return {
+        "schema_version": "ids_context_v1",
+        "records": [
+            {
+                "detector_source": "ruleset_text",
+                "gid": 1,
+                "sid": 1001,
+                "rev": 1,
+                "message": "Text detector",
+                "rule_declaration": "alert tcp any any -> any any (sid:1001; rev:1;)",
+                "tcp_connection_id": "tcp_connection_000001",
+                "anchor_packet_ids": ["packet_000001"],
+                "tcp_connection_packet_ids_in_prompt": ["packet_000001", "packet_000002"],
+            },
+            {
+                "detector_source": "ruleset_so",
+                "gid": 3,
+                "sid": 17775,
+                "rev": 1,
+                "message": "SO detector",
+                "so_rule_stub": "alert ip (soid:17775; gid:3; sid:17775; rev:1;)",
+                "security_context": {"summary": "Compiled detector behavior."},
+                "tcp_connection_id": "tcp_connection_000001",
+                "anchor_packet_ids": ["packet_000001"],
+                "tcp_connection_packet_ids_in_prompt": ["packet_000001", "packet_000002"],
+            },
+            {
+                "detector_source": "builtin_decoder_or_inspector",
+                "gid": 119,
+                "sid": 228,
+                "rev": 1,
+                "message": "Built-in detector",
+                "inspector": "http_inspect",
+                "semantic_description": "The inspector observed an invalid message sequence.",
+                "tcp_connection_id": "tcp_connection_000001",
+                "anchor_packet_ids": ["packet_000002"],
+                "tcp_connection_packet_ids_in_prompt": ["packet_000001", "packet_000002"],
+            },
+        ],
+    }
+
+
+def apply_prompt_engineering_token_plan(unit: dict) -> None:
+    input_structure = prompt_projection.load_prompt_input_json_data_structure(
+        "prompt_engineering_input_profile_v1"
+    )
+    _, instruction_lines = prompt_projection.load_prompt_instructions_profile(
+        "prompt_engineering_instructions_profile_v1"
+    )
+    unit["token_plan"] = build_compact_patch_token_plan(
+        prompt_unit=unit,
+        prompt_input_structure=input_structure,
+        instruction_lines=instruction_lines,
+        prompt_target_context=8192,
+        runtime_max_model_len=12288,
+        chars_per_token_estimate=3.0,
+        output_token_estimation_safety_factor=1.2,
+    )
+    unit["estimated_input_tokens"] = unit["token_plan"]["estimated_input_tokens"]
+
+
 class Step16HeaderOnlyV2Test(unittest.TestCase):
+    def test_step16_uses_only_shared_prompt_profile_registries(self) -> None:
+        self.assertFalse(hasattr(build_prompts, "PROMPT_INPUT_JSON_DATA_PROFILES"))
+        self.assertFalse(hasattr(build_prompts, "PROMPT_INSTRUCTIONS_PROFILES"))
+        baseline_config = {
+            "llm": {
+                "prompt_input_json_data_profile": "baseline_input_profile_v1",
+                "prompt_instructions_profile": "baseline_instructions_profile_v1",
+            }
+        }
+        self.assertEqual(
+            build_prompts.load_prompt_input_json_data_structure(baseline_config),
+            prompt_projection.load_prompt_input_json_data_structure_from_config(baseline_config),
+        )
+        self.assertEqual(
+            build_prompts.load_prompt_instructions_profile(baseline_config),
+            prompt_projection.load_prompt_instructions_profile_from_config(baseline_config),
+        )
+
+    def test_prompt_engineering_profile_projects_ids_context_and_abstention(self) -> None:
+        unit = build_v2_modification_unit()
+        unit["ids_context"] = build_ids_context()
+        unit["pre_snort_context_bundle"] = {
+            "source_urls": ["https://example.invalid/private"],
+            "artifact_hash": "private-hash",
+        }
+        apply_prompt_engineering_token_plan(unit)
+        prompt_source_unit = build_prompts.prepare_prompt_source_unit(unit)
+        config = {
+            "experiment": {"experiment_id": "exp_prompt_engineering_test"},
+            "llm": {
+                "prompt_version": "compact_patch_prompting_v2",
+                "prompt_input_json_data_profile": "prompt_engineering_input_profile_v1",
+                "prompt_instructions_profile": "prompt_engineering_instructions_profile_v1",
+                "token_budget": {
+                    "policy": "compact_patch_token_budget_v2",
+                    "chars_per_token_estimate": 3.0,
+                    "output_token_estimation_safety_factor": 1.2,
+                },
+            },
+        }
+
+        prompt_unit = build_prompts.build_prompt_unit(
+            config=config,
+            prompt_version="compact_patch_prompting_v2",
+            modification_unit_entry={"modification_unit_id": "group_000001"},
+            modification_unit_path=Path("group_000001.json"),
+            prompt_unit=prompt_source_unit,
+        )
+        prompt_text = prompt_unit["messages"][0]["content"]
+
+        self.assertIn('"ids_context"', prompt_text)
+        self.assertIn('"rule_declaration"', prompt_text)
+        self.assertIn('"so_rule_stub"', prompt_text)
+        self.assertIn('"semantic_description"', prompt_text)
+        self.assertNotIn("source_urls", prompt_text)
+        self.assertNotIn("private-hash", prompt_text)
+        self.assertIn(prompt_projection.PROMPT_ENGINEERING_ROLE_INSTRUCTION, prompt_text)
+        self.assertIn(prompt_projection.PROMPT_ENGINEERING_IDS_CONTEXT_INSTRUCTION, prompt_text)
+        self.assertIn(prompt_projection.PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION, prompt_text)
+        self.assertIn('"abstention": "no_useful_header_edit"', prompt_text)
+        self.assertEqual(prompt_unit["expected_output_format"]["optional_top_level_keys"], ["abstention"])
+        self.assertEqual(
+            prompt_unit["expected_output_format"]["recognized_abstention_reasons"],
+            ["no_useful_header_edit"],
+        )
+        self.assertEqual(
+            prompt_unit["token_plan"]["estimated_input_tokens"],
+            prompt_unit["token_estimation"]["estimated_input_tokens"],
+        )
+        self.assertEqual(
+            prompt_unit["token_plan"]["breakdown"]["abstention_reason"],
+            "no_useful_header_edit",
+        )
+        output_breakdown = prompt_unit["token_plan"]["breakdown"]
+        self.assertEqual(
+            output_breakdown["output_chars"],
+            max(
+                output_breakdown["all_authorized_edits_output_chars"],
+                output_breakdown["abstention_output_chars"],
+            ),
+        )
+
     def test_rejects_historical_v1_source_contract(self) -> None:
         modification_unit = build_v2_modification_unit()
         modification_unit["schema_version"] = "compact_modification_unit_v1"

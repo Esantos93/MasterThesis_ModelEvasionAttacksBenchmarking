@@ -45,104 +45,6 @@ DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 #This list records the prompt versions that the current Step 16 implementation knows how to build.
 SUPPORTED_PROMPT_VERSIONS = [COMPACT_PATCH_PROMPT_VERSION]
 
-DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_input_profile_v1"
-DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "baseline_instructions_profile_v1"
-
-PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
-    "baseline_input_profile_v1": {
-        "profile": "baseline_input_profile_v1",
-        "top_level_fields": [
-            "schema_version",
-            "experiment_id",
-            "parent_group_id",
-            "prompt_unit_id",
-            "unit_type",
-            "canonical_region_ids",
-            "editable_canonical_region_ids",
-            "context_canonical_region_ids",
-            "fragment_flow_context",
-            "fragment_compact_unit_context",
-        ],
-        "editable_header_table_name": "editable_headers",
-        "editable_header_columns_name": "editable_headers_columns",
-        "editable_header_columns": ["packet_id", "region_id", "field", "current_value", "min", "max"],
-        "region_container_name": "canonical_regions",
-        "canonical_region_fields": [
-            "canonical_region_id",
-            "role",
-            "editable",
-            "payload_view",
-            "payload_length_bytes",
-        ],
-        "editable_region_fields": [
-            "canonical_region_id",
-            "region_id",
-            "region_type",
-            "format",
-            "start_offset_bytes",
-            "end_offset_bytes",
-            "length_bytes",
-            "allowed_operations",
-            "value",
-        ],
-    },
-}
-
-PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
-    "baseline_instructions_profile_v1": [
-        "You modify compact network traffic prompt units to reduce Snort 3 detection.",
-        "Return valid JSON only. Do not include Markdown, comments, or explanations.",
-        "Do not return full packets. Return only patches/deltas.",
-        "Do not modify context regions or any field outside an editable region.",
-        "If no change is needed, return patches as an empty list.",
-        (
-            "Header edits target physical packets listed in editable_headers. "
-            "For header edits, use header_edits only. "
-            "Each header_edits item must be exactly [packet_id, field, replacement_uint], using the first and third "
-            "columns of an editable_headers row. Do not copy complete editable_headers rows into header_edits. "
-            "replacement_uint must be between the min and max columns for that same editable_headers row; "
-            "for ipv4.ttl, replacement_uint must be at least 1. "
-            "Do not include in header_edits unchanged headers."
-        ),
-        "Payload edits target canonical TCP regions, identified by canonical_region_id.",
-        "For every payload patch, operation must be copied exactly from that region's allowed_operations.",
-        "Each payload patch object modifies exactly one editable region. Use multiple patch objects to modify multiple payload regions.",
-        "replace_region patches require the fields: canonical_region_id, region_id, region_type, operation, replacement_format, replacement.",
-        (
-            "replace_byte_range patches require the fields: canonical_region_id, region_id, "
-            "region_type, operation, offset_from_region_start_bytes, length_bytes, replacement_format, replacement."
-        ),
-        (
-            "For replace_byte_range, offset_from_region_start_bytes is local to the editable region: use 0 "
-            "for the first byte of that region, not start_offset_bytes from the original payload. "
-            "offset_from_region_start_bytes + length_bytes must be less than or equal to the editable region length_bytes."
-        ),
-    ],
-}
-
-HEADER_ONLY_OUTPUT_INSTRUCTION = (
-    "This prompt has editable headers only. Return header edits only in header_edits. "
-    "Do not include patches in the output JSON."
-)
-PAYLOAD_ONLY_OUTPUT_INSTRUCTION = (
-    "This prompt has editable payload only. Return payload edits only in patches. "
-    "Do not include header_edits in the output JSON."
-)
-MIXED_OUTPUT_INSTRUCTION = (
-    "This prompt has editable payload and editable headers. Return payload edits only in patches, "
-    "and return header edits only in header_edits. Never duplicate header edits inside patches."
-)
-HEADER_INSTRUCTION_PREFIXES = ("Header edits",)
-PAYLOAD_INSTRUCTION_PREFIXES = (
-    "Payload edits",
-    "For every payload patch",
-    "Each payload patch object",
-    "replace_region patches",
-    "replace_byte_range patches",
-    "For replace_byte_range",
-)
-
-
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
@@ -173,51 +75,11 @@ def normalize_prompt_version(prompt_version: str) -> str:
 
 #This function loads the model-visible prompt JSON data structure from the experiment config.
 def load_prompt_input_json_data_structure(config: dict[str, Any]) -> dict[str, Any]:
-    llm_config = config.get("llm", {})
-    profile_name = str(
-        llm_config.get("prompt_input_json_data_profile", DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE)
-    ).strip()
-    if profile_name not in PROMPT_INPUT_JSON_DATA_PROFILES:
-        raise ValueError(
-            f"Unsupported llm.prompt_input_json_data_profile={profile_name!r}. "
-            f"Supported profiles: {sorted(PROMPT_INPUT_JSON_DATA_PROFILES)}"
-        )
-    return dict(PROMPT_INPUT_JSON_DATA_PROFILES[profile_name])
+    return prompt_projection.load_prompt_input_json_data_structure_from_config(config)
 
 #This function loads the named instructions profile that frames the model-visible JSON input.
 def load_prompt_instructions_profile(config: dict[str, Any]) -> tuple[str, list[str]]:
-    llm_config = config.get("llm", {})
-    profile_name = str(llm_config.get("prompt_instructions_profile", DEFAULT_PROMPT_INSTRUCTIONS_PROFILE)).strip()
-    if profile_name not in PROMPT_INSTRUCTIONS_PROFILES:
-        raise ValueError(
-            f"Unsupported llm.prompt_instructions_profile={profile_name!r}. "
-            f"Supported profiles: {sorted(PROMPT_INSTRUCTIONS_PROFILES)}"
-        )
-    lines = list(PROMPT_INSTRUCTIONS_PROFILES[profile_name])
-    return profile_name, lines
-
-
-#This function selects only the instruction lines that apply to the current prompt class.
-def select_prompt_instructions(
-    *,
-    instruction_lines: list[str],
-    has_editable_headers: bool,
-    has_editable_payload: bool,
-) -> list[str]:
-    selected_lines: list[str] = []
-    if has_editable_headers and has_editable_payload:
-        selected_lines.append(MIXED_OUTPUT_INSTRUCTION)
-    elif has_editable_headers:
-        selected_lines.append(HEADER_ONLY_OUTPUT_INSTRUCTION)
-    elif has_editable_payload:
-        selected_lines.append(PAYLOAD_ONLY_OUTPUT_INSTRUCTION)
-    for line in instruction_lines:
-        if line.startswith(HEADER_INSTRUCTION_PREFIXES) and not has_editable_headers:
-            continue
-        if line.startswith(PAYLOAD_INSTRUCTION_PREFIXES) and not has_editable_payload:
-            continue
-        selected_lines.append(line)
-    return selected_lines
+    return prompt_projection.load_prompt_instructions_profile_from_config(config)
 
 
 #This function validates the basic shape of the Step 15 compact modification-units manifest.
@@ -708,6 +570,7 @@ def build_compact_patch_messages(
         "prompt_input_json_data_profile_definition": prompt_input_structure,
         "prompt_instructions_profile": prompt_instructions_profile,
         "region_container_name": prompt_input_structure.get("region_container_name", "canonical_regions"),
+        "abstention_reason": prompt_parts.get("abstention_reason"),
     }
     return [{"role": "user", "content": prompt_parts["content"]}], prompt_template_metadata
 
@@ -842,6 +705,8 @@ def build_prompt_unit(
         required_top_level_keys.append("patches")
     if has_editable_headers:
         required_top_level_keys.append("header_edits")
+    abstention_reason = prompt_template_metadata.get("abstention_reason")
+    optional_top_level_keys = ["abstention"] if abstention_reason else []
 
     return {
         "schema_version": PROMPT_UNIT_SCHEMA_VERSION,
@@ -860,7 +725,8 @@ def build_prompt_unit(
             "schema_version": PATCH_OUTPUT_SCHEMA_VERSION if prompt_contract == "patch_output" else None,
             "root_type": "object",
             "required_top_level_keys": required_top_level_keys,
-            "optional_top_level_keys": [],
+            "optional_top_level_keys": optional_top_level_keys,
+            "recognized_abstention_reasons": [abstention_reason] if abstention_reason else [],
             "patches_type": "list",
             "header_edits_type": (
                 "list of [packet_id, field, replacement_uint] entries for compact header updates"
@@ -974,11 +840,11 @@ def build_prompt_units_manifest(
             "prompt_version": prompt_version,
             "prompt_input_json_data_profile": llm_config.get(
                 "prompt_input_json_data_profile",
-                DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE,
+                prompt_projection.DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE,
             ),
             "prompt_instructions_profile": llm_config.get(
                 "prompt_instructions_profile",
-                DEFAULT_PROMPT_INSTRUCTIONS_PROFILE,
+                prompt_projection.DEFAULT_PROMPT_INSTRUCTIONS_PROFILE,
             ),
             "source_compact_modification_units_manifest": str(source_manifest_path),
             "source_compact_modification_units_manifest_schema_version": source_metadata.get("schema_version"),
