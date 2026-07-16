@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import platform
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,11 +15,18 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.ids_context import validate_pre_snort_context_bundle
 from common.token_budget import load_token_budget_config
 from common.io_utils import write_json
 from common.paths import create_experiment_dirs
+from common.prompt_projection import (
+    load_prompt_input_json_data_structure_from_config,
+    load_prompt_instructions_profile_from_config,
+)
 
 SUPPORTED_GROUPING_POLICIES = {"fixed_packet_count", "flow_context_aware"}
+PRE_SNORT_CONTEXT_SOURCE_SUBDIR = Path("05_groups") / "pre_snort_context_source"
+CANONICAL_PRE_SNORT_CONTEXT_FILENAME = "pre_snort_context_bundle_v1.json"
 
 #This function constructs the root directory path for the experiment based on the provided configuration. 
 #It retrieves the experiment ID and output root from the configuration, expands any user home directory references in the output root path, 
@@ -41,6 +51,8 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     )
     require_keys(config["llm"], ["model_name", "model_path", "prompt_version"], "llm")
     load_token_budget_config(config)
+    load_prompt_input_json_data_structure_from_config(config)
+    load_prompt_instructions_profile_from_config(config)
     require_keys(
         config["pipeline"],
         [
@@ -77,6 +89,70 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         raise ValueError("pipeline.experiment_config_label_options must be a list of strings.")
     if experiment_config_label not in label_options:
         raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
+
+
+def ids_context_required(config: dict[str, Any]) -> bool:
+    prompt_input_profile = load_prompt_input_json_data_structure_from_config(config)
+    return prompt_input_profile.get("ids_context_field_name") == "ids_context"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_and_validate_pre_snort_context_bundle(bundle_path: Path) -> dict[str, Any]:
+    with bundle_path.open("r", encoding="utf-8") as input_file:
+        bundle = json.load(input_file)
+    validate_pre_snort_context_bundle(bundle)
+    return bundle
+
+
+def prepare_pre_snort_context_source(
+    *,
+    config: dict[str, Any],
+    experiment_root: Path,
+    pre_snort_context_bundle: str | Path | None,
+) -> dict[str, Any] | None:
+    requires_ids_context = ids_context_required(config)
+    if not requires_ids_context:
+        if pre_snort_context_bundle is not None:
+            raise ValueError(
+                "--pre-snort-context-bundle is only valid when the selected prompt input profile "
+                "exposes ids_context."
+            )
+        return None
+
+    if pre_snort_context_bundle is None:
+        raise ValueError(
+            "--pre-snort-context-bundle is required because the selected prompt input profile exposes ids_context."
+        )
+
+    source_path = Path(pre_snort_context_bundle).expanduser().resolve()
+    if not source_path.exists():
+        raise FileNotFoundError(f"PRE Snort context bundle does not exist: {source_path}")
+    if not source_path.is_file():
+        raise ValueError(f"PRE Snort context bundle must be a regular file: {source_path}")
+
+    bundle = load_and_validate_pre_snort_context_bundle(source_path)
+    canonical_dir = experiment_root / PRE_SNORT_CONTEXT_SOURCE_SUBDIR
+    canonical_dir.mkdir(parents=True, exist_ok=True)
+    canonical_path = canonical_dir / CANONICAL_PRE_SNORT_CONTEXT_FILENAME
+    shutil.copyfile(source_path, canonical_path)
+
+    source_hash = sha256_file(source_path)
+    canonical_hash = sha256_file(canonical_path)
+    return {
+        "original_bundle_path": str(source_path),
+        "canonical_bundle_path": str(canonical_path),
+        "bundle_schema_version": bundle["schema_version"],
+        "source_sha256": source_hash,
+        "canonical_sha256": canonical_hash,
+        "mapping_policy": bundle["metadata"]["mapping_policy"],
+    }
 
 
 #If the previous functions are responsible for validating keys in the configuration, 
@@ -121,12 +197,21 @@ def collect_input_checks(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 #This function orchestrates the experiment setup process. 
 #It takes the path to the configuration file and a boolean flag indicating whether to check the existence of input paths.
-def run_setup(config_path: str | Path, check_inputs: bool) -> dict[str, Any]:
+def run_setup(
+    config_path: str | Path,
+    check_inputs: bool,
+    pre_snort_context_bundle: str | Path | None = None,
+) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config_shape(config)
 
     experiment_root = build_experiment_root(config)
     created_dirs = create_experiment_dirs(experiment_root)
+    ids_context_source = prepare_pre_snort_context_source(
+        config=config,
+        experiment_root=experiment_root,
+        pre_snort_context_bundle=pre_snort_context_bundle,
+    )
 
     metadata = {
         "experiment_id": config["experiment"]["experiment_id"],
@@ -138,6 +223,8 @@ def run_setup(config_path: str | Path, check_inputs: bool) -> dict[str, Any]:
         "created_directories": [str(path) for path in created_dirs],
         "input_checks": collect_input_checks(config) if check_inputs else [],
     }
+    if ids_context_source is not None:
+        metadata["ids_context_source"] = ids_context_source
 
     config_copy = dict(config)
     config_copy.pop("_config_path", "The config path was not found in the config dictionary, which is unexpected since it should have been added by load_json_config.")
@@ -155,12 +242,16 @@ def parse_cli_args() -> argparse.Namespace:
         action="store_true", #This means that if the --check-inputs flag is provided when running the script, the check_inputs variable will be set to True. If the flag is not provided, check_inputs will be False.
         help="Record whether configured dataset, Snort, and model paths exist.",
     )
+    parser.add_argument(
+        "--pre-snort-context-bundle",
+        help="Path to a pre_snort_context_bundle_v1 JSON file required by IDS-aware prompt profiles.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_cli_args()
-    metadata = run_setup(args.config, args.check_inputs)
+    metadata = run_setup(args.config, args.check_inputs, args.pre_snort_context_bundle)
     print(f"Experiment initialised. Root folder at: {metadata['experiment_root']}")
     print(f"Metadata written for experiment: {metadata['experiment_id']}")
 

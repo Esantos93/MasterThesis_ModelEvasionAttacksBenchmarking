@@ -91,6 +91,20 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
     ],
 }
 
+PROMPT_INSTRUCTIONS_PROFILES["prompt_engineering_instructions_profile_v1"] = (
+    PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"]
+    + [
+        (
+            "Use ids_context as non-editable IDS evidence. It can explain why Snort detected "
+            "the PRE traffic, but it is not an editable region and must never be copied into patches."
+        ),
+        (
+            "Do not expose, invent, or modify detector provenance such as CVEs, MITRE ATT&CK ids, "
+            "source URLs, Snort metadata, or artifact hashes."
+        ),
+    ]
+)
+
 HEADER_ONLY_OUTPUT_INSTRUCTION = (
     "This prompt has editable headers only. Return header edits only in header_edits. "
     "Do not include patches in the output JSON."
