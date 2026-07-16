@@ -1,0 +1,28 @@
+{
+  "records": [
+    {
+      "detector_source": "ruleset_so",
+      "gid": 3,
+      "rev": 6,
+      "so_rule_stub": "alert ip ( msg:\"INDICATOR-SHELLCODE Shikata Ga Nai x86 polymorphic shellcode decoder detected\"; soid:17775; metadata:policy max-detect-ips drop, policy security-ips drop; service:dcerpc, ftp, imap, netbios-ssn, pop3; classtype:shellcode-detect; gid:3; sid:17775; rev:6; )",
+      "security_context": {
+        "cve_ids": [],
+        "mitre_attack_ids": [],
+        "source_urls": [
+          "https://www.snort.org/rule_docs/3-17775"
+        ],
+        "summary": "The detector targets Shikata Ga Nai polymorphic x86 shellcode decoder behavior."
+      },
+      "sid": 17775
+    },
+    {
+      "detector_source": "builtin_decoder_or_inspector",
+      "gid": 119,
+      "inspector": "http_inspect",
+      "rev": 1,
+      "semantic_description": "Snort observed an HTTP server response before it could associate a preceding client request in the inspected conversation.",
+      "sid": 228
+    }
+  ],
+  "schema_version": "ids_detector_catalog_v1"
+}
