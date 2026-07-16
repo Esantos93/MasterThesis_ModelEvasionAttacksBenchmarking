@@ -11,10 +11,12 @@ from common.prompt_projection import (
     load_prompt_input_json_data_structure_from_config,
     load_prompt_instructions_profile_from_config,
 )
+from common.ids_context import IDS_CONTEXT_SCHEMA_VERSION
 from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
 from step_15_grouping.check_step15_output import check_header_only_units
 from step_15_grouping.group_packets import run_grouping
+from step_15_grouping.ids_context_mapping import load_ids_context_mapping
 
 
 # This helper creates the minimum packet record needed by the real Step 14 TCP canonicalizer.
@@ -160,6 +162,95 @@ def config(
         },
         "pipeline": pipeline,
     }
+
+
+def enable_ids_context(active_config: dict) -> dict:
+    active_config["llm"]["prompt_input_json_data_profile"] = "prompt_engineering_input_profile_v1"
+    return active_config
+
+
+def detector_definitions() -> list[dict]:
+    return [
+        {
+            "detector_source": "ruleset_text",
+            "gid": 1,
+            "sid": 1001,
+            "rev": 2,
+            "message": "Text detector",
+            "rule_declaration": "alert tcp any any -> any any (msg:\"Text detector\"; sid:1001; rev:2;)",
+            "security_context": {
+                "cve_ids": ["CVE-2000-0001"],
+                "mitre_attack_ids": ["T0001"],
+                "source_urls": ["https://example.invalid/text"],
+            },
+        },
+        {
+            "detector_source": "ruleset_so",
+            "gid": 3,
+            "sid": 17775,
+            "rev": 6,
+            "message": "SO detector",
+            "so_rule_stub": "alert ip any any -> any any (msg:\"SO detector\"; sid:17775; rev:6;)",
+            "security_context": {
+                "summary": "Detects behavior implemented by a shared-object rule.",
+                "cve_ids": ["CVE-2000-0002"],
+                "mitre_attack_ids": ["T0002"],
+                "source_urls": ["https://example.invalid/so"],
+            },
+        },
+        {
+            "detector_source": "builtin_decoder_or_inspector",
+            "gid": 119,
+            "sid": 228,
+            "rev": 1,
+            "message": "Built-in detector",
+            "inspector": "http_inspect",
+            "semantic_description": "Observed an invalid state transition in the HTTP inspector.",
+        },
+    ]
+
+
+def pre_bundle(alerts: list[dict], definitions: list[dict] | None = None) -> dict:
+    return {
+        "schema_version": "pre_snort_context_bundle_v1",
+        "metadata": {
+            "snort_version": "3.11.1.0",
+            "detector_policy": "security-ips",
+            "snaplen": 65535,
+            "builtin_rules_enabled": True,
+            "ruleset_identifier": "test-ruleset",
+            "source_artifacts": ["alerts.json"],
+            "source_hashes": {"alerts.json": "abc123"},
+            "mapping_policy": "tcp_connection_propagation_v1",
+        },
+        "detector_definitions": definitions if definitions is not None else detector_definitions(),
+        "alerts": alerts,
+    }
+
+
+def pre_alert(alert_id: str, packet_ids: list[str], *, gid: int = 1, sid: int = 1001, rev: int = 2) -> dict:
+    return {
+        "alert_id": alert_id,
+        "gid": gid,
+        "sid": sid,
+        "rev": rev,
+        "message": "PRE alert",
+        "anchor_packet_ids": packet_ids,
+        "event_data": {"hidden": "not model visible"},
+    }
+
+
+def write_pre_bundle(root: Path, active_config: dict, bundle: dict | str) -> Path:
+    bundle_path = (
+        root
+        / active_config["experiment"]["experiment_id"]
+        / "05_groups"
+        / "pre_snort_context_source"
+        / "pre_snort_context_bundle_v1.json"
+    )
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(bundle if isinstance(bundle, str) else json.dumps(bundle), encoding="utf-8")
+    return bundle_path
 
 
 class CanonicalStep15Tests(unittest.TestCase):
@@ -466,6 +557,205 @@ class CanonicalStep15Tests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "tcp_connection_id is missing"):
                 self.run_step15(source, active_config, root)
+
+    def test_baseline_ignores_malformed_pre_bundle_and_preserves_units_and_token_plans(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"payload"), tcp_record(2, 1010, b"payload")])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(root, "fixed_packet_count", group_size=2)
+            first_manifest, first_units = self.run_step15(source, active_config, root)
+            write_pre_bundle(root, active_config, "{ definitely malformed JSON")
+            second_manifest, second_units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(first_units, second_units)
+        self.assertEqual(
+            first_manifest["metadata"]["token_budget_config"],
+            second_manifest["metadata"]["token_budget_config"],
+        )
+        self.assertNotIn("ids_context", second_units[0])
+        self.assertFalse(any(key.startswith("ids_context_") for key in second_manifest["metadata"]))
+
+    def test_ids_aware_run_requires_and_validates_canonical_pre_bundle_before_writing(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"payload")])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = enable_ids_context(config(root, "fixed_packet_count", group_size=1))
+            with self.assertRaisesRegex(FileNotFoundError, "canonical PRE Snort bundle is missing"):
+                self.run_step15(source, active_config, root)
+            self.assertFalse((root / "05_groups" / "fixed_packet_count_size_001").exists())
+
+            invalid_bundle = pre_bundle([])
+            invalid_bundle["schema_version"] = "invalid_bundle"
+            write_pre_bundle(root, active_config, invalid_bundle)
+            with self.assertRaisesRegex(ValueError, "pre_snort_context_bundle_v1"):
+                self.run_step15(source, active_config, root)
+
+    def test_ids_context_materializes_all_detector_sources_without_hidden_provenance(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"payload")])
+        alerts = [
+            pre_alert("alert-text", ["packet_000001"]),
+            pre_alert("alert-so", ["packet_000001"], gid=3, sid=17775, rev=6),
+            pre_alert("alert-builtin", ["packet_000001"], gid=119, sid=228, rev=1),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = enable_ids_context(config(root, "fixed_packet_count", group_size=1))
+            write_pre_bundle(root, active_config, pre_bundle(alerts))
+            manifest, units = self.run_step15(source, active_config, root)
+            checker_summary = check_header_only_units(
+                manifest,
+                root / "05_groups" / "fixed_packet_count_size_001" / "compact_modification_units_manifest_v2.json",
+            )
+
+        context = units[0]["ids_context"]
+        self.assertEqual(IDS_CONTEXT_SCHEMA_VERSION, context["schema_version"])
+        self.assertEqual(3, len(context["records"]))
+        by_source = {record["detector_source"]: record for record in context["records"]}
+        self.assertIn("rule_declaration", by_source["ruleset_text"])
+        self.assertIn("so_rule_stub", by_source["ruleset_so"])
+        self.assertEqual(
+            {"summary": "Detects behavior implemented by a shared-object rule."},
+            by_source["ruleset_so"]["security_context"],
+        )
+        self.assertIn("inspector", by_source["builtin_decoder_or_inspector"])
+        self.assertIn("semantic_description", by_source["builtin_decoder_or_inspector"])
+        serialized = json.dumps(context)
+        for hidden_term in ["CVE-", "T000", "https://", "event_data", "source_hashes"]:
+            self.assertNotIn(hidden_term, serialized)
+        self.assertEqual(3, checker_summary["ids_context_total_materialized_records"])
+        self.assertTrue(manifest["metadata"]["ids_context_enabled"])
+
+    def test_conservative_propagation_deduplicates_alerts_and_uses_unit_packet_ids(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"a"), tcp_record(2, 1010, b"b")])
+        alerts = [
+            pre_alert("alert-1", ["packet_000002"]),
+            pre_alert("alert-2", ["packet_000001", "packet_000002"]),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = enable_ids_context(config(root, "fixed_packet_count", group_size=1))
+            write_pre_bundle(root, active_config, pre_bundle(alerts))
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(2, len(units))
+        for unit in units:
+            records = unit["ids_context"]["records"]
+            self.assertEqual(1, len(records))
+            self.assertEqual(["packet_000001", "packet_000002"], records[0]["anchor_packet_ids"])
+            self.assertEqual(
+                [unit["physical_packets"][0]["packet_id"]],
+                records[0]["tcp_connection_packet_ids_in_prompt"],
+            )
+        self.assertEqual(2, manifest["metadata"]["ids_context_total_materialized_detector_record_count"])
+
+    def test_fixed_size_multi_connection_and_empty_context_are_connection_specific(self) -> None:
+        first = tcp_record(1, 1000, b"a")
+        second = tcp_record(2, 2000, b"b")
+        second["src_port"] = 23456
+        second["tcp_header"]["source_port"] = 23456
+        third = tcp_record(3, 3000, b"c")
+        third["src_port"] = 34567
+        third["tcp_header"]["source_port"] = 34567
+        source = packet_json_v4([first, second, third])
+        alerts = [
+            pre_alert("alert-first", ["packet_000001"]),
+            pre_alert("alert-second", ["packet_000002"], gid=3, sid=17775, rev=6),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = enable_ids_context(config(root, "fixed_packet_count", group_size=2))
+            write_pre_bundle(root, active_config, pre_bundle(alerts))
+            _, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(2, len(units[0]["ids_context"]["records"]))
+        for record in units[0]["ids_context"]["records"]:
+            self.assertEqual(1, len(record["tcp_connection_packet_ids_in_prompt"]))
+            packet_id = record["tcp_connection_packet_ids_in_prompt"][0]
+            packet = next(packet for packet in units[0]["physical_packets"] if packet["packet_id"] == packet_id)
+            self.assertEqual(packet["tcp_connection_id"], record["tcp_connection_id"])
+        self.assertEqual([], units[1]["ids_context"]["records"])
+
+    def test_flow_fragments_repeat_ids_context_and_include_it_in_token_planning(self) -> None:
+        records = [tcp_record(number, 1000 + number * 10, b"payload") for number in range(1, 21)]
+        source = packet_json_v4(records)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            baseline_config = config(root, "flow_context_aware")
+            baseline_config["llm"]["prompt_target_context"] = 1800
+            _, baseline_units = self.run_step15(source, baseline_config, root)
+
+            ids_config = enable_ids_context(config(root, "flow_context_aware"))
+            ids_config["llm"]["prompt_target_context"] = 1800
+            definitions = detector_definitions()
+            definitions[0]["rule_declaration"] += " content:\"context\";" * 30
+            write_pre_bundle(root, ids_config, pre_bundle([pre_alert("alert", ["packet_000001"])], definitions))
+            _, ids_units = self.run_step15(source, ids_config, root)
+
+        self.assertGreater(len(ids_units), len(baseline_units))
+        self.assertTrue(all(len(unit["ids_context"]["records"]) == 1 for unit in ids_units))
+        self.assertTrue(all(unit["token_plan"]["overflow_tokens"] == 0 for unit in ids_units))
+        for unit in ids_units:
+            self.assertEqual(
+                [packet["packet_id"] for packet in unit["physical_packets"]],
+                unit["ids_context"]["records"][0]["tcp_connection_packet_ids_in_prompt"],
+            )
+
+    def test_ids_aware_fixed_size_overflow_fails_without_dropping_packets_or_context(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"payload")])
+        definitions = detector_definitions()
+        definitions[0]["rule_declaration"] += "A" * 20000
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = enable_ids_context(config(root, "fixed_packet_count", group_size=1))
+            write_pre_bundle(root, active_config, pre_bundle([pre_alert("alert", ["packet_000001"])], definitions))
+            with self.assertRaisesRegex(ValueError, "will not remove packets or detector evidence"):
+                self.run_step15(source, active_config, root)
+
+    def test_ids_context_mapping_rejects_bad_anchors_and_splits_multi_connection_alerts(self) -> None:
+        first = tcp_record(1, 1000, b"a")
+        second = tcp_record(2, 2000, b"b")
+        second["src_port"] = 23456
+        second["tcp_header"]["source_port"] = 23456
+        source = packet_json_v4([first, second])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle_path = root / "bundle.json"
+
+            bundle_path.write_text(
+                json.dumps(pre_bundle([pre_alert("unknown", ["packet_999999"])])), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "unknown anchor packet"):
+                load_ids_context_mapping(source_bundle_path=bundle_path, traffic=source["traffic"])
+
+            traffic_without_connection = [dict(source["traffic"][0])]
+            traffic_without_connection[0]["tcp_connection_id"] = None
+            bundle_path.write_text(
+                json.dumps(pre_bundle([pre_alert("missing-connection", ["packet_000001"])])), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "lacks tcp_connection_id"):
+                load_ids_context_mapping(source_bundle_path=bundle_path, traffic=traffic_without_connection)
+
+            missing_definition_bundle = pre_bundle([pre_alert("missing-definition", ["packet_000001"])], [])
+            bundle_path.write_text(json.dumps(missing_definition_bundle), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing detector definition"):
+                load_ids_context_mapping(source_bundle_path=bundle_path, traffic=source["traffic"])
+
+            inconsistent_traffic = [dict(source["traffic"][0]), dict(source["traffic"][1])]
+            inconsistent_traffic[1]["packet_id"] = inconsistent_traffic[0]["packet_id"]
+            bundle_path.write_text(
+                json.dumps(pre_bundle([pre_alert("duplicate-attribution", ["packet_000001"])])),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate packet_id"):
+                load_ids_context_mapping(source_bundle_path=bundle_path, traffic=inconsistent_traffic)
+
+            bundle_path.write_text(
+                json.dumps(pre_bundle([pre_alert("multi", ["packet_000001", "packet_000002"])])),
+                encoding="utf-8",
+            )
+            mapping = load_ids_context_mapping(source_bundle_path=bundle_path, traffic=source["traffic"])
+            self.assertEqual(2, mapping.tcp_connections_with_ids_context)
+            self.assertTrue(all(len(records) == 1 for records in mapping.records_by_connection.values()))
 
 
 if __name__ == "__main__":

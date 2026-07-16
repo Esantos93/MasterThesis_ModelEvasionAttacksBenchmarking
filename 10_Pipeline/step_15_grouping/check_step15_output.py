@@ -8,11 +8,34 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+from common.ids_context import IDS_CONTEXT_MAPPING_POLICY, IDS_CONTEXT_SCHEMA_VERSION, validate_ids_context
+from step_15_grouping.ids_context_mapping import load_ids_context_mapping
+
 
 HEADER_ONLY_STRATEGY = "header_only_strategy_v1"
 HEADER_ONLY_MANIFEST_SCHEMA = "compact_modification_units_manifest_v2"
 HEADER_ONLY_UNIT_SCHEMA = "compact_modification_unit_v2"
 PACKET_JSON_SCHEMA = "packet_json_v4"
+PROMPT_ENGINEERING_INPUT_PROFILE = "prompt_engineering_input_profile_v1"
+BASELINE_INPUT_PROFILE = "baseline_input_profile_v1"
+IDS_MANIFEST_FIELDS = {
+    "ids_context_enabled",
+    "ids_context_schema_version",
+    "ids_context_source_bundle",
+    "ids_context_source_bundle_schema_version",
+    "ids_context_mapping_policy",
+    "ids_context_detector_definition_count",
+    "ids_context_pre_alert_count",
+    "ids_context_tcp_connection_count",
+    "ids_context_detector_definition_counts_by_source",
+    "ids_context_compact_units_with_records",
+    "ids_context_compact_units_without_records",
+    "ids_context_total_materialized_detector_record_count",
+}
 
 
 #Read a JSON artifact from disk.
@@ -135,6 +158,33 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     if not expected_header_fields:
         raise ValueError("Header-only manifest must record expected_editable_header_fields.")
 
+    input_profile = metadata.get("token_budget_config", {}).get("prompt_input_profile")
+    ids_aware = input_profile == PROMPT_ENGINEERING_INPUT_PROFILE
+    if input_profile not in {BASELINE_INPUT_PROFILE, PROMPT_ENGINEERING_INPUT_PROFILE}:
+        raise ValueError(f"Unsupported or missing prompt input profile in manifest: {input_profile!r}.")
+    ids_mapping = None
+    if ids_aware:
+        missing_metadata = sorted(IDS_MANIFEST_FIELDS - set(metadata))
+        if missing_metadata:
+            raise ValueError(f"IDS-aware manifest lacks metadata fields: {missing_metadata}")
+        if metadata.get("ids_context_enabled") is not True:
+            raise ValueError("IDS-aware manifest must set ids_context_enabled=true.")
+        if metadata.get("ids_context_schema_version") != IDS_CONTEXT_SCHEMA_VERSION:
+            raise ValueError("IDS-aware manifest records the wrong ids_context schema.")
+        if metadata.get("ids_context_mapping_policy") != IDS_CONTEXT_MAPPING_POLICY:
+            raise ValueError("IDS-aware manifest records the wrong mapping policy.")
+        source_packet_json = read_json(resolve_existing_path(metadata.get("source_packet_json"), manifest_path.parent))
+        ids_mapping = load_ids_context_mapping(
+            source_bundle_path=resolve_existing_path(
+                metadata.get("ids_context_source_bundle"), manifest_path.parent
+            ),
+            traffic=source_packet_json["traffic"],
+        )
+    else:
+        unexpected_metadata = sorted(IDS_MANIFEST_FIELDS.intersection(metadata))
+        if unexpected_metadata:
+            raise ValueError(f"Baseline manifest contains IDS-context metadata: {unexpected_metadata}")
+
     coverage = metadata.get("physical_parent_group_coverage", {})
     if coverage.get("duplicate_physical_packet_count") != 0 or coverage.get("missing_physical_packet_count") != 0:
         raise ValueError(f"Physical parent-group coverage failed: {coverage}")
@@ -147,6 +197,9 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     flow_fragments_by_parent: dict[str, list[tuple[dict[str, Any], dict[str, Any], int]]] = {}
     token_plan_policy_counts: Counter[str] = Counter()
     token_plan_overflow_count = 0
+    ids_context_units_with_records = 0
+    ids_context_units_without_records = 0
+    ids_context_total_records = 0
 
     for entry in manifest["compact_modification_units"]:
         unit_path = resolve_existing_path(entry.get("modification_unit_file"), manifest_path.parent)
@@ -169,6 +222,25 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         present_retired_fields = sorted(retired_v1_fields.intersection(unit))
         if present_retired_fields:
             raise ValueError(f"V2 unit {unit_path} contains retired V1 fields: {present_retired_fields}")
+        if ids_aware:
+            if "ids_context" not in unit:
+                raise ValueError(f"IDS-aware unit {unit_path} lacks ids_context.")
+            validate_ids_context(unit["ids_context"])
+            expected_context = ids_mapping.materialize(unit.get("physical_packets", []))
+            if unit["ids_context"] != expected_context:
+                raise ValueError(
+                    f"IDS context in {unit_path} does not match conservative TCP-connection propagation."
+                )
+            record_count = len(unit["ids_context"]["records"])
+            ids_context_total_records += record_count
+            if record_count:
+                ids_context_units_with_records += 1
+            else:
+                ids_context_units_without_records += 1
+            if int(entry.get("ids_context_record_count") or 0) != record_count:
+                raise ValueError(f"IDS-context summary count mismatch for {unit_path}.")
+        elif "ids_context" in unit or "ids_context_record_count" in entry:
+            raise ValueError(f"Baseline unit or summary unexpectedly exposes IDS context: {unit_path}")
         token_plan = unit.get("token_plan")
         if not isinstance(token_plan, dict):
             raise ValueError(f"Header-only unit {unit_path} lacks token_plan.")
@@ -246,6 +318,19 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     if token_plan_overflow_count:
         raise ValueError(f"Header-only output contains {token_plan_overflow_count} over-budget compact units.")
 
+    if ids_aware:
+        expected_counts = {
+            "ids_context_compact_units_with_records": ids_context_units_with_records,
+            "ids_context_compact_units_without_records": ids_context_units_without_records,
+            "ids_context_total_materialized_detector_record_count": ids_context_total_records,
+        }
+        for field, expected_value in expected_counts.items():
+            if int(metadata.get(field) or 0) != expected_value:
+                raise ValueError(
+                    f"IDS-context manifest summary {field!r} is inconsistent: "
+                    f"expected {expected_value}, found {metadata.get(field)!r}."
+                )
+
     if metadata.get("grouping_policy") == "flow_context_aware":
         if len(flow_fragments_by_parent) != int(metadata.get("parent_group_count") or -1):
             raise ValueError("Flow-context-aware parent group count does not match unit contexts.")
@@ -276,6 +361,15 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         "flow_context_fragment_count": sum(len(fragments) for fragments in flow_fragments_by_parent.values()),
         "token_plan_policy_counts": dict(sorted(token_plan_policy_counts.items())),
         "token_plan_overflow_count": token_plan_overflow_count,
+        **(
+            {
+                "ids_context_units_with_records": ids_context_units_with_records,
+                "ids_context_units_without_records": ids_context_units_without_records,
+                "ids_context_total_materialized_records": ids_context_total_records,
+            }
+            if ids_aware
+            else {}
+        ),
     }
 
 

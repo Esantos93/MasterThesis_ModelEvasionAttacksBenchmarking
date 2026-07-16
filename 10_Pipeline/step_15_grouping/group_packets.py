@@ -34,6 +34,7 @@ from common.token_budget import (
     build_compact_patch_token_plan,
     load_token_budget_config,
 )
+from step_15_grouping.ids_context_mapping import IdsContextMapping, load_ids_context_mapping
 
 
 #These are the only Step 15 artifact schema names produced by the active code.
@@ -106,6 +107,12 @@ def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     return {
         "input_json": experiment_root / "04_packet_json" / "selected_packet_records.json",
         "output_dir": experiment_root / "05_groups",
+        "pre_snort_context_bundle": (
+            experiment_root
+            / "05_groups"
+            / "pre_snort_context_source"
+            / "pre_snort_context_bundle_v1.json"
+        ),
     }
 
 
@@ -459,6 +466,10 @@ def get_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
 def token_plan_fits(prompt_unit: dict[str, Any]) -> bool:
     token_plan = prompt_unit.get("token_plan")
     return isinstance(token_plan, dict) and bool(token_plan.get("fits_prompt_target_context"))
+
+
+def ids_context_enabled(token_config: dict[str, Any]) -> bool:
+    return token_config["prompt_input_structure"].get("ids_context_field_name") == "ids_context"
 
 
 #This function implements the baseline parent grouping policy over physical packets.
@@ -1116,6 +1127,7 @@ def build_header_only_unit(
     unit_type: str,
     physical_packets: list[dict[str, Any]],
     token_config: dict[str, Any],
+    ids_context_mapping: IdsContextMapping | None = None,
     fragment_flow_context: dict[str, Any] | None = None,
     fragment_compact_unit_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1146,6 +1158,8 @@ def build_header_only_unit(
         unit["fragment_flow_context"] = fragment_flow_context
     if fragment_compact_unit_context is not None:
         unit["fragment_compact_unit_context"] = fragment_compact_unit_context
+    if ids_context_mapping is not None:
+        unit["ids_context"] = ids_context_mapping.materialize(physical_packets)
     finalize_header_only_unit(unit, token_config)
     return unit
 
@@ -1164,6 +1178,7 @@ def build_header_only_prompt_units_for_group(
     header_field_definitions: dict[str, Any],
     header_policy: dict[str, Any],
     token_config: dict[str, Any],
+    ids_context_mapping: IdsContextMapping | None = None,
 ) -> list[dict[str, Any]]:
     group_metadata = build_group_metadata(
         parent_group_id,
@@ -1192,6 +1207,7 @@ def build_header_only_prompt_units_for_group(
                 unit_type="header_only_physical_packet_group",
                 physical_packets=compact_physical_packets,
                 token_config=token_config,
+                ids_context_mapping=ids_context_mapping,
             )
         ]
 
@@ -1239,6 +1255,7 @@ def build_header_only_prompt_units_for_group(
             ),
             physical_packets=fragment_packets,
             token_config=token_config,
+            ids_context_mapping=ids_context_mapping,
             fragment_flow_context=fragment_flow_context,
             fragment_compact_unit_context=fragment_compact_unit_context,
         )
@@ -1304,6 +1321,8 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "fragment_compact_unit_context": prompt_unit.get("fragment_compact_unit_context"),
         "modification_unit_file_size_bytes_pretty": prompt_unit_path.stat().st_size,
     }
+    if "ids_context" in prompt_unit:
+        summary["ids_context_record_count"] = len(prompt_unit["ids_context"]["records"])
     return summary
 
 
@@ -1411,9 +1430,9 @@ def build_manifest(
     prompt_unit_summaries: list[dict[str, Any]],
     header_classification_artifacts: dict[str, Any],
     physical_parent_group_coverage: dict[str, Any],
+    ids_context_mapping: IdsContextMapping | None = None,
 ) -> dict[str, Any]:
-    return {
-        "metadata": {
+    metadata = {
             "schema_version": HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "experiment_id": config["experiment"]["experiment_id"],
@@ -1466,7 +1485,24 @@ def build_manifest(
             "over_budget_summary": build_over_budget_summary(prompt_unit_summaries),
             "physical_parent_group_coverage": physical_parent_group_coverage,
             "immutable_fields": packet_json.get("immutable_fields", []),
-        },
+    }
+    if ids_context_mapping is not None:
+        nonempty_unit_count = sum(
+            1 for summary in prompt_unit_summaries if int(summary.get("ids_context_record_count") or 0) > 0
+        )
+        total_materialized_records = sum(
+            int(summary.get("ids_context_record_count") or 0) for summary in prompt_unit_summaries
+        )
+        metadata.update(ids_context_mapping.manifest_metadata())
+        metadata.update(
+            {
+                "ids_context_compact_units_with_records": nonempty_unit_count,
+                "ids_context_compact_units_without_records": len(prompt_unit_summaries) - nonempty_unit_count,
+                "ids_context_total_materialized_detector_record_count": total_materialized_records,
+            }
+        )
+    return {
+        "metadata": metadata,
         "compact_modification_units": prompt_unit_summaries,
     }
 
@@ -1511,6 +1547,12 @@ def run_grouping(
     packet_json = validate_packet_json(read_json(input_json_path), input_json_path)
     traffic = packet_json["traffic"]
     ordered_traffic = sorted(traffic, key=lambda packet: int(packet["reduced_packet_index"]))
+    ids_mapping = None
+    if ids_context_enabled(token_config):
+        ids_mapping = load_ids_context_mapping(
+            source_bundle_path=paths["pre_snort_context_bundle"],
+            traffic=ordered_traffic,
+        )
     parent_groups = group_records_by_policy(
         records=ordered_traffic,
         grouping_policy=grouping_policy,
@@ -1579,8 +1621,16 @@ def run_grouping(
             header_field_definitions=packet_json["header_field_definitions"],
             header_policy=header_policy,
             token_config=token_config,
+            ids_context_mapping=ids_mapping,
         )
         for prompt_unit in prompt_units:
+            if ids_mapping is not None and grouping_policy == "fixed_packet_count" and not token_plan_fits(prompt_unit):
+                raise ValueError(
+                    "IDS-aware fixed_packet_count Compact Unit exceeds prompt_target_context; "
+                    "Step 15 will not remove packets or detector evidence. "
+                    f"unit={prompt_unit['modification_unit_id']!r}, "
+                    f"overflow_tokens={prompt_unit['token_plan']['overflow_tokens']}"
+                )
             validate_header_only_prompt_unit(prompt_unit)
             prompt_unit_path = output_group_dir / f"{prompt_unit['modification_unit_id']}.json"
             write_json(prompt_unit_path, prompt_unit)
@@ -1604,6 +1654,7 @@ def run_grouping(
         prompt_unit_summaries=prompt_unit_summaries,
         header_classification_artifacts=header_classification_artifacts,
         physical_parent_group_coverage=physical_parent_group_coverage,
+        ids_context_mapping=ids_mapping,
     )
     manifest_path = output_group_dir / "compact_modification_units_manifest_v2.json"
     write_json(manifest_path, manifest)
