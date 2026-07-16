@@ -22,6 +22,7 @@ from common.paths import create_experiment_dirs
 from common.prompt_projection import (
     load_prompt_input_json_data_structure_from_config,
     load_prompt_instructions_profile_from_config,
+    prompt_engineering_profiles_selected,
 )
 
 SUPPORTED_GROUPING_POLICIES = {"fixed_packet_count", "flow_context_aware"}
@@ -91,11 +92,6 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
 
 
-def ids_context_required(config: dict[str, Any]) -> bool:
-    prompt_input_profile = load_prompt_input_json_data_structure_from_config(config)
-    return prompt_input_profile.get("ids_context_field_name") == "ids_context"
-
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as input_file:
@@ -117,18 +113,19 @@ def prepare_pre_snort_context_source(
     experiment_root: Path,
     pre_snort_context_bundle: str | Path | None,
 ) -> dict[str, Any] | None:
-    requires_ids_context = ids_context_required(config)
-    if not requires_ids_context:
+    requires_prompt_engineering_context = prompt_engineering_profiles_selected(config)
+    if not requires_prompt_engineering_context:
         if pre_snort_context_bundle is not None:
             raise ValueError(
-                "--pre-snort-context-bundle is only valid when the selected prompt input profile "
-                "exposes ids_context."
+                "--pre-snort-context-bundle is only valid when the selected prompt input or instructions "
+                "profile is a prompt-engineering profile."
             )
         return None
 
     if pre_snort_context_bundle is None:
         raise ValueError(
-            "--pre-snort-context-bundle is required because the selected prompt input profile exposes ids_context."
+            "--pre-snort-context-bundle is required because the selected prompt input or instructions "
+            "profile is a prompt-engineering profile."
         )
 
     source_path = Path(pre_snort_context_bundle).expanduser().resolve()

@@ -14,7 +14,7 @@ from common.test_ids_context import pre_bundle
 from step_11_experiment_setup.setup_experiment import parse_cli_args, run_setup
 
 
-def base_config(output_root: Path, *, ids_aware: bool = False) -> dict:
+def base_config(output_root: Path, *, ids_aware: bool = False, instructions_only: bool = False) -> dict:
     return {
         "experiment": {
             "experiment_id": "step11_test_experiment",
@@ -44,7 +44,7 @@ def base_config(output_root: Path, *, ids_aware: bool = False) -> dict:
             ),
             "prompt_instructions_profile": (
                 "prompt_engineering_instructions_profile_v1"
-                if ids_aware
+                if ids_aware or instructions_only
                 else "baseline_instructions_profile_v1"
             ),
             "prompt_target_context": 4096,
@@ -106,6 +106,26 @@ class Step11ExperimentSetupTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "pre-snort-context-bundle is required"):
                 run_setup(config_path, False)
+
+    def test_prompt_engineering_instructions_only_also_require_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config_path = write_json(root / "config.json", base_config(root, instructions_only=True))
+
+            with self.assertRaisesRegex(ValueError, "pre-snort-context-bundle is required"):
+                run_setup(config_path, False)
+
+            bundle_path = write_json(root / "pre_bundle.json", pre_bundle())
+            metadata = run_setup(config_path, False, bundle_path)
+            canonical_path = (
+                root
+                / "step11_test_experiment"
+                / "05_groups"
+                / "pre_snort_context_source"
+                / "pre_snort_context_bundle_v1.json"
+            )
+            self.assertTrue(canonical_path.is_file())
+            self.assertIn("ids_context_source", metadata)
 
     def test_prompt_engineering_config_rejects_missing_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
