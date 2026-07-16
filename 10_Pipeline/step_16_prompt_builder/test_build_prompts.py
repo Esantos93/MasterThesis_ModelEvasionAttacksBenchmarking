@@ -235,6 +235,10 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
         self.assertIn(prompt_projection.PROMPT_ENGINEERING_ROLE_INSTRUCTION, prompt_text)
         self.assertIn(prompt_projection.PROMPT_ENGINEERING_IDS_CONTEXT_INSTRUCTION, prompt_text)
         self.assertIn(prompt_projection.PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION, prompt_text)
+        self.assertIn(
+            "Only when no useful and valid header edit exists, return this abstention JSON object:",
+            prompt_text,
+        )
         self.assertIn('"abstention": "no_useful_header_edit"', prompt_text)
         self.assertEqual(prompt_unit["expected_output_format"]["optional_top_level_keys"], ["abstention"])
         self.assertEqual(
@@ -337,6 +341,8 @@ class Step16HeaderOnlyV2Test(unittest.TestCase):
             self.assertEqual(prompt_unit["expected_output_format"]["required_top_level_keys"], ["schema_version", "parent_group_id", "prompt_unit_id", "header_edits"])
             self.assertIn('"editable_headers"', prompt_text)
             self.assertIn('"header_edits": []', prompt_text)
+            self.assertIn("Return this JSON object:", prompt_text)
+            self.assertNotIn("return this abstention JSON object", prompt_text)
             self.assertNotIn('"patches": []', prompt_text)
             self.assertIn('"canonical_regions": []', prompt_text)
             self.assertIn('"fragment_flow_context"', prompt_text)
