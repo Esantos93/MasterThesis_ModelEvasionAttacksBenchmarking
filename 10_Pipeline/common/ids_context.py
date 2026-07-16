@@ -28,6 +28,49 @@ _IDS_SOURCE_FIELDS = {
     "ruleset_so": {"so_rule_stub", "security_context"},
     "builtin_decoder_or_inspector": {"inspector", "semantic_description"},
 }
+_NON_MODEL_VISIBLE_SNORT_RULE_OPTIONS = {"metadata", "reference"}
+
+
+def strip_non_model_visible_snort_rule_options(rule_declaration: str) -> str:
+    """Remove provenance-only Snort options without changing detection logic."""
+    rule = _require_nonempty_string(rule_declaration, "rule_declaration")
+    opening_parenthesis = rule.find("(")
+    closing_parenthesis = rule.rfind(")")
+    if opening_parenthesis < 0 or closing_parenthesis <= opening_parenthesis:
+        raise ValueError("Snort rule declaration must contain a parenthesized option block.")
+
+    option_block = rule[opening_parenthesis + 1 : closing_parenthesis]
+    kept_segments: list[str] = []
+    segment_start = 0
+    inside_quotes = False
+    escaped = False
+
+    for index, character in enumerate(option_block):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and inside_quotes:
+            escaped = True
+            continue
+        if character == '"':
+            inside_quotes = not inside_quotes
+            continue
+        if character != ";" or inside_quotes:
+            continue
+
+        segment = option_block[segment_start : index + 1]
+        option_name = segment.lstrip().split(":", 1)[0].strip().lower()
+        if option_name not in _NON_MODEL_VISIBLE_SNORT_RULE_OPTIONS:
+            kept_segments.append(segment)
+        segment_start = index + 1
+
+    trailing_segment = option_block[segment_start:]
+    if trailing_segment.strip():
+        option_name = trailing_segment.lstrip().split(":", 1)[0].strip().lower()
+        if option_name not in _NON_MODEL_VISIBLE_SNORT_RULE_OPTIONS:
+            kept_segments.append(trailing_segment)
+
+    return rule[: opening_parenthesis + 1] + "".join(kept_segments) + rule[closing_parenthesis:]
 
 
 def _require_dict(value: Any, field_name: str) -> dict[str, Any]:
@@ -103,9 +146,20 @@ def validate_ids_context_record(record: Any, *, field_name: str = "ids_context.r
     )
 
     if source == "ruleset_text":
-        _require_nonempty_string(detector.get("rule_declaration"), f"{field_name}.rule_declaration")
+        rule_declaration = _require_nonempty_string(
+            detector.get("rule_declaration"),
+            f"{field_name}.rule_declaration",
+        )
+        if strip_non_model_visible_snort_rule_options(rule_declaration) != rule_declaration:
+            raise ValueError(
+                f"{field_name}.rule_declaration contains non-model-visible reference or metadata options."
+            )
     elif source == "ruleset_so":
-        _require_nonempty_string(detector.get("so_rule_stub"), f"{field_name}.so_rule_stub")
+        so_rule_stub = _require_nonempty_string(detector.get("so_rule_stub"), f"{field_name}.so_rule_stub")
+        if strip_non_model_visible_snort_rule_options(so_rule_stub) != so_rule_stub:
+            raise ValueError(
+                f"{field_name}.so_rule_stub contains non-model-visible reference or metadata options."
+            )
         if "security_context" in detector:
             _validate_security_context(detector["security_context"], f"{field_name}.security_context")
     else:

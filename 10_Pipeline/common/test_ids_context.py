@@ -6,6 +6,7 @@ from common.ids_context import (
     IDS_CONTEXT_SCHEMA_VERSION,
     PRE_SNORT_CONTEXT_BUNDLE_SCHEMA_VERSION,
     project_ids_context,
+    strip_non_model_visible_snort_rule_options,
     validate_ids_context,
     validate_pre_snort_context_bundle,
 )
@@ -121,6 +122,39 @@ class IdsContextTest(unittest.TestCase):
         context["records"][0]["source_urls"] = ["https://example.invalid"]
         with self.assertRaisesRegex(ValueError, "not model-visible"):
             validate_ids_context(context)
+
+    def test_strips_only_top_level_reference_and_metadata_rule_options(self) -> None:
+        rule = (
+            'alert tcp any any -> any any (msg:"Example"; '
+            'content:"reference:url,keep; metadata:keep"; '
+            'metadata:policy security-ips drop; reference:cve,2020-0001; '
+            'service:http; sid:1001; rev:2;)'
+        )
+        self.assertEqual(
+            (
+                'alert tcp any any -> any any (msg:"Example"; '
+                'content:"reference:url,keep; metadata:keep"; '
+                'service:http; sid:1001; rev:2;)'
+            ),
+            strip_non_model_visible_snort_rule_options(rule),
+        )
+
+    def test_rejects_embedded_provenance_options_in_model_visible_rule(self) -> None:
+        for field_name, detector_source in (
+            ("rule_declaration", "ruleset_text"),
+            ("so_rule_stub", "ruleset_so"),
+        ):
+            with self.subTest(detector_source=detector_source):
+                context = ids_context()
+                record = next(
+                    item for item in context["records"] if item["detector_source"] == detector_source
+                )
+                record[field_name] = record[field_name].replace(
+                    ";)",
+                    "; reference:url,example.invalid; metadata:policy security-ips drop;)",
+                )
+                with self.assertRaisesRegex(ValueError, "non-model-visible reference or metadata"):
+                    validate_ids_context(context)
 
     def test_projects_only_validated_model_visible_context(self) -> None:
         context = ids_context()
