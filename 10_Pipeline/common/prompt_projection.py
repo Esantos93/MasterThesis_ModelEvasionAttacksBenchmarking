@@ -158,6 +158,14 @@ def load_prompt_instructions_profile(profile_name: str) -> tuple[str, list[str]]
     return profile_name, list(PROMPT_INSTRUCTIONS_PROFILES[profile_name])
 
 
+def prompt_engineering_profiles_selected(config: dict[str, Any]) -> bool:
+    input_profile = load_prompt_input_json_data_structure_from_config(config)
+    instructions_profile, _instruction_lines = load_prompt_instructions_profile_from_config(config)
+    return str(input_profile.get("profile", "")).startswith("prompt_engineering_") or str(
+        instructions_profile
+    ).startswith("prompt_engineering_")
+
+
 def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict[str, Any]:
     copied: dict[str, Any] = {}
     for field_name in field_names:
