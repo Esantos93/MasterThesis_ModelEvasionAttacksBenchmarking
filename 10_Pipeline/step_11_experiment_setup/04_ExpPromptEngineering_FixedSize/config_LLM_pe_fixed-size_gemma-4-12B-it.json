@@ -1,0 +1,85 @@
+{
+  "experiment": {
+    "experiment_id": "exp_cicids2017_pe_fixed-size_gemma-4-12B-it",
+    "description": "Header-only CICIDS2017 prompt-engineering experiment using six-physical-packet parent groups and compact IDS context. Model used gemma-4-12B-it.",
+    "output_root": "/home/santos/Experiments"
+  },
+  "dataset": {
+    "pcap_path": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Thursday-WorkingHours.pcap",
+    "flow_csv_dir": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Flows",
+    "attack_labels": [
+      "Web Attack - Brute Force",
+      "Web Attack - XSS",
+      "Web Attack - Sql Injection",
+      "Infiltration"
+    ]
+  },
+  "snort": {
+    "snort_binary": "/usr/local/bin/snort",
+    "config_path": "/usr/local/etc/snort/snort.lua",
+    "enable_ruleset": true,
+    "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states",
+    "detector_policy_label": "max-detect-ips",
+    "detection_policy_options": [
+      {
+        "label": "connectivity-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-connectivity-ips.states"
+      },
+      {
+        "label": "balanced-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-balanced-ips.states"
+      },
+      {
+        "label": "security-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states"
+      },
+      {
+        "label": "max-detect-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states"
+      }
+    ],
+    "plugin_path": "/usr/local/etc/snort/so_rules",
+    "daq_dir": "/usr/local/lib/daq",
+    "snaplen": 65535,
+    "enable_builtin_rules": true
+  },
+  "llm": {
+    "model_name": "gemma-4-12B-it",
+    "model_path": "/models_root/gemma-4-12B-it/",
+    "prompt_version": "compact_patch_prompting_v2",
+    "prompt_input_json_data_profile": "prompt_engineering_input_profile_v1",
+    "prompt_instructions_profile": "prompt_engineering_instructions_profile_v1",
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "prompt_target_context": 8192,
+    "prompt_template_overhead_tokens": 500,
+    "runtime_max_model_len": 12288,
+    "token_budget": {
+      "policy": "compact_patch_token_budget_v2",
+      "chars_per_token_estimate": 3.0,
+      "output_token_estimation_safety_factor": 1.2
+    },
+    "small_payload_min_bytes": 64,
+    "small_payload_max_bytes": 512,
+    "small_full_token_budget_fraction": 0.05,
+    "payload_window_left_context_bytes": 128,
+    "payload_window_editable_center_bytes": 512,
+    "payload_window_right_context_bytes": 128
+  },
+  "pipeline": {
+    "target_os": "Ubuntu",
+    "experiment_config_label": "prompt_engineering_gemma-4-12B-it_headers_only_fixed_size_6",
+    "experiment_config_label_options": [
+      "prompt_engineering_gemma-4-12B-it_headers_only_fixed_size_6"
+    ],
+    "grouping_policy": "fixed_packet_count",
+    "grouping_unit": "physical_packet",
+    "group_size_packets": 6,
+    "modification_strategy": "header_only_strategy_v1",
+    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_v1.json",
+    "traffic_selection_policy": "conservative_v1",
+    "validation_policy": "reject_invalid",
+    "signature_mutation_weight": 0.0
+  }
+}
