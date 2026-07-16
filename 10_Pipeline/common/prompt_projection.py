@@ -440,12 +440,17 @@ def build_compact_patch_prompt_parts(
         abstention_reason=abstention_reason,
     )
     json_prompt_input_text = json.dumps(json_prompt_input, indent=2, sort_keys=True)
+    output_skeleton_instruction = (
+        "Only when no useful and valid header edit exists, return this abstention JSON object:\n"
+        if abstention_reason
+        else "Return this JSON object:\n"
+    )
     fixed_prompt_text = (
         "\n".join(active_instruction_lines)
         + "\n"
-        "Return this JSON object:\n"
-        f"{output_skeleton}\n"
-        "Compact prompt unit:\n"
+        + output_skeleton_instruction
+        + f"{output_skeleton}\n"
+        + "Compact prompt unit:\n"
     )
     content = fixed_prompt_text + json_prompt_input_text
     return {
