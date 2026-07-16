@@ -33,6 +33,7 @@ PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
 ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
+NO_USEFUL_HEADER_EDIT_ABSTENTION = "no_useful_header_edit"
 FIELD_ALIASES = {
     "region_type": ["region_type", "type"],
     "operation": ["operation", "op"],
@@ -1036,10 +1037,37 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "operation": operation,
             }
 
+    expected_output_format = prompt_package.get("expected_output_format", {})
+    recognized_abstention_reasons = (
+        expected_output_format.get("recognized_abstention_reasons", [])
+        if isinstance(expected_output_format, dict)
+        else []
+    )
+    if not isinstance(recognized_abstention_reasons, list):
+        recognized_abstention_reasons = []
+    raw_abstention = parsed_output.get("abstention")
+    abstention_present = "abstention" in parsed_output
+    abstention_recognized = (
+        raw_abstention == NO_USEFUL_HEADER_EDIT_ABSTENTION
+        and raw_abstention in recognized_abstention_reasons
+    )
+    if patches:
+        output_decision = "edits_proposed"
+    elif abstention_recognized:
+        output_decision = "conscious_abstention"
+    elif abstention_present:
+        output_decision = "unknown_abstention_no_op"
+    else:
+        output_decision = "empty_no_op"
+
     result = {
         "accepted": True,
         "reason": "accepted",
         "patch_count": len(patches),
+        "output_decision": output_decision,
+        "abstention_present": abstention_present,
+        "abstention_reason": raw_abstention if abstention_present else None,
+        "abstention_recognized": abstention_recognized,
     }
     if output_normalization is not None:
         result["output_normalization"] = output_normalization
@@ -1104,6 +1132,10 @@ def build_run_metadata(
         "output_paths": output_paths,
         "validation_result": validation_result,
         "output_normalization": validation_result.get("output_normalization") if validation_result else None,
+        "output_decision": validation_result.get("output_decision") if validation_result else None,
+        "abstention_present": validation_result.get("abstention_present") if validation_result else None,
+        "abstention_reason": validation_result.get("abstention_reason") if validation_result else None,
+        "abstention_recognized": validation_result.get("abstention_recognized") if validation_result else None,
         "generation_response_metadata": generation_response_metadata,
     }
 

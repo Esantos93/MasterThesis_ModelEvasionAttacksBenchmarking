@@ -192,6 +192,15 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
     if isinstance(validation_result, dict):
         patch_count = validation_result.get("patch_count")
         validation_reason = validation_result.get("reason")
+    output_decision = metadata.get("output_decision")
+    abstention_present = metadata.get("abstention_present")
+    abstention_reason = metadata.get("abstention_reason")
+    abstention_recognized = metadata.get("abstention_recognized")
+    if isinstance(validation_result, dict):
+        output_decision = validation_result.get("output_decision", output_decision)
+        abstention_present = validation_result.get("abstention_present", abstention_present)
+        abstention_reason = validation_result.get("abstention_reason", abstention_reason)
+        abstention_recognized = validation_result.get("abstention_recognized", abstention_recognized)
     generation_response_metadata = metadata.get("generation_response_metadata")
     if not isinstance(generation_response_metadata, dict):
         generation_response_metadata = metadata.get("llama_response_metadata")
@@ -221,6 +230,10 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "overflow_tokens": metadata.get("overflow_tokens"),
         "max_tokens": max_tokens,
         "patch_count": patch_count,
+        "output_decision": output_decision,
+        "abstention_present": abstention_present,
+        "abstention_reason": abstention_reason,
+        "abstention_recognized": abstention_recognized,
         "started_at_utc": metadata.get("started_at_utc"),
         "finished_at_utc": metadata.get("finished_at_utc"),
         "generation_batch_index": generation_response_metadata.get("batch_index"),
@@ -389,6 +402,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
     runtime_total_llm = summary["runtime_totals"]["llm_attempted"]
     status_counts = summary["counts"]["by_status"]
     failure_counts = summary["counts"]["by_failure_reason"]
+    output_decision_counts = summary["counts"]["by_output_decision"]
     generation_batches = summary["generation_batches"]
     all_wall_clock = as_float(runtime_total_all.get("observed_metadata_wall_clock_seconds"))
     llm_wall_clock = as_float(runtime_total_llm.get("observed_metadata_wall_clock_seconds"))
@@ -423,6 +437,21 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             lines.append(f"| {reason} | {count} |")
     else:
         lines.append("No failures recorded.")
+
+    lines.extend(
+        [
+            "",
+            "## Output Decisions",
+            "",
+            "| Output decision | Count |",
+            "|---|---:|",
+        ]
+    )
+    if output_decision_counts:
+        for decision, count in output_decision_counts.items():
+            lines.append(f"| {decision} | {count} |")
+    else:
+        lines.append("No output-decision metadata recorded.")
 
     lines.extend(
         [
@@ -551,6 +580,10 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "overflow_tokens",
         "max_tokens",
         "patch_count",
+        "output_decision",
+        "abstention_present",
+        "abstention_reason",
+        "abstention_recognized",
         "packet_count",
         "editable_packet_count",
         "context_packet_count",
@@ -644,6 +677,16 @@ def summarize_run(
         for row in rows
         if row.get("status") not in ACCEPTED_STATUSES
     )
+    output_decision_counts = Counter(
+        str(row.get("output_decision"))
+        for row in rows
+        if row.get("output_decision") is not None
+    )
+    abstention_reason_counts = Counter(
+        str(row.get("abstention_reason"))
+        for row in rows
+        if row.get("abstention_present")
+    )
     llm_rows = [
         row
         for row in rows
@@ -665,6 +708,8 @@ def summarize_run(
             "auto_empty_no_editable_regions": status_counts.get("auto_empty_no_editable_regions", 0),
             "by_status": dict(sorted(status_counts.items())),
             "by_failure_reason": dict(sorted(failure_counts.items())),
+            "by_output_decision": dict(sorted(output_decision_counts.items())),
+            "by_abstention_reason": dict(sorted(abstention_reason_counts.items())),
         },
         "aggregates": {
             "all_metadata": aggregate_rows(rows),

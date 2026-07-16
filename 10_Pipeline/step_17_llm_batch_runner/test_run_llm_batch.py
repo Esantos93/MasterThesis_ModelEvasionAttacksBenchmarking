@@ -195,6 +195,15 @@ def build_header_prompt_package() -> dict:
     }
 
 
+def build_prompt_engineering_header_prompt_package() -> dict:
+    package = build_header_prompt_package()
+    package["expected_output_format"] = {
+        "optional_top_level_keys": ["abstention"],
+        "recognized_abstention_reasons": ["no_useful_header_edit"],
+    }
+    return package
+
+
 #This test case covers Step 17 response JSON parsing before contract validation.
 class ModelJsonParsingTest(unittest.TestCase):
     def test_strict_json_response_is_parsed(self) -> None:
@@ -228,6 +237,119 @@ class ModelJsonParsingTest(unittest.TestCase):
 
 
 #This test case covers Step 17 patch-output validation against prompt traceability.
+class AbstentionValidationTest(unittest.TestCase):
+    def build_output(self, *, header_edits: list, abstention_marker: object = Ellipsis) -> dict:
+        output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": header_edits,
+        }
+        if abstention_marker is not Ellipsis:
+            output["abstention"] = abstention_marker
+        return output
+
+    def test_valid_edits_without_abstention_are_classified_as_edits(self) -> None:
+        output = self.build_output(header_edits=[["packet_000001", "ipv4.ttl", 128]])
+        result = run_llm_batch.validate_patch_output(output, build_prompt_engineering_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "edits_proposed")
+        self.assertFalse(result["abstention_present"])
+
+    def test_recognized_abstention_without_edits_is_conscious(self) -> None:
+        output = self.build_output(header_edits=[], abstention_marker="no_useful_header_edit")
+        result = run_llm_batch.validate_patch_output(output, build_prompt_engineering_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "conscious_abstention")
+        self.assertTrue(result["abstention_recognized"])
+
+    def test_empty_header_edits_without_abstention_is_no_op(self) -> None:
+        result = run_llm_batch.validate_patch_output(
+            self.build_output(header_edits=[]),
+            build_prompt_engineering_header_prompt_package(),
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "empty_no_op")
+
+    def test_unknown_abstention_without_edits_is_recorded_as_no_op(self) -> None:
+        output = self.build_output(header_edits=[], abstention_marker="cannot_decide")
+        result = run_llm_batch.validate_patch_output(output, build_prompt_engineering_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "unknown_abstention_no_op")
+        self.assertEqual(result["abstention_reason"], "cannot_decide")
+        self.assertFalse(result["abstention_recognized"])
+
+    def test_valid_edits_take_precedence_over_abstention(self) -> None:
+        output = self.build_output(
+            header_edits=[["packet_000001", "ipv4.ttl", 128]],
+            abstention_marker="no_useful_header_edit",
+        )
+        result = run_llm_batch.validate_patch_output(output, build_prompt_engineering_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "edits_proposed")
+        self.assertTrue(result["abstention_present"])
+        self.assertTrue(result["abstention_recognized"])
+
+    def test_baseline_does_not_recognize_prompt_engineering_abstention(self) -> None:
+        output = self.build_output(header_edits=[], abstention_marker="no_useful_header_edit")
+        result = run_llm_batch.validate_patch_output(output, build_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "unknown_abstention_no_op")
+        self.assertFalse(result["abstention_recognized"])
+
+    def test_runtime_summary_counts_output_decisions_and_abstention_reasons(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            metadata_dir = run_dir / "metadata"
+            metadata_dir.mkdir()
+            decisions = [
+                ("edits_proposed", False, None, False),
+                ("empty_no_op", False, None, False),
+                ("conscious_abstention", True, "no_useful_header_edit", True),
+                ("unknown_abstention_no_op", True, "cannot_decide", False),
+            ]
+            for index, (decision, present, reason, recognized) in enumerate(decisions, start=1):
+                metadata = {
+                    "status": "accepted",
+                    "prompt_unit_id": f"unit_{index}",
+                    "runtime_seconds": 1.0,
+                    "real_input_tokens": 10,
+                    "planned_output_tokens": 20,
+                    "max_tokens": 20,
+                    "output_decision": decision,
+                    "abstention_present": present,
+                    "abstention_reason": reason,
+                    "abstention_recognized": recognized,
+                    "validation_result": {
+                        "accepted": True,
+                        "reason": "accepted",
+                        "patch_count": 1 if decision == "edits_proposed" else 0,
+                        "output_decision": decision,
+                        "abstention_present": present,
+                        "abstention_reason": reason,
+                        "abstention_recognized": recognized,
+                    },
+                }
+                (metadata_dir / f"unit_{index}.metadata.json").write_text(
+                    json.dumps(metadata),
+                    encoding="utf-8",
+                )
+
+            paths = summarize_llm_runtime.summarize_run(run_dir=run_dir)
+            summary = json.loads(paths["json"].read_text(encoding="utf-8"))
+
+            self.assertEqual(summary["counts"]["by_output_decision"]["conscious_abstention"], 1)
+            self.assertEqual(summary["counts"]["by_output_decision"]["unknown_abstention_no_op"], 1)
+            self.assertEqual(summary["counts"]["by_abstention_reason"]["no_useful_header_edit"], 1)
+            self.assertEqual(summary["counts"]["by_abstention_reason"]["cannot_decide"], 1)
+
+
 class CanonicalRegionPatchValidationTest(unittest.TestCase):
     def test_canonical_region_id_is_accepted_as_explicit_patch_identity(self) -> None:
         parsed_output = {
@@ -778,8 +900,9 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
 
 #This backend records generation calls and returns contract-valid empty header edits.
 class SyntheticLlm:
-    def __init__(self, token_counts: dict[str, int]) -> None:
+    def __init__(self, token_counts: dict[str, int], abstention_reason: str | None = None) -> None:
         self.token_counts = token_counts
+        self.abstention_reason = abstention_reason
         self.single_generation_calls = 0
         self.batch_generation_calls: list[list[str]] = []
         self.batch_max_tokens: list[list[int]] = []
@@ -796,6 +919,8 @@ class SyntheticLlm:
             "prompt_unit_id": prompt_unit_id,
             "header_edits": [],
         }
+        if self.abstention_reason is not None:
+            output["abstention"] = self.abstention_reason
         return iter([{"choices": [{"delta": {"content": json.dumps(output)}}]}])
 
     def create_chat_completions_batch(
@@ -807,17 +932,18 @@ class SyntheticLlm:
         prompt_unit_ids = [str(messages[0]["content"]) for messages in messages_batch]
         self.batch_generation_calls.append(prompt_unit_ids)
         self.batch_max_tokens.append([int(params["max_tokens"]) for params in generation_params_batch])
-        return [
-            json.dumps(
-                {
+        outputs = []
+        for prompt_unit_id in prompt_unit_ids:
+            output = {
                     "schema_version": "patch_output_v1",
                     "parent_group_id": "parent_001",
                     "prompt_unit_id": prompt_unit_id,
                     "header_edits": [],
                 }
-            )
-            for prompt_unit_id in prompt_unit_ids
-        ]
+            if self.abstention_reason is not None:
+                output["abstention"] = self.abstention_reason
+            outputs.append(json.dumps(output))
+        return outputs
 
 
 def build_runtime_generation_params(runtime_max_model_len: int) -> dict:
@@ -832,11 +958,21 @@ def build_runtime_generation_params(runtime_max_model_len: int) -> dict:
     }
 
 
-def build_runtime_prompt(prompt_unit_id: str, planned_output_tokens: int, estimated_input_tokens: int = 10) -> dict:
+def build_runtime_prompt(
+    prompt_unit_id: str,
+    planned_output_tokens: int,
+    estimated_input_tokens: int = 10,
+    prompt_engineering: bool = False,
+) -> dict:
     prompt_package = build_header_prompt_package()
     prompt_package["prompt_unit_id"] = prompt_unit_id
     prompt_package["group_id"] = prompt_unit_id
     prompt_package["messages"] = [{"role": "user", "content": prompt_unit_id}]
+    if prompt_engineering:
+        prompt_package["expected_output_format"] = {
+            "optional_top_level_keys": ["abstention"],
+            "recognized_abstention_reasons": ["no_useful_header_edit"],
+        }
     prompt_package["token_plan"].update(
         {
             "estimated_input_tokens": estimated_input_tokens,
@@ -853,6 +989,67 @@ def build_runtime_prompt(prompt_unit_id: str, planned_output_tokens: int, estima
 
 #This test case covers direct runtime consumption of compact_patch_token_budget_v2.
 class TokenPlanRuntimeTest(unittest.TestCase):
+    def test_conscious_abstention_is_recorded_in_single_and_batch_modes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            llm = SyntheticLlm(
+                {"single_abstain": 10, "batch_abstain_1": 10, "batch_abstain_2": 10},
+                abstention_reason="no_useful_header_edit",
+            )
+            single_prompt = build_runtime_prompt(
+                "single_abstain",
+                planned_output_tokens=20,
+                prompt_engineering=True,
+            )
+            single_path = root / "single_abstain.prompt.json"
+            single_path.write_text(json.dumps(single_prompt), encoding="utf-8")
+            single_dirs = run_llm_batch.prepare_model_output_dirs(root / "single_outputs", "synthetic", "run")
+
+            single_metadata = run_llm_batch.run_single_prompt(
+                llm=llm,
+                prompt_path=single_path,
+                model_path=Path("synthetic"),
+                model_name="synthetic",
+                output_dirs=single_dirs,
+                generation_params=build_runtime_generation_params(100),
+                heartbeat_seconds=0,
+                prompt_index=1,
+                total_prompts=1,
+            )
+            self.assertEqual(single_metadata["output_decision"], "conscious_abstention")
+
+            batch_paths = []
+            for prompt_unit_id in ["batch_abstain_1", "batch_abstain_2"]:
+                path = root / f"{prompt_unit_id}.prompt.json"
+                path.write_text(
+                    json.dumps(
+                        build_runtime_prompt(
+                            prompt_unit_id,
+                            planned_output_tokens=20,
+                            prompt_engineering=True,
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+                batch_paths.append(path)
+            with patch.object(run_llm_batch, "load_model", return_value=llm):
+                run_llm_batch.run_model_batch(
+                    model_path=Path("synthetic"),
+                    prompt_paths=batch_paths,
+                    output_root=root / "batch_outputs",
+                    run_id="run",
+                    generation_params=build_runtime_generation_params(100),
+                    progress_every=0,
+                    heartbeat_seconds=0,
+                    llm_batch_size=2,
+                )
+            metadata_dir = root / "batch_outputs" / "synthetic" / "run" / "metadata"
+            for prompt_unit_id in ["batch_abstain_1", "batch_abstain_2"]:
+                metadata = json.loads(
+                    (metadata_dir / f"{prompt_unit_id}.metadata.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(metadata["output_decision"], "conscious_abstention")
+
     def test_runtime_max_tokens_equals_planned_output_tokens_without_legacy_budgeting(self) -> None:
         llm = SyntheticLlm({"unit_header_001": 40})
         prompt_package = build_runtime_prompt("unit_header_001", planned_output_tokens=37)

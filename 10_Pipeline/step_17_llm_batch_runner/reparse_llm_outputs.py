@@ -146,6 +146,26 @@ def reparse_one_raw_output(
             if isinstance(validation_result, dict)
             else None
         )
+        metadata["output_decision"] = (
+            validation_result.get("output_decision")
+            if isinstance(validation_result, dict)
+            else None
+        )
+        metadata["abstention_present"] = (
+            validation_result.get("abstention_present")
+            if isinstance(validation_result, dict)
+            else None
+        )
+        metadata["abstention_reason"] = (
+            validation_result.get("abstention_reason")
+            if isinstance(validation_result, dict)
+            else None
+        )
+        metadata["abstention_recognized"] = (
+            validation_result.get("abstention_recognized")
+            if isinstance(validation_result, dict)
+            else None
+        )
         metadata["reparse"] = {
             "parser": "fenced_json_recovery_v1",
             "reparsed_at_utc": datetime.now(timezone.utc).isoformat(),
