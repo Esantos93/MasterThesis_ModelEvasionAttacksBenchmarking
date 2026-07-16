@@ -8,6 +8,9 @@ Ubuntu VM, not as a polished public CLI.
 
 from __future__ import annotations
 
+import argparse
+import hashlib
+import json
 import shlex
 import subprocess
 import sys
@@ -38,6 +41,9 @@ DRY_RUN = False
 
 
 CONFIG_PATH = PIPELINE_ROOT / CONFIG
+CANONICAL_PRE_SNORT_CONTEXT_RELATIVE_PATH = (
+    Path("05_groups") / "pre_snort_context_source" / "pre_snort_context_bundle_v1.json"
+)
 
 
 def check_exists(path: Path, description: str) -> None:
@@ -50,6 +56,75 @@ def load_pipeline_config() -> dict:
     from common.config import load_json_config
 
     return load_json_config(CONFIG_PATH)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prompt_engineering_profiles_selected(config_data: dict) -> bool:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+    from common.prompt_projection import prompt_engineering_profiles_selected as shared_profile_check
+
+    return shared_profile_check(config_data)
+
+
+def load_and_validate_bundle(path: Path) -> dict:
+    check_exists(path, "PRE Snort context bundle")
+    if not path.is_file():
+        raise SystemExit(f"PRE Snort context bundle must be a regular file: {path}")
+    sys.path.insert(0, str(PIPELINE_ROOT))
+    from common.ids_context import validate_pre_snort_context_bundle
+
+    try:
+        with path.open("r", encoding="utf-8") as input_file:
+            bundle = json.load(input_file)
+        validate_pre_snort_context_bundle(bundle)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise SystemExit(f"Invalid PRE Snort context bundle {path}: {error}") from error
+    return bundle
+
+
+def preflight_pre_snort_context(
+    *,
+    config_data: dict,
+    experiment_root: Path,
+    supplied_bundle: str | None,
+    start_step: int,
+) -> Path | None:
+    requires_bundle = prompt_engineering_profiles_selected(config_data)
+    if not requires_bundle:
+        if supplied_bundle is not None:
+            raise SystemExit(
+                "--pre-snort-context-bundle is only valid when the selected input or instructions "
+                "profile is a prompt-engineering profile."
+            )
+        return None
+
+    input_profile = config_data.get("llm", {}).get("prompt_input_json_data_profile")
+    instructions_profile = config_data.get("llm", {}).get("prompt_instructions_profile")
+    if supplied_bundle is None:
+        raise SystemExit(
+            "--pre-snort-context-bundle is mandatory for this config because it uses a "
+            "prompt-engineering profile. "
+            f"input_profile={input_profile!r}, instructions_profile={instructions_profile!r}"
+        )
+
+    source_path = Path(supplied_bundle).expanduser().resolve()
+    load_and_validate_bundle(source_path)
+    if start_step > 11:
+        canonical_path = experiment_root / CANONICAL_PRE_SNORT_CONTEXT_RELATIVE_PATH
+        load_and_validate_bundle(canonical_path)
+        if sha256_file(source_path) != sha256_file(canonical_path):
+            raise SystemExit(
+                "The supplied PRE Snort context bundle does not match the canonical bundle already copied "
+                f"by Step 11: {canonical_path}"
+            )
+    return source_path
 
 
 def run_command(label: str, command: list[str]) -> None:
@@ -72,7 +147,17 @@ def maybe_run_step(step: int, command: list[str]) -> None:
     run_command(f"STEP {step}", command)
 
 
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run local Pipeline 1 steps sequentially.")
+    parser.add_argument(
+        "--pre-snort-context-bundle",
+        help="Path to pre_snort_context_bundle_v1.json; mandatory for prompt-engineering profiles.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_cli_args()
     check_exists(PIPELINE_ROOT, "pipeline root")
     check_exists(CONFIG_PATH, "config")
 
@@ -97,6 +182,17 @@ def main() -> None:
     print(f"Steps: {START_STEP}-{END_STEP}")
     print(f"Run py_compile: {RUN_PY_COMPILE}")
     print(f"Dry run: {DRY_RUN}")
+
+    pre_snort_context_bundle = preflight_pre_snort_context(
+        config_data=config_data,
+        experiment_root=experiment_root,
+        supplied_bundle=args.pre_snort_context_bundle,
+        start_step=START_STEP,
+    )
+    print(
+        "PRE Snort context bundle: "
+        + (str(pre_snort_context_bundle) if pre_snort_context_bundle is not None else "not required")
+    )
 
     if START_STEP <= 11 <= END_STEP and REQUIRE_NEW_EXPERIMENT_ROOT_FOLDER_FOR_STEP11:
         if experiment_root.exists():
@@ -125,15 +221,14 @@ def main() -> None:
             ],
         )
 
-    maybe_run_step(
-        11,
-        py
-        + [
-            "step_11_experiment_setup/setup_experiment.py",
-            "--config",
-            config,
-        ],
-    )
+    step11_command = py + [
+        "step_11_experiment_setup/setup_experiment.py",
+        "--config",
+        config,
+    ]
+    if pre_snort_context_bundle is not None:
+        step11_command.extend(["--pre-snort-context-bundle", str(pre_snort_context_bundle)])
+    maybe_run_step(11, step11_command)
 
     maybe_run_step(
         12,
