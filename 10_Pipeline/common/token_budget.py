@@ -237,6 +237,21 @@ def build_worst_case_patch_output(
     return output, breakdown
 
 
+def build_abstention_patch_output(
+    *,
+    parent_group_id: str,
+    prompt_unit_id: str,
+    abstention_reason: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
+        "parent_group_id": parent_group_id,
+        "prompt_unit_id": prompt_unit_id,
+        "header_edits": [],
+        "abstention": abstention_reason,
+    }
+
+
 def estimate_worst_case_output_tokens(
     *,
     parent_group_id: str,
@@ -245,6 +260,7 @@ def estimate_worst_case_output_tokens(
     chars_per_token_estimate: float,
     output_token_estimation_safety_factor: float,
     payload_replacement_size_policy: dict[str, Any] | None = None,
+    abstention_reason: str | None = None,
 ) -> dict[str, Any]:
     output, breakdown = build_worst_case_patch_output(
         parent_group_id=parent_group_id,
@@ -252,7 +268,23 @@ def estimate_worst_case_output_tokens(
         prompt_input=prompt_input,
         payload_replacement_size_policy=payload_replacement_size_policy,
     )
-    serialized = compact_json(output)
+    edit_output_serialized = compact_json(output)
+    abstention_output = None
+    abstention_output_serialized = None
+    if abstention_reason:
+        abstention_output = build_abstention_patch_output(
+            parent_group_id=parent_group_id,
+            prompt_unit_id=prompt_unit_id,
+            abstention_reason=abstention_reason,
+        )
+        abstention_output_serialized = compact_json(abstention_output)
+    if abstention_output_serialized is not None and len(abstention_output_serialized) > len(edit_output_serialized):
+        output = abstention_output
+        serialized = abstention_output_serialized
+        selected_output_form = "abstention"
+    else:
+        serialized = edit_output_serialized
+        selected_output_form = "all_authorized_edits"
     base_tokens = ceil_token_estimate_from_chars(
         char_count=len(serialized),
         chars_per_token_estimate=chars_per_token_estimate,
@@ -267,6 +299,10 @@ def estimate_worst_case_output_tokens(
         "output_chars": len(serialized),
         "output_token_estimation_safety_factor": output_token_estimation_safety_factor,
         "worst_case_output": output,
+        "selected_output_form": selected_output_form,
+        "all_authorized_edits_output_chars": len(edit_output_serialized),
+        "abstention_output_chars": len(abstention_output_serialized) if abstention_output_serialized is not None else None,
+        "abstention_reason": abstention_reason,
         **breakdown,
     }
 
@@ -355,6 +391,7 @@ def build_compact_patch_token_plan(
         chars_per_token_estimate=chars_per_token_estimate,
         output_token_estimation_safety_factor=output_token_estimation_safety_factor,
         payload_replacement_size_policy=payload_replacement_size_policy,
+        abstention_reason=parts.get("abstention_reason"),
     )
     planned_output_tokens = int(output_plan["planned_output_tokens"])
     total_planned_tokens = estimated_input_tokens + planned_output_tokens

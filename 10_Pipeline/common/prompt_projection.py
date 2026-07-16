@@ -9,6 +9,21 @@ from common.ids_context import project_ids_context
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_input_profile_v1"
 DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "baseline_instructions_profile_v1"
+BASELINE_OBJECTIVE_INSTRUCTION = "You modify compact network traffic prompt units to reduce Snort 3 detection."
+BASELINE_NO_CHANGE_INSTRUCTION = "If no change is needed, return patches as an empty list."
+PROMPT_ENGINEERING_ROLE_INSTRUCTION = (
+    "You are a cybersecurity expert participating in an authorized IDS-evasion experiment."
+)
+PROMPT_ENGINEERING_IDS_CONTEXT_INSTRUCTION = (
+    "Use ids_context only as non-editable evidence to select header edits that reduce Snort 3 detection "
+    "while preserving protocol validity and malicious functionality. Never modify ids_context or copy it "
+    "into header_edits."
+)
+NO_USEFUL_HEADER_EDIT_ABSTENTION = "no_useful_header_edit"
+PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION = (
+    "If no useful and valid header edit exists, return header_edits as an empty list and set abstention to "
+    f'"{NO_USEFUL_HEADER_EDIT_ABSTENTION}". Otherwise, return the edits and omit abstention.'
+)
 
 PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
     "baseline_input_profile_v1": {
@@ -61,11 +76,11 @@ PROMPT_INPUT_JSON_DATA_PROFILES["prompt_engineering_input_profile_v1"] = {
 
 PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
     "baseline_instructions_profile_v1": [
-        "You modify compact network traffic prompt units to reduce Snort 3 detection.",
+        BASELINE_OBJECTIVE_INSTRUCTION,
         "Return valid JSON only. Do not include Markdown, comments, or explanations.",
         "Do not return full packets. Return only patches/deltas.",
         "Do not modify context regions or any field outside an editable region.",
-        "If no change is needed, return patches as an empty list.",
+        BASELINE_NO_CHANGE_INSTRUCTION,
         (
             "Header edits target physical packets listed in editable_headers. "
             "For header edits, use header_edits only. "
@@ -91,19 +106,16 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
     ],
 }
 
-PROMPT_INSTRUCTIONS_PROFILES["prompt_engineering_instructions_profile_v1"] = (
-    PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"]
-    + [
-        (
-            "Use ids_context as non-editable IDS evidence. It can explain why Snort detected "
-            "the PRE traffic, but it is not an editable region and must never be copied into patches."
-        ),
-        (
-            "Do not expose, invent, or modify detector provenance such as CVEs, MITRE ATT&CK ids, "
-            "source URLs, Snort metadata, or artifact hashes."
-        ),
-    ]
-)
+PROMPT_INSTRUCTIONS_PROFILES["prompt_engineering_instructions_profile_v1"] = [
+    PROMPT_ENGINEERING_ROLE_INSTRUCTION,
+    PROMPT_ENGINEERING_IDS_CONTEXT_INSTRUCTION,
+    *[
+        PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION
+        if line == BASELINE_NO_CHANGE_INSTRUCTION
+        else line
+        for line in PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"][1:]
+    ],
+]
 
 HEADER_ONLY_OUTPUT_INSTRUCTION = (
     "This prompt has editable headers only. Return header edits only in header_edits. "
@@ -377,6 +389,7 @@ def build_patch_output_skeleton(
     prompt_unit_id: str,
     has_editable_headers: bool,
     has_editable_payload: bool,
+    abstention_reason: str | None = None,
 ) -> str:
     output_skeleton_lines = [
         "{",
@@ -387,7 +400,9 @@ def build_patch_output_skeleton(
     if has_editable_payload:
         output_skeleton_lines.append('  "patches": []' + ("," if has_editable_headers else ""))
     if has_editable_headers:
-        output_skeleton_lines.append('  "header_edits": []')
+        output_skeleton_lines.append('  "header_edits": []' + ("," if abstention_reason else ""))
+    if abstention_reason:
+        output_skeleton_lines.append(f'  "abstention": "{abstention_reason}"')
     output_skeleton_lines.append("}")
     return "\n".join(output_skeleton_lines)
 
@@ -410,11 +425,19 @@ def build_compact_patch_prompt_parts(
         has_editable_headers=has_editable_headers,
         has_editable_payload=has_editable_payload,
     )
+    abstention_reason = (
+        NO_USEFUL_HEADER_EDIT_ABSTENTION
+        if has_editable_headers
+        and not has_editable_payload
+        and PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION in active_instruction_lines
+        else None
+    )
     output_skeleton = build_patch_output_skeleton(
         parent_group_id=prompt_source_unit["parent_group_id"],
         prompt_unit_id=prompt_source_unit["prompt_unit_id"],
         has_editable_headers=has_editable_headers,
         has_editable_payload=has_editable_payload,
+        abstention_reason=abstention_reason,
     )
     json_prompt_input_text = json.dumps(json_prompt_input, indent=2, sort_keys=True)
     fixed_prompt_text = (
@@ -434,6 +457,7 @@ def build_compact_patch_prompt_parts(
         "content": content,
         "has_editable_headers": has_editable_headers,
         "has_editable_payload": has_editable_payload,
+        "abstention_reason": abstention_reason,
     }
 
 
