@@ -11,6 +11,7 @@ from common.ids_context import (
     IDS_CONTEXT_SCHEMA_VERSION,
     PRE_SNORT_CONTEXT_BUNDLE_SCHEMA_VERSION,
     detector_identity,
+    strip_non_model_visible_snort_rule_options,
     validate_ids_context,
     validate_pre_snort_context_bundle,
 )
@@ -31,9 +32,13 @@ def _model_visible_detector_fields(definition: dict[str, Any]) -> dict[str, Any]
         "message": str(definition["message"]),
     }
     if source == "ruleset_text":
-        record["rule_declaration"] = definition["rule_declaration"]
+        record["rule_declaration"] = strip_non_model_visible_snort_rule_options(
+            definition["rule_declaration"]
+        )
     elif source == "ruleset_so":
-        record["so_rule_stub"] = definition["so_rule_stub"]
+        record["so_rule_stub"] = strip_non_model_visible_snort_rule_options(
+            definition["so_rule_stub"]
+        )
         security_context = definition.get("security_context")
         if isinstance(security_context, dict) and security_context.get("summary"):
             record["security_context"] = {"summary": security_context["summary"]}

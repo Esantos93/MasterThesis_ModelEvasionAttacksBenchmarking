@@ -177,7 +177,10 @@ def detector_definitions() -> list[dict]:
             "sid": 1001,
             "rev": 2,
             "message": "Text detector",
-            "rule_declaration": "alert tcp any any -> any any (msg:\"Text detector\"; sid:1001; rev:2;)",
+            "rule_declaration": (
+                "alert tcp any any -> any any (msg:\"Text detector\"; content:\"metadata:keep\"; "
+                "metadata:policy security-ips drop; reference:cve,2000-0001; sid:1001; rev:2;)"
+            ),
             "security_context": {
                 "cve_ids": ["CVE-2000-0001"],
                 "mitre_attack_ids": ["T0001"],
@@ -190,7 +193,10 @@ def detector_definitions() -> list[dict]:
             "sid": 17775,
             "rev": 6,
             "message": "SO detector",
-            "so_rule_stub": "alert ip any any -> any any (msg:\"SO detector\"; sid:17775; rev:6;)",
+            "so_rule_stub": (
+                "alert ip any any -> any any (msg:\"SO detector\"; metadata:policy security-ips drop; "
+                "reference:url,example.invalid/so; sid:17775; rev:6;)"
+            ),
             "security_context": {
                 "summary": "Detects behavior implemented by a shared-object rule.",
                 "cve_ids": ["CVE-2000-0002"],
@@ -613,6 +619,13 @@ class CanonicalStep15Tests(unittest.TestCase):
         by_source = {record["detector_source"]: record for record in context["records"]}
         self.assertIn("rule_declaration", by_source["ruleset_text"])
         self.assertIn("so_rule_stub", by_source["ruleset_so"])
+        self.assertIn('content:\"metadata:keep\"', by_source["ruleset_text"]["rule_declaration"])
+        for rule_field, detector_source in (
+            ("rule_declaration", "ruleset_text"),
+            ("so_rule_stub", "ruleset_so"),
+        ):
+            self.assertNotIn("reference:", by_source[detector_source][rule_field])
+            self.assertNotIn("metadata:policy", by_source[detector_source][rule_field])
         self.assertEqual(
             {"summary": "Detects behavior implemented by a shared-object rule."},
             by_source["ruleset_so"]["security_context"],
