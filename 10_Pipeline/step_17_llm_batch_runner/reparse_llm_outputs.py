@@ -81,8 +81,10 @@ def reparse_one_raw_output(
     original_failure_reason = metadata.get("failure_reason")
 
     try:
-        parsed_output = run_llm_batch.parse_model_json(raw_text)
+        parsed_output, output_recovery = run_llm_batch.parse_model_json_with_recovery(raw_text)
         validation_result = run_llm_batch.validate_patch_output(parsed_output, prompt_package)
+        if output_recovery is not None:
+            validation_result["output_recovery"] = output_recovery
         if validation_result["accepted"]:
             new_status = "accepted"
             new_failure_reason = None
@@ -118,9 +120,18 @@ def reparse_one_raw_output(
                 run_llm_batch.write_json(rejected_path, parsed_output)
     except Exception as error:
         parsed_output = None
-        validation_result = None
+        error_output_recovery = getattr(error, "output_recovery", None)
+        new_failure_reason = getattr(error, "failure_reason", type(error).__name__)
+        validation_result = (
+            {
+                "accepted": False,
+                "reason": new_failure_reason,
+                "output_recovery": error_output_recovery,
+            }
+            if error_output_recovery is not None
+            else None
+        )
         new_status = "failed"
-        new_failure_reason = type(error).__name__
         output_paths = dict(metadata.get("output_paths") or {})
         output_paths["raw"] = str(raw_path)
         output_paths["metadata"] = str(metadata_path)
@@ -134,6 +145,8 @@ def reparse_one_raw_output(
                 "prompt_file": str(prompt_path),
                 "model_name": metadata.get("model_name"),
             }
+            if validation_result is not None:
+                failure_report["validation_result"] = validation_result
             run_llm_batch.write_json(failure_path, failure_report)
 
     if write:
@@ -141,6 +154,11 @@ def reparse_one_raw_output(
         metadata["failure_reason"] = new_failure_reason
         metadata["output_paths"] = output_paths
         metadata["validation_result"] = validation_result
+        metadata["output_recovery"] = (
+            validation_result.get("output_recovery")
+            if isinstance(validation_result, dict)
+            else None
+        )
         metadata["output_normalization"] = (
             validation_result.get("output_normalization")
             if isinstance(validation_result, dict)
@@ -167,7 +185,7 @@ def reparse_one_raw_output(
             else None
         )
         metadata["reparse"] = {
-            "parser": "fenced_json_recovery_v1",
+            "parser": "step17_current_parser_v2",
             "reparsed_at_utc": datetime.now(timezone.utc).isoformat(),
             "original_status": original_status,
             "original_failure_reason": original_failure_reason,
@@ -184,6 +202,11 @@ def reparse_one_raw_output(
         "prompt_file": str(prompt_path),
         "output_normalization": (
             validation_result.get("output_normalization")
+            if isinstance(validation_result, dict)
+            else None
+        ),
+        "output_recovery": (
+            validation_result.get("output_recovery")
             if isinstance(validation_result, dict)
             else None
         ),

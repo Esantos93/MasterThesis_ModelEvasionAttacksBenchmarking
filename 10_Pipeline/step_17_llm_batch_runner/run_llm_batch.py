@@ -422,18 +422,109 @@ def start_generation_heartbeat(
     return stop_event, thread
 
 
-FENCED_JSON_RE = re.compile(r"\A\s*```(?:json|JSON)?[^\n]*\n(?P<body>.*?)\n?```\s*\Z", re.DOTALL)
+LAST_COMPLETE_JSON_RECOVERY_PARSER = "strict_last_complete_top_level_json_v1"
 
 
-#This function parses the model response as JSON, allowing only a whole-response JSON code fence fallback.
-def parse_model_json(raw_text: str) -> Any:
+class IncompleteTrailingJsonObjectError(ValueError):
+    failure_reason = "incomplete_trailing_json_object"
+
+    def __init__(self, output_recovery: dict[str, Any]) -> None:
+        super().__init__(
+            "A new top-level JSON object starts after the last complete object but does not finish."
+        )
+        self.output_recovery = output_recovery
+
+
+#This function scans raw model text for complete top-level JSON objects in textual order.
+#Nested objects remain part of their enclosing candidate and are never returned separately.
+def extract_complete_top_level_json_objects(raw_text: str) -> tuple[list[dict[str, Any]], int | None]:
+    candidates: list[dict[str, Any]] = []
+    candidate_start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, character in enumerate(raw_text):
+        if candidate_start is None:
+            if character == "{":
+                candidate_start = index
+                depth = 1
+                in_string = False
+                escaped = False
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                candidate_end = index + 1
+                candidate_text = raw_text[candidate_start:candidate_end]
+                try:
+                    candidate_value = json.loads(candidate_text)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(candidate_value, dict):
+                        candidates.append(
+                            {
+                                "value": candidate_value,
+                                "start_char": candidate_start,
+                                "end_char": candidate_end,
+                            }
+                        )
+                candidate_start = None
+                in_string = False
+                escaped = False
+
+    return candidates, candidate_start
+
+
+#This function parses direct JSON or recovers the last complete top-level JSON object.
+def parse_model_json_with_recovery(raw_text: str) -> tuple[Any, dict[str, Any] | None]:
     try:
-        return json.loads(raw_text)
-    except json.JSONDecodeError:
-        match = FENCED_JSON_RE.match(raw_text)
-        if not match:
-            raise
-        return json.loads(match.group("body"))
+        return json.loads(raw_text), None
+    except json.JSONDecodeError as original_error:
+        candidates, incomplete_start = extract_complete_top_level_json_objects(raw_text)
+        if not candidates:
+            raise original_error
+
+        selected = candidates[-1]
+        recovery = {
+            "last_complete_top_level_json": {
+                "applied": True,
+                "parser": LAST_COMPLETE_JSON_RECOVERY_PARSER,
+                "complete_candidate_count": len(candidates),
+                "selected_candidate_ordinal": len(candidates),
+                "selected_start_char": selected["start_char"],
+                "selected_end_char": selected["end_char"],
+                "leading_non_json_text_present": bool(raw_text[: selected["start_char"]].strip()),
+                "trailing_non_json_text_present": bool(raw_text[selected["end_char"] :].strip()),
+                "trailing_incomplete_object_detected": False,
+            }
+        }
+        if incomplete_start is not None and incomplete_start >= selected["end_char"]:
+            recovery["last_complete_top_level_json"]["trailing_incomplete_object_detected"] = True
+            recovery["last_complete_top_level_json"]["incomplete_object_start_char"] = incomplete_start
+            raise IncompleteTrailingJsonObjectError(recovery)
+        return selected["value"], recovery
+
+
+#This compatibility wrapper returns only the selected JSON value.
+def parse_model_json(raw_text: str) -> Any:
+    parsed_output, _ = parse_model_json_with_recovery(raw_text)
+    return parsed_output
 
 
 #This function builds a lookup for editable regions declared by Step 16.
@@ -668,6 +759,15 @@ def expand_compact_header_edits(
     normalized_region_id_alias_count = 0
     normalized_redundant_region_id_field_count = 0
     normalized_numeric_string_count = 0
+    existing_header_patch_targets = {
+        (str(patch.get("packet_id")), str(patch.get("region_id")))
+        for patch in patches
+        if isinstance(patch, dict)
+        and patch.get("operation") == "replace_uint"
+        and patch.get("packet_id") is not None
+        and patch.get("region_id") is not None
+    }
+    seen_header_edit_targets: dict[tuple[str, str], int] = {}
 
     def current_normalization() -> dict[str, Any]:
         return build_header_output_normalization(
@@ -795,6 +895,17 @@ def expand_compact_header_edits(
             }, current_normalization()
         region = matching_regions[0]
         region_id = str(region["region_id"])
+        target_identity = (packet_id_text, region_id)
+        if target_identity in existing_header_patch_targets or target_identity in seen_header_edit_targets:
+            return {
+                "accepted": False,
+                "reason": "duplicate_header_edit_target",
+                "header_edit_index": edit_index,
+                "first_header_edit_index": seen_header_edit_targets.get(target_identity),
+                "packet_id": packet_id_text,
+                "region_id": region_id,
+            }, current_normalization()
+        seen_header_edit_targets[target_identity] = edit_index
         canonical_field = region.get("field")
         if not isinstance(canonical_field, str):
             return {
@@ -1131,6 +1242,7 @@ def build_run_metadata(
         "runtime_seconds": runtime_seconds,
         "output_paths": output_paths,
         "validation_result": validation_result,
+        "output_recovery": validation_result.get("output_recovery") if validation_result else None,
         "output_normalization": validation_result.get("output_normalization") if validation_result else None,
         "output_decision": validation_result.get("output_decision") if validation_result else None,
         "abstention_present": validation_result.get("abstention_present") if validation_result else None,
@@ -1368,8 +1480,10 @@ def run_single_prompt(
             "stream_expected_packet_ids": progress_state["total_packet_count"],
         }
 
-        parsed_output = parse_model_json(raw_text)
+        parsed_output, output_recovery = parse_model_json_with_recovery(raw_text)
         validation_result = validate_patch_output(parsed_output, prompt_package)
+        if output_recovery is not None:
+            validation_result["output_recovery"] = output_recovery
         if validation_result["accepted"]:
             write_json(parsed_path, parsed_output)
             output_paths["parsed"] = str(parsed_path)
@@ -1394,7 +1508,14 @@ def run_single_prompt(
             )
 
     except Exception as error:
-        failure_reason = type(error).__name__
+        failure_reason = getattr(error, "failure_reason", type(error).__name__)
+        error_output_recovery = getattr(error, "output_recovery", None)
+        if error_output_recovery is not None:
+            validation_result = {
+                "accepted": False,
+                "reason": failure_reason,
+                "output_recovery": error_output_recovery,
+            }
         failure_report = {
             "failure_reason": failure_reason,
             "failure_message": str(error),
@@ -1403,6 +1524,8 @@ def run_single_prompt(
             "prompt_file": str(prompt_path),
             "model_name": model_name,
         }
+        if validation_result is not None:
+            failure_report["validation_result"] = validation_result
         output_paths.update(
             write_failure_outputs(
                 output_dirs=output_dirs,
@@ -1493,8 +1616,10 @@ def write_generated_prompt_outputs(
     try:
         write_text(context["raw_path"], raw_text)
         output_paths["raw"] = str(context["raw_path"])
-        parsed_output = parse_model_json(raw_text)
+        parsed_output, output_recovery = parse_model_json_with_recovery(raw_text)
         validation_result = validate_patch_output(parsed_output, prompt_package)
+        if output_recovery is not None:
+            validation_result["output_recovery"] = output_recovery
         if validation_result["accepted"]:
             write_json(context["parsed_path"], parsed_output)
             output_paths["parsed"] = str(context["parsed_path"])
@@ -1518,7 +1643,14 @@ def write_generated_prompt_outputs(
                 )
             )
     except Exception as error:
-        failure_reason = type(error).__name__
+        failure_reason = getattr(error, "failure_reason", type(error).__name__)
+        error_output_recovery = getattr(error, "output_recovery", None)
+        if error_output_recovery is not None:
+            validation_result = {
+                "accepted": False,
+                "reason": failure_reason,
+                "output_recovery": error_output_recovery,
+            }
         failure_report = {
             "failure_reason": failure_reason,
             "failure_message": str(error),
@@ -1527,6 +1659,8 @@ def write_generated_prompt_outputs(
             "prompt_file": str(prompt_path),
             "model_name": model_name,
         }
+        if validation_result is not None:
+            failure_report["validation_result"] = validation_result
         output_paths.update(
             write_failure_outputs(
                 output_dirs=output_dirs,

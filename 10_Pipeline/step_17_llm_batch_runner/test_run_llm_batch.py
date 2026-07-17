@@ -226,14 +226,81 @@ class ModelJsonParsingTest(unittest.TestCase):
         self.assertEqual(parsed["schema_version"], "patch_output_v1")
         self.assertEqual(parsed["header_edits"], [])
 
-    def test_fenced_json_with_extra_text_is_rejected(self) -> None:
+    def test_fenced_json_with_extra_text_recovers_last_complete_object(self) -> None:
         raw_text = """Here is the JSON:
 ```json
 {"schema_version": "patch_output_v1"}
 ```"""
 
+        parsed, recovery = run_llm_batch.parse_model_json_with_recovery(raw_text)
+
+        self.assertEqual(parsed["schema_version"], "patch_output_v1")
+        details = recovery["last_complete_top_level_json"]
+        self.assertEqual(details["complete_candidate_count"], 1)
+        self.assertEqual(details["selected_candidate_ordinal"], 1)
+        self.assertTrue(details["leading_non_json_text_present"])
+        self.assertTrue(details["trailing_non_json_text_present"])
+
+    def test_last_complete_top_level_object_wins_even_when_edits_differ(self) -> None:
+        raw_text = """Draft:
+{"schema_version":"patch_output_v1","header_edits":[["packet_000001","ipv4.ttl",63]]}
+Final:
+{"schema_version":"patch_output_v1","header_edits":[["packet_000001","ipv4.ttl",128]]}
+"""
+
+        parsed, recovery = run_llm_batch.parse_model_json_with_recovery(raw_text)
+
+        self.assertEqual(parsed["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+        self.assertEqual(recovery["last_complete_top_level_json"]["complete_candidate_count"], 2)
+        self.assertEqual(recovery["last_complete_top_level_json"]["selected_candidate_ordinal"], 2)
+
+    def test_nested_objects_are_not_counted_as_top_level_candidates(self) -> None:
+        raw_text = """Explanation before.
+{"schema_version":"patch_output_v1","nested":{"value":1},"header_edits":[]}
+Explanation after.
+"""
+
+        parsed, recovery = run_llm_batch.parse_model_json_with_recovery(raw_text)
+
+        self.assertEqual(parsed["nested"], {"value": 1})
+        self.assertEqual(recovery["last_complete_top_level_json"]["complete_candidate_count"], 1)
+
+    def test_invalid_last_complete_object_is_not_replaced_by_earlier_valid_object(self) -> None:
+        valid_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [],
+        }
+        invalid_final_output = {"header_edits": []}
+        raw_text = f"{json.dumps(valid_output)}\nCorrection:\n{json.dumps(invalid_final_output)}"
+
+        parsed, recovery = run_llm_batch.parse_model_json_with_recovery(raw_text)
+        validation = run_llm_batch.validate_patch_output(parsed, build_header_prompt_package())
+
+        self.assertEqual(recovery["last_complete_top_level_json"]["selected_candidate_ordinal"], 2)
+        self.assertFalse(validation["accepted"])
+        self.assertEqual(validation["reason"], "invalid_patch_schema_version")
+
+    def test_complete_object_followed_by_truncated_object_is_rejected_as_ambiguous(self) -> None:
+        complete_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [],
+        }
+        raw_text = f"{json.dumps(complete_output)}\nCorrection:\n{{\"schema_version\":\"patch_output_v1\""
+
+        with self.assertRaises(run_llm_batch.IncompleteTrailingJsonObjectError) as raised:
+            run_llm_batch.parse_model_json_with_recovery(raw_text)
+
+        details = raised.exception.output_recovery["last_complete_top_level_json"]
+        self.assertTrue(details["trailing_incomplete_object_detected"])
+        self.assertEqual(details["complete_candidate_count"], 1)
+
+    def test_single_truncated_object_remains_json_decode_error(self) -> None:
         with self.assertRaises(json.JSONDecodeError):
-            run_llm_batch.parse_model_json(raw_text)
+            run_llm_batch.parse_model_json_with_recovery('{"schema_version":"patch_output_v1"')
 
 
 #This test case covers Step 17 patch-output validation against prompt traceability.
@@ -897,6 +964,40 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertFalse(result["accepted"])
         self.assertEqual(result["reason"], "replacement_uint_below_min")
 
+    def test_compact_header_edits_reject_repeated_target_with_same_value(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [
+                ["packet_000001", "ipv4.ttl", 128],
+                ["packet_000001", "ipv4.ttl", 128],
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "duplicate_header_edit_target")
+        self.assertEqual(result["header_edit_index"], 2)
+        self.assertEqual(result["first_header_edit_index"], 1)
+
+    def test_compact_header_edits_reject_repeated_target_with_different_value(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_header_001",
+            "header_edits": [
+                ["packet_000001", "ipv4.ttl", 63],
+                ["packet_000001", "ipv4.ttl", 128],
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "duplicate_header_edit_target")
+
 
 #This backend records generation calls and returns contract-valid empty header edits.
 class SyntheticLlm:
@@ -946,6 +1047,29 @@ class SyntheticLlm:
         return outputs
 
 
+#This backend returns caller-provided raw text for parser-recovery integration tests.
+class StaticRawSyntheticLlm(SyntheticLlm):
+    def __init__(self, token_counts: dict[str, int], raw_outputs: dict[str, str]) -> None:
+        super().__init__(token_counts)
+        self.raw_outputs = raw_outputs
+
+    def create_chat_completion(self, *, messages: list[dict], **_kwargs: object):
+        self.single_generation_calls += 1
+        prompt_unit_id = str(messages[0]["content"])
+        return iter([{"choices": [{"delta": {"content": self.raw_outputs[prompt_unit_id]}}]}])
+
+    def create_chat_completions_batch(
+        self,
+        *,
+        messages_batch: list[list[dict]],
+        generation_params_batch: list[dict],
+    ) -> list[str]:
+        prompt_unit_ids = [str(messages[0]["content"]) for messages in messages_batch]
+        self.batch_generation_calls.append(prompt_unit_ids)
+        self.batch_max_tokens.append([int(params["max_tokens"]) for params in generation_params_batch])
+        return [self.raw_outputs[prompt_unit_id] for prompt_unit_id in prompt_unit_ids]
+
+
 def build_runtime_generation_params(runtime_max_model_len: int) -> dict:
     return {
         "temperature": 0.0,
@@ -989,6 +1113,138 @@ def build_runtime_prompt(
 
 #This test case covers direct runtime consumption of compact_patch_token_budget_v2.
 class TokenPlanRuntimeTest(unittest.TestCase):
+    def test_last_complete_json_recovery_is_recorded_in_single_and_batch_modes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_outputs = {}
+            for prompt_unit_id in ["single_recovery", "batch_recovery"]:
+                draft = {
+                    "schema_version": "patch_output_v1",
+                    "parent_group_id": "parent_001",
+                    "prompt_unit_id": prompt_unit_id,
+                    "header_edits": [["packet_000001", "ipv4.ttl", 63]],
+                }
+                final = {
+                    "schema_version": "patch_output_v1",
+                    "parent_group_id": "parent_001",
+                    "prompt_unit_id": prompt_unit_id,
+                    "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+                }
+                raw_outputs[prompt_unit_id] = f"Draft:\n{json.dumps(draft)}\nFinal:\n{json.dumps(final)}"
+            llm = StaticRawSyntheticLlm(
+                {"single_recovery": 10, "batch_recovery": 10},
+                raw_outputs,
+            )
+
+            single_prompt_path = root / "single_recovery.prompt.json"
+            single_prompt_path.write_text(
+                json.dumps(build_runtime_prompt("single_recovery", planned_output_tokens=20)),
+                encoding="utf-8",
+            )
+            single_dirs = run_llm_batch.prepare_model_output_dirs(root / "single_outputs", "synthetic", "run")
+            single_metadata = run_llm_batch.run_single_prompt(
+                llm=llm,
+                prompt_path=single_prompt_path,
+                model_path=Path("synthetic"),
+                model_name="synthetic",
+                output_dirs=single_dirs,
+                generation_params=build_runtime_generation_params(100),
+                heartbeat_seconds=0,
+                prompt_index=1,
+                total_prompts=1,
+            )
+
+            self.assertEqual(single_metadata["status"], "accepted")
+            self.assertEqual(
+                single_metadata["output_recovery"]["last_complete_top_level_json"]["selected_candidate_ordinal"],
+                2,
+            )
+            single_parsed = json.loads(Path(single_metadata["output_paths"]["parsed"]).read_text(encoding="utf-8"))
+            self.assertEqual(single_parsed["header_edits"], [["packet_000001", "ipv4.ttl", 128]])
+
+            batch_prompt_path = root / "batch_recovery.prompt.json"
+            batch_prompt_path.write_text(
+                json.dumps(build_runtime_prompt("batch_recovery", planned_output_tokens=20)),
+                encoding="utf-8",
+            )
+            with patch.object(run_llm_batch, "load_model", return_value=llm):
+                run_llm_batch.run_model_batch(
+                    model_path=Path("synthetic"),
+                    prompt_paths=[batch_prompt_path],
+                    output_root=root / "batch_outputs",
+                    run_id="run",
+                    generation_params=build_runtime_generation_params(100),
+                    progress_every=0,
+                    heartbeat_seconds=0,
+                    llm_batch_size=2,
+                )
+            batch_metadata = json.loads(
+                (root / "batch_outputs" / "synthetic" / "run" / "metadata" / "batch_recovery.metadata.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(batch_metadata["status"], "accepted")
+            self.assertEqual(
+                batch_metadata["output_recovery"]["last_complete_top_level_json"]["selected_candidate_ordinal"],
+                2,
+            )
+
+    def test_reparser_uses_last_complete_json_and_records_recovery(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / "run"
+            for directory_name in ["raw", "parsed", "metadata", "failures"]:
+                (run_dir / directory_name).mkdir(parents=True, exist_ok=True)
+            prompt_path = root / "reparse_recovery.prompt.json"
+            prompt_path.write_text(
+                json.dumps(build_runtime_prompt("reparse_recovery", planned_output_tokens=20)),
+                encoding="utf-8",
+            )
+            draft = {
+                "schema_version": "patch_output_v1",
+                "parent_group_id": "parent_001",
+                "prompt_unit_id": "reparse_recovery",
+                "header_edits": [["packet_000001", "ipv4.ttl", 63]],
+            }
+            final = {
+                "schema_version": "patch_output_v1",
+                "parent_group_id": "parent_001",
+                "prompt_unit_id": "reparse_recovery",
+                "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+            }
+            raw_path = run_dir / "raw" / "reparse_recovery.raw.txt"
+            raw_path.write_text(f"Draft:\n{json.dumps(draft)}\nFinal:\n{json.dumps(final)}", encoding="utf-8")
+            metadata_path = run_dir / "metadata" / "reparse_recovery.metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "failure_reason": "JSONDecodeError",
+                        "prompt_file": str(prompt_path),
+                        "parent_group_id": "parent_001",
+                        "prompt_unit_id": "reparse_recovery",
+                        "model_name": "synthetic",
+                        "output_paths": {"raw": str(raw_path), "metadata": str(metadata_path)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = reparse_llm_outputs.reparse_one_raw_output(
+                raw_path=raw_path,
+                run_dir=run_dir,
+                prompt_dirs=[root],
+                write=True,
+            )
+
+            self.assertEqual(result["new_status"], "accepted")
+            self.assertEqual(
+                result["output_recovery"]["last_complete_top_level_json"]["selected_candidate_ordinal"],
+                2,
+            )
+            updated_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated_metadata["status"], "accepted")
+            self.assertEqual(updated_metadata["reparse"]["parser"], "step17_current_parser_v2")
+
     def test_conscious_abstention_is_recorded_in_single_and_batch_modes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
