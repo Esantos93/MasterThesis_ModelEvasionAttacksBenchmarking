@@ -35,11 +35,10 @@ SMOKE_PROMPTS_QWEN32=64
 # Continue with later enabled models when one run fails.
 CONTINUE_ON_ERROR=1
 
-# Shared runtime controls.
+# Shared runtime controls. Each model's runtime context is read from its config.
 STEP17_BACKEND="vllm"
 VLLM_DTYPE="auto"
 VLLM_GPU_MEMORY_UTILIZATION="0.9"
-RUNTIME_MAX_MODEL_LEN=12288
 TRUST_REMOTE_CODE=0
 COMPRESS_STEP16=1
 COMPRESS_STEP17=1
@@ -189,7 +188,7 @@ preflight_model() {
 run_model() {
   local model_key="$1"
   local label experiment_id config_name model_path batch_size disable_thinking
-  local config_path group_dir run_id prompt_dir prompt_limit exit_code
+  local config_path group_dir run_id prompt_dir prompt_limit runtime_max_model_len exit_code
 
   label="$(model_value "${model_key}" label)"
   experiment_id="$(model_value "${model_key}" experiment_id)"
@@ -198,6 +197,17 @@ run_model() {
   batch_size="$(model_value "${model_key}" batch_size)"
   disable_thinking="$(model_value "${model_key}" disable_thinking)"
   config_path="${CONFIG_ROOT}/${config_name}"
+  runtime_max_model_len="$(python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+value = config.get("llm", {}).get("runtime_max_model_len")
+if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    raise SystemExit("llm.runtime_max_model_len must be a positive integer")
+print(value)
+' "${config_path}")"
   group_dir="${CLOUD_ROOT}/01_InputFiles/${experiment_id}/05_groups/${GROUPING_LABEL}"
   run_id="run_$(date -u +%Y%m%d_%H%M%S)_${RUN_LABEL}_${model_key}_${RUN_MODE}"
   prompt_dir="${CLOUD_ROOT}/02_OutputFiles/${experiment_id}/06_prompts/${GROUPING_LABEL}/${run_id}"
@@ -215,6 +225,7 @@ run_model() {
   echo "Mode: ${RUN_MODE}"
   echo "Prompt limit: ${prompt_limit:-<full population>}"
   echo "Batch size: ${batch_size}"
+  echo "Runtime max model len: ${runtime_max_model_len} (from config)"
   echo "Started at: $(date --iso-8601=seconds)"
   echo "================================================================"
 
@@ -233,7 +244,7 @@ run_model() {
   LIMIT_PROMPTS_S17="${prompt_limit}" \
   VLLM_DTYPE="${VLLM_DTYPE}" \
   VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION}" \
-  RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN}" \
+  RUNTIME_MAX_MODEL_LEN="${runtime_max_model_len}" \
   TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE}" \
   DISABLE_THINKING="${disable_thinking}" \
   COMPRESS_STEP16="${COMPRESS_STEP16}" \

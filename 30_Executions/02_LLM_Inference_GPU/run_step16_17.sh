@@ -39,7 +39,19 @@ STEP17_BACKEND="${STEP17_BACKEND:-vllm}"
 BATCH_SIZE="${BATCH_SIZE:-168}"
 LIMIT_PROMPTS_S16="${LIMIT_PROMPTS_S16:-}"
 LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-}"
-RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN:-12288}"
+if [[ -z "${RUNTIME_MAX_MODEL_LEN:-}" ]]; then
+  RUNTIME_MAX_MODEL_LEN="$(python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+value = config.get("llm", {}).get("runtime_max_model_len")
+if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    raise SystemExit("llm.runtime_max_model_len must be a positive integer")
+print(value)
+' "${CONFIG_PATH}")"
+fi
 if [[ -n "${EXPECTED_OUTPUT_PATCH_TOKENS:-}" ]]; then
   echo "EXPECTED_OUTPUT_PATCH_TOKENS is obsolete. Step 17 uses each prompt unit's token_plan.planned_output_tokens."
   exit 1
