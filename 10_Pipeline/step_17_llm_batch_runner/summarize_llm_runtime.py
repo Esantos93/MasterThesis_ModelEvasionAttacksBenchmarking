@@ -685,7 +685,7 @@ def summarize_run(
     abstention_reason_counts = Counter(
         str(row.get("abstention_reason"))
         for row in rows
-        if row.get("abstention_present")
+        if row.get("abstention_present") and row.get("abstention_reason") is not None
     )
     llm_rows = [
         row

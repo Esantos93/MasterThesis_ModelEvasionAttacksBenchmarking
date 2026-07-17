@@ -377,6 +377,7 @@ class AbstentionValidationTest(unittest.TestCase):
             metadata_dir.mkdir()
             decisions = [
                 ("edits_proposed", False, None, False),
+                ("edits_proposed", True, None, False),
                 ("empty_no_op", False, None, False),
                 ("conscious_abstention", True, "no_useful_header_edit", True),
                 ("unknown_abstention_no_op", True, "cannot_decide", False),
@@ -415,6 +416,7 @@ class AbstentionValidationTest(unittest.TestCase):
             self.assertEqual(summary["counts"]["by_output_decision"]["unknown_abstention_no_op"], 1)
             self.assertEqual(summary["counts"]["by_abstention_reason"]["no_useful_header_edit"], 1)
             self.assertEqual(summary["counts"]["by_abstention_reason"]["cannot_decide"], 1)
+            self.assertNotIn("None", summary["counts"]["by_abstention_reason"])
 
 
 class CanonicalRegionPatchValidationTest(unittest.TestCase):
