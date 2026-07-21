@@ -52,7 +52,7 @@
     "prompt_instructions_profile": "prompt_engineering_instructions_profile_v1",
     "temperature": 0.0,
     "top_p": 0.95,
-    "prompt_target_context": 4096,
+    "prompt_target_context": 6144,
     "prompt_template_overhead_tokens": 500,
     "runtime_max_model_len": 12288,
     "token_budget": {
