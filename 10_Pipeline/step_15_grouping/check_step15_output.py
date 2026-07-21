@@ -20,6 +20,7 @@ HEADER_ONLY_STRATEGY = "header_only_strategy_v1"
 HEADER_ONLY_MANIFEST_SCHEMA = "compact_modification_units_manifest_v2"
 HEADER_ONLY_UNIT_SCHEMA = "compact_modification_unit_v2"
 PACKET_JSON_SCHEMA = "packet_json_v4"
+PARENT_GROUP_INDEX_REPRESENTATION = "deduplicated_parent_group_index_v1"
 PROMPT_ENGINEERING_INPUT_PROFILE = "prompt_engineering_input_profile_v1"
 BASELINE_INPUT_PROFILE = "baseline_input_profile_v1"
 IDS_MANIFEST_FIELDS = {
@@ -158,6 +159,50 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     if not expected_header_fields:
         raise ValueError("Header-only manifest must record expected_editable_header_fields.")
 
+    if metadata.get("parent_group_index_representation") != PARENT_GROUP_INDEX_REPRESENTATION:
+        raise ValueError("Step 15 manifest does not declare the deduplicated Parent Group index.")
+    parent_group_entries = manifest.get("parent_groups")
+    if not isinstance(parent_group_entries, list):
+        raise ValueError("Step 15 manifest lacks the parent_groups index.")
+    if len(parent_group_entries) != int(metadata.get("parent_group_count") or -1):
+        raise ValueError("Parent Group index count does not match metadata.parent_group_count.")
+
+    parent_groups_by_id: dict[str, dict[str, Any]] = {}
+    parent_packet_owners: dict[str, str] = {}
+    for parent_entry in parent_group_entries:
+        if not isinstance(parent_entry, dict):
+            raise ValueError("Every parent_groups entry must be an object.")
+        parent_group_id = str(parent_entry.get("parent_group_id", ""))
+        if not parent_group_id or parent_group_id in parent_groups_by_id:
+            raise ValueError(f"Duplicate or missing Parent Group id in index: {parent_group_id!r}.")
+        if parent_entry.get("grouping_policy") != metadata.get("grouping_policy"):
+            raise ValueError(f"Parent Group {parent_group_id!r} has the wrong grouping_policy.")
+        packet_ids = parent_entry.get("physical_packet_ids")
+        if not isinstance(packet_ids, list):
+            raise ValueError(f"Parent Group {parent_group_id!r} lacks physical_packet_ids.")
+        normalized_packet_ids = [str(packet_id) for packet_id in packet_ids]
+        if len(normalized_packet_ids) != int(parent_entry.get("physical_packet_count") or 0):
+            raise ValueError(f"Parent Group {parent_group_id!r} packet count is inconsistent.")
+        if len(normalized_packet_ids) != len(set(normalized_packet_ids)):
+            raise ValueError(f"Parent Group {parent_group_id!r} contains duplicate packet ids.")
+        for packet_id in normalized_packet_ids:
+            previous_owner = parent_packet_owners.get(packet_id)
+            if previous_owner is not None:
+                raise ValueError(
+                    f"Packet {packet_id!r} belongs to Parent Groups {previous_owner!r} and {parent_group_id!r}."
+                )
+            parent_packet_owners[packet_id] = parent_group_id
+        if metadata.get("grouping_policy") == "flow_context_aware":
+            flow_summary = parent_entry.get("parent_flow_summary")
+            if not isinstance(flow_summary, dict):
+                raise ValueError(f"Flow Parent Group {parent_group_id!r} lacks parent_flow_summary.")
+            if parent_entry.get("tcp_connection_id") != flow_summary.get("tcp_connection_id"):
+                raise ValueError(f"Flow Parent Group {parent_group_id!r} has inconsistent TCP identity.")
+        parent_groups_by_id[parent_group_id] = parent_entry
+
+    if len(parent_packet_owners) != int(metadata.get("total_packet_count") or -1):
+        raise ValueError("Parent Group index does not cover metadata.total_packet_count exactly once.")
+
     input_profile = metadata.get("token_budget_config", {}).get("prompt_input_profile")
     ids_aware = input_profile == PROMPT_ENGINEERING_INPUT_PROFILE
     if input_profile not in {BASELINE_INPUT_PROFILE, PROMPT_ENGINEERING_INPUT_PROFILE}:
@@ -197,6 +242,7 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     flow_fragments_by_parent: dict[str, list[tuple[dict[str, Any], dict[str, Any], int]]] = {}
     token_plan_policy_counts: Counter[str] = Counter()
     token_plan_overflow_count = 0
+    unit_packet_ids_by_parent: dict[str, list[str]] = {parent_group_id: [] for parent_group_id in parent_groups_by_id}
     ids_context_units_with_records = 0
     ids_context_units_without_records = 0
     ids_context_total_records = 0
@@ -207,6 +253,26 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         unit_schema_counts[str(unit.get("schema_version"))] += 1
         if unit.get("schema_version") != HEADER_ONLY_UNIT_SCHEMA:
             raise ValueError(f"Unit {unit_path} has wrong schema {unit.get('schema_version')!r}.")
+        parent_group_id = str(unit.get("parent_group_id", ""))
+        parent_entry = parent_groups_by_id.get(parent_group_id)
+        if parent_entry is None:
+            raise ValueError(f"Unit {unit_path} references unknown Parent Group {parent_group_id!r}.")
+        group_metadata = unit.get("group_metadata")
+        if not isinstance(group_metadata, dict):
+            raise ValueError(f"Unit {unit_path} lacks group_metadata.")
+        if "physical_packet_ids" in group_metadata:
+            raise ValueError(f"Unit {unit_path} replicates Parent Group physical_packet_ids.")
+        for field in [
+            "parent_group_id",
+            "grouping_policy",
+            "physical_packet_count",
+            "first_reduced_packet_index",
+            "last_reduced_packet_index",
+        ]:
+            if group_metadata.get(field) != parent_entry.get(field):
+                raise ValueError(
+                    f"Unit {unit_path} group_metadata.{field} does not match its Parent Group index entry."
+                )
         retired_v1_fields = {
             "packets",
             "canonical_region_ids",
@@ -281,7 +347,6 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
                 raise ValueError(f"Flow context in {unit_path} lacks fields: {missing_flow_fields}")
             if flow_context["flow_id"] != flow_context["tcp_connection_id"]:
                 raise ValueError(f"Flow context in {unit_path} does not use tcp_connection_id as flow_id.")
-            parent_group_id = str(unit.get("parent_group_id"))
             if compact_context.get("parent_group_id") != parent_group_id:
                 raise ValueError(f"Compact-unit context in {unit_path} has the wrong parent_group_id.")
             flow_fragments_by_parent.setdefault(parent_group_id, []).append(
@@ -291,6 +356,16 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         for physical_packet in unit.get("physical_packets", []):
             packet_id = str(physical_packet.get("packet_id"))
             physical_packet_ids.append(packet_id)
+            unit_packet_ids_by_parent[parent_group_id].append(packet_id)
+            if parent_packet_owners.get(packet_id) != parent_group_id:
+                raise ValueError(
+                    f"Unit packet {packet_id!r} does not belong to Parent Group {parent_group_id!r}."
+                )
+            if metadata.get("grouping_policy") == "flow_context_aware":
+                if str(physical_packet.get("tcp_connection_id")) != str(parent_entry.get("tcp_connection_id")):
+                    raise ValueError(
+                        f"Unit packet {packet_id!r} has the wrong tcp_connection_id for {parent_group_id!r}."
+                    )
             for region in physical_packet.get("header_field_classifications", []):
                 if region.get("identity_type") != "physical_header_region":
                     raise ValueError(f"Unexpected region identity in {unit_path}: {region.get('identity_type')!r}")
@@ -315,6 +390,12 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
     duplicate_packets = [packet_id for packet_id, count in Counter(physical_packet_ids).items() if count > 1]
     if duplicate_packets:
         raise ValueError(f"Physical packets appear in more than one header-only unit: {duplicate_packets[:10]}")
+    for parent_group_id, parent_entry in parent_groups_by_id.items():
+        expected_packet_ids = [str(packet_id) for packet_id in parent_entry["physical_packet_ids"]]
+        if unit_packet_ids_by_parent[parent_group_id] != expected_packet_ids:
+            raise ValueError(
+                f"Compact Units do not preserve the exact packet identity/order of Parent Group {parent_group_id!r}."
+            )
     if token_plan_overflow_count:
         raise ValueError(f"Header-only output contains {token_plan_overflow_count} over-budget compact units.")
 
@@ -357,6 +438,8 @@ def check_header_only_units(manifest: dict[str, Any], manifest_path: Path) -> di
         "region_type_counts": dict(sorted(region_type_counts.items())),
         "field_counts": dict(sorted(field_counts.items())),
         "physical_packet_units_covered": len(physical_packet_ids),
+        "parent_group_index_count": len(parent_groups_by_id),
+        "parent_group_index_packet_count": len(parent_packet_owners),
         "flow_context_parent_count": len(flow_fragments_by_parent),
         "flow_context_fragment_count": sum(len(fragments) for fragments in flow_fragments_by_parent.values()),
         "token_plan_policy_counts": dict(sorted(token_plan_policy_counts.items())),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -12,11 +13,16 @@ from common.prompt_projection import (
     load_prompt_instructions_profile_from_config,
 )
 from common.ids_context import IDS_CONTEXT_SCHEMA_VERSION
+from common.token_budget import build_compact_patch_token_plan
 from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
 from step_15_grouping.check_step15_output import check_header_only_units
 from step_15_grouping.group_packets import run_grouping
 from step_15_grouping.ids_context_mapping import load_ids_context_mapping
+from step_16_prompt_builder.build_prompts import (
+    build_compact_patch_messages,
+    prepare_prompt_source_unit,
+)
 
 
 # This helper creates the minimum packet record needed by the real Step 14 TCP canonicalizer.
@@ -329,6 +335,12 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertEqual(6, manifest["metadata"]["group_size_packets"])
         self.assertEqual(7, manifest["metadata"]["physical_parent_group_coverage"]["covered_physical_packet_count"])
         self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        self.assertEqual("deduplicated_parent_group_index_v1", manifest["metadata"]["parent_group_index_representation"])
+        self.assertEqual(2, len(manifest["parent_groups"]))
+        self.assertEqual(
+            [record["packet_id"] for record in records[:6]],
+            manifest["parent_groups"][0]["physical_packet_ids"],
+        )
         self.assertEqual(2, manifest["metadata"]["modification_unit_count"])
         self.assertEqual(
             ["ipv4.tos", "ipv4.ttl", "tcp.window"],
@@ -336,6 +348,7 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
         self.assertTrue(all(unit["schema_version"] == "compact_modification_unit_v2" for unit in units))
         self.assertTrue(all(unit["header_only"] for unit in units))
+        self.assertTrue(all("physical_packet_ids" not in unit["group_metadata"] for unit in units))
         retired_v1_fields = {
             "packets",
             "canonical_region_ids",
@@ -443,6 +456,12 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         connection_ids = {connection["tcp_connection_id"] for connection in source["tcp_connections"]}
         self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        self.assertEqual(2, len(manifest["parent_groups"]))
+        self.assertEqual(
+            connection_ids,
+            {parent["tcp_connection_id"] for parent in manifest["parent_groups"]},
+        )
+        self.assertTrue(all("parent_flow_summary" in parent for parent in manifest["parent_groups"]))
         self.assertEqual(2, len(units))
         self.assertEqual("compact_patch_token_budget_v2", manifest["metadata"]["token_budget_policy"])
         self.assertEqual("flow_context_aware", manifest["metadata"]["grouping_policy"])
@@ -463,6 +482,7 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertTrue(all("flow_context" not in unit for unit in units))
         self.assertTrue(all("assigned_flow_ids" not in unit for unit in units))
         self.assertTrue(all("candidate_flow_ids" not in unit for unit in units))
+        self.assertTrue(all("physical_packet_ids" not in unit["group_metadata"] for unit in units))
         self.assertTrue(all(unit["token_plan"]["policy"] == "compact_patch_token_budget_v2" for unit in units))
         self.assertTrue(all(unit["token_plan"]["planned_output_tokens"] > 0 for unit in units))
         self.assertTrue(all(unit["token_plan"]["overflow_tokens"] == 0 for unit in units))
@@ -488,6 +508,95 @@ class CanonicalStep15Tests(unittest.TestCase):
             sorted(covered_packet_ids),
         )
         self.assertEqual(len(covered_packet_ids), len(set(covered_packet_ids)))
+
+    def test_deduplicated_parent_index_preserves_prompt_text_and_token_plan(self) -> None:
+        records = [tcp_record(packet_number, 1000 + packet_number * 10, b"payload") for packet_number in range(1, 9)]
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = enable_ids_context(config(root, "flow_context_aware"))
+            active_config["llm"]["prompt_target_context"] = 2200
+            write_pre_bundle(
+                root,
+                active_config,
+                pre_bundle([pre_alert("alert", ["packet_000001"])]),
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+
+        parent_packet_ids = manifest["parent_groups"][0]["physical_packet_ids"]
+        current_unit = units[0]
+        legacy_unit = copy.deepcopy(current_unit)
+        legacy_unit["group_metadata"]["physical_packet_ids"] = list(parent_packet_ids)
+
+        current_prompt_source = prepare_prompt_source_unit(current_unit)
+        legacy_prompt_source = prepare_prompt_source_unit(legacy_unit)
+        current_messages, current_template = build_compact_patch_messages(
+            config=active_config,
+            prompt_unit=current_prompt_source,
+        )
+        legacy_messages, legacy_template = build_compact_patch_messages(
+            config=active_config,
+            prompt_unit=legacy_prompt_source,
+        )
+        self.assertEqual(current_messages, legacy_messages)
+        self.assertEqual(current_template, legacy_template)
+
+        prompt_input_structure = load_prompt_input_json_data_structure_from_config(active_config)
+        _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
+        legacy_plan = build_compact_patch_token_plan(
+            prompt_unit=legacy_unit,
+            prompt_input_structure=prompt_input_structure,
+            instruction_lines=instruction_lines,
+            prompt_target_context=int(current_unit["token_plan"]["prompt_target_context"]),
+            runtime_max_model_len=int(current_unit["token_plan"]["runtime_max_model_len"]),
+            chars_per_token_estimate=float(current_unit["token_plan"]["chars_per_token_estimate"]),
+            output_token_estimation_safety_factor=float(
+                current_unit["token_plan"]["output_token_estimation_safety_factor"]
+            ),
+        )
+        for field in [
+            "estimated_input_tokens",
+            "planned_output_tokens",
+            "total_planned_tokens",
+            "overflow_tokens",
+        ]:
+            self.assertEqual(current_unit["token_plan"][field], legacy_plan[field])
+
+    def test_large_parent_group_index_materially_reduces_serialized_size(self) -> None:
+        records = [
+            tcp_record(packet_number, 1000 + packet_number * 10, b"payload")
+            for packet_number in range(1, 301)
+        ]
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(root, "flow_context_aware")
+            active_config["llm"]["prompt_target_context"] = 1300
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(1, len(manifest["parent_groups"]))
+        parent = manifest["parent_groups"][0]
+        expected_packet_ids = [record["packet_id"] for record in records]
+        self.assertEqual(expected_packet_ids, parent["physical_packet_ids"])
+        self.assertGreater(len(units), 100)
+        self.assertTrue(all("physical_packet_ids" not in unit["group_metadata"] for unit in units))
+        self.assertEqual(
+            expected_packet_ids,
+            [packet["packet_id"] for unit in units for packet in unit["physical_packets"]],
+        )
+
+        compact = {"separators": (",", ":"), "sort_keys": True}
+        deduplicated_size = sum(len(json.dumps(unit, **compact)) for unit in units)
+        deduplicated_size += len(json.dumps(manifest["parent_groups"], **compact))
+        legacy_units = []
+        for unit in units:
+            legacy_unit = copy.deepcopy(unit)
+            legacy_unit["group_metadata"]["physical_packet_ids"] = list(expected_packet_ids)
+            legacy_units.append(legacy_unit)
+        replicated_size = sum(len(json.dumps(unit, **compact)) for unit in legacy_units)
+        self.assertLess(deduplicated_size, replicated_size * 0.75)
 
     def test_flow_context_aware_splits_large_flow_into_budgeted_fragments(self) -> None:
         records = [tcp_record(packet_number, 1000 + packet_number * 10, b"payload") for packet_number in range(1, 21)]

@@ -45,6 +45,7 @@ HEADERS_FULL_CLASSIFICATION_RECORD_SCHEMA_VERSION = "headers_full_classification
 HEADER_ONLY_MODIFICATION_STRATEGY = "header_only_strategy_v1"
 SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
 GROUPING_UNIT = "physical_packet"
+PARENT_GROUP_INDEX_REPRESENTATION = "deduplicated_parent_group_index_v1"
 
 #This list records the grouping policies that the current code knows how to execute.
 #When a future grouping policy is implemented, it should be added here and in group_records_by_policy().
@@ -1071,7 +1072,6 @@ def build_group_metadata(
         "grouping_unit": GROUPING_UNIT,
         "group_size_packets": group_size_packets,
         "physical_packet_count": len(physical_packets),
-        "physical_packet_ids": [str(packet.get("packet_id")) for packet in physical_packets],
         "first_reduced_packet_index": (
             min(int(packet["reduced_packet_index"]) for packet in physical_packets) if physical_packets else None
         ),
@@ -1084,6 +1084,48 @@ def build_group_metadata(
         "tcp_stream_count": len(streams),
     }
     return metadata
+
+
+#This function stores complete Parent Group packet ownership once in the Step 15 manifest.
+def build_parent_group_index(
+    *,
+    parent_groups: list[dict[str, Any]],
+    grouping_policy: str,
+    group_size_packets: int | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for parent_group in parent_groups:
+        physical_packets = parent_group.get("physical_packets", [])
+        entry = {
+            "parent_group_id": str(parent_group["parent_group_id"]),
+            "group_index": int(parent_group["group_index"]),
+            "unit_type": str(parent_group["unit_type"]),
+            "grouping_policy": grouping_policy,
+            "grouping_unit": GROUPING_UNIT,
+            "group_size_packets": group_size_packets,
+            "physical_packet_count": len(physical_packets),
+            "physical_packet_ids": [str(packet["packet_id"]) for packet in physical_packets],
+            "first_reduced_packet_index": (
+                min(int(packet["reduced_packet_index"]) for packet in physical_packets)
+                if physical_packets
+                else None
+            ),
+            "last_reduced_packet_index": (
+                max(int(packet["reduced_packet_index"]) for packet in physical_packets)
+                if physical_packets
+                else None
+            ),
+        }
+        parent_flow_summary = parent_group.get("parent_flow_summary")
+        if parent_flow_summary is not None:
+            if not isinstance(parent_flow_summary, dict):
+                raise ValueError(
+                    f"Parent Group {entry['parent_group_id']!r} has invalid parent_flow_summary."
+                )
+            entry["tcp_connection_id"] = str(parent_flow_summary["tcp_connection_id"])
+            entry["parent_flow_summary"] = parent_flow_summary
+        entries.append(entry)
+    return entries
 
 
 #This function finalizes counts and the active token plan for one V2 header-only unit.
@@ -1426,6 +1468,7 @@ def build_manifest(
     token_config: dict[str, Any],
     header_policy: dict[str, Any],
     parent_group_count: int,
+    parent_group_index: list[dict[str, Any]],
     parent_group_stats: dict[str, Any],
     prompt_unit_summaries: list[dict[str, Any]],
     header_classification_artifacts: dict[str, Any],
@@ -1452,6 +1495,7 @@ def build_manifest(
             "group_size_physical_packets": group_size_packets,
             "group_size_canonical_regions": None,
             "parent_group_count": parent_group_count,
+            "parent_group_index_representation": PARENT_GROUP_INDEX_REPRESENTATION,
             "parent_group_size_statistics": parent_group_stats,
             "modification_unit_count": len(prompt_unit_summaries),
             "total_packet_count": len(packet_json["traffic"]),
@@ -1503,6 +1547,7 @@ def build_manifest(
         )
     return {
         "metadata": metadata,
+        "parent_groups": parent_group_index,
         "compact_modification_units": prompt_unit_summaries,
     }
 
@@ -1560,6 +1605,11 @@ def run_grouping(
         tcp_connections=packet_json["tcp_connections"],
     )
     physical_parent_group_coverage = validate_physical_parent_group_coverage(parent_groups, ordered_traffic)
+    parent_group_index = build_parent_group_index(
+        parent_groups=parent_groups,
+        grouping_policy=grouping_policy,
+        group_size_packets=effective_group_size,
+    )
     canonical_region_count = len(packet_json["canonical_tcp_regions"])
     parent_group_stats = parent_group_size_statistics(parent_groups)
     start_time = time.monotonic()
@@ -1650,6 +1700,7 @@ def run_grouping(
         token_config=token_config,
         header_policy=header_policy,
         parent_group_count=len(parent_groups),
+        parent_group_index=parent_group_index,
         parent_group_stats=parent_group_stats,
         prompt_unit_summaries=prompt_unit_summaries,
         header_classification_artifacts=header_classification_artifacts,
