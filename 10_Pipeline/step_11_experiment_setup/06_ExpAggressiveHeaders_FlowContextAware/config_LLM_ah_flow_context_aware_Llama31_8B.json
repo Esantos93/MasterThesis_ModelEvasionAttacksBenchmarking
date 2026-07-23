@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_aggressive_headers_flow_context_aware_Llama31_8B",
+    "experiment_id": "exp_cicids2017_ah_flow_context_aware_Llama31_8B",
     "description": "Aggressive headers-only CICIDS2017 experiment using the Flow-context-aware grouping policy and expanded_header_editability_v1. Payload remains non-editable. Model used Llama-3.1-8B-Instruct. Conservative control: experiment 05.",
     "output_root": "/home/santos/Experiments"
   },
