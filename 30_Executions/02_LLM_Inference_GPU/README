@@ -19,6 +19,8 @@ first section is intentionally edited before each experiment and controls:
 - `smoke` or `full` execution;
 - smoke limits, including a separate Qwen limit;
 - experiment/config/model paths and model-specific batch sizes;
+- optional Step 16 reuse through `SKIP_STEP16` and model-specific prompt paths;
+- optional prompt-only execution through `SKIP_STEP17`;
 - whether the queue continues after one model fails.
 
 The active Flow-context-aware `prompt_target_context = 4096` smoke profile uses
@@ -44,6 +46,23 @@ bash /tf/thesis_Santos/04_Steps/run_multi_model_inference.sh
 
 The orchestrator does not create tmux sessions and never executes enabled
 models concurrently on the same GPU.
+
+To reuse existing Step 16 prompts, set this in the configuration section:
+
+```bash
+SKIP_STEP16=1
+
+LLAMA31_PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<llama_experiment>/06_prompts/<grouping_label>/<prompt_run_id>"
+GEMMA12_PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<gemma12_experiment>/06_prompts/<grouping_label>/<prompt_run_id>"
+GEMMA26_PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<gemma26_experiment>/06_prompts/<grouping_label>/<prompt_run_id>"
+QWEN32_PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<qwen_experiment>/06_prompts/<grouping_label>/<prompt_run_id>"
+```
+
+Only enabled models require a prompt path. The preflight verifies each
+directory and its `prompt_units_manifest_v1.json` before starting the first
+model. In `smoke` mode, only the model-specific Step 17 smoke limit is applied
+to the existing prompt population. In `full` mode, Step 17 consumes the whole
+existing manifest. Step 16 is neither executed nor compressed in this mode.
 
 It is designed for the new RISE container/host workflow and does not use
 Google Cloud, GCS, SSH, Docker, or bucket transfers.
@@ -181,6 +200,22 @@ run subtree, not previous runs stored under `06_prompts` or `07_llm_outputs`:
 Only a step that actually ran is compressed. Set `COMPRESS_STEP16=0` or
 `COMPRESS_STEP17=0` to disable either archive. `STEP16_ARCHIVE` and
 `STEP17_ARCHIVE` override the archive paths.
+
+To generate Step 16 prompts without starting inference, set:
+
+```bash
+RUN_MODE="smoke"  # limited prompt population
+# RUN_MODE="full" # complete prompt population
+SKIP_STEP16=0
+SKIP_STEP17=1
+```
+
+The wrapper generates prompts sequentially for all enabled experiments and
+compresses their Step 16 outputs when `COMPRESS_STEP16=1`. It does not invoke
+the Step 17 backend or use the GPU for model inference. This mode can run in a
+separate tmux session while another experiment is executing Step 17, provided
+the processes use different experiment/output directories. Running both steps
+with `SKIP_STEP16=1` and `SKIP_STEP17=1` is rejected as an invalid no-op.
 
 The exported archives intentionally omit the final internal `run_id` directory
 because the archive name or extraction directory already identifies the run.

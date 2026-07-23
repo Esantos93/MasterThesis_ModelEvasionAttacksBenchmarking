@@ -16,6 +16,15 @@ GROUPING_LABEL="flow_context_aware"
 # Allowed values: smoke, full. Smoke is the safe default.
 RUN_MODE="smoke"
 
+# Reuse existing Step 16 prompts: 1 = skip Step 16, 0 = generate prompts.
+# When enabled, every enabled model must define its existing *_PROMPT_DIR below.
+# Smoke mode limits Step 17 over that population; full mode consumes it all.
+SKIP_STEP16=0
+
+# Generate prompts without inference: 1 = skip Step 17, 0 = run inference.
+# SKIP_STEP16 and SKIP_STEP17 cannot both be 1.
+SKIP_STEP17=0
+
 # Experiment category + _fixed-sized-006 o  _flow_context_aware. This is used to create a unique run ID and log directory.
 # Ejemplo: baseline_fixed-sized-006 o baseline_flow_context_aware
 RUN_LABEL="baseline_flow_context_aware"
@@ -49,6 +58,7 @@ LLAMA31_CONFIG="config_LLM_baseline_flow_context_aware_Llama31_8B.json"
 LLAMA31_MODEL_PATH="/models_root/Llama-3.1-8B-Instruct/"
 LLAMA31_BATCH_SIZE=192 #224 for fixe-sized-006, 192 for flow_context_aware
 LLAMA31_DISABLE_THINKING=0
+LLAMA31_PROMPT_DIR=""
 
 # Gemma 4 12B
 GEMMA12_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_gemma-4-12B-it"
@@ -56,6 +66,7 @@ GEMMA12_CONFIG="config_LLM_baseline_flow_context_aware_gemma-4-12B-it.json"
 GEMMA12_MODEL_PATH="/models_root/gemma-4-12B-it/"
 GEMMA12_BATCH_SIZE=192 #224 for fixe-sized-006, 192 for flow_context_aware
 GEMMA12_DISABLE_THINKING=0
+GEMMA12_PROMPT_DIR=""
 
 # Gemma 4 26B-A4B
 GEMMA26_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_gemma-4-26B-A4B-it"
@@ -63,6 +74,7 @@ GEMMA26_CONFIG="config_LLM_baseline_flow_context_aware_gemma-4-26B-A4B-it.json"
 GEMMA26_MODEL_PATH="/models_root/gemma-4-26B-A4B-it/"
 GEMMA26_BATCH_SIZE=192 #224 for fixe-sized-006, 192 for flow_context_aware
 GEMMA26_DISABLE_THINKING=0
+GEMMA26_PROMPT_DIR=""
 
 # Qwen3 32B. The path matches the completed fixed-group experiment.
 QWEN32_EXPERIMENT_ID="exp_cicids2017_baseline_flow_context_aware_Qwen3_32B"
@@ -70,6 +82,7 @@ QWEN32_CONFIG="config_LLM_baseline_flow_context_aware_Qwen3-32B.json"
 QWEN32_MODEL_PATH="/models_root/Qwen/Qwen3-32B/"
 QWEN32_BATCH_SIZE=8
 QWEN32_DISABLE_THINKING=1
+QWEN32_PROMPT_DIR=""
 
 # =============================================================================
 # END CONFIGURATION
@@ -105,6 +118,18 @@ if [[ "${CONTINUE_ON_ERROR}" != "0" && "${CONTINUE_ON_ERROR}" != "1" ]]; then
   echo "CONTINUE_ON_ERROR must be 0 or 1."
   exit 1
 fi
+if [[ "${SKIP_STEP16}" != "0" && "${SKIP_STEP16}" != "1" ]]; then
+  echo "SKIP_STEP16 must be 0 or 1."
+  exit 1
+fi
+if [[ "${SKIP_STEP17}" != "0" && "${SKIP_STEP17}" != "1" ]]; then
+  echo "SKIP_STEP17 must be 0 or 1."
+  exit 1
+fi
+if [[ "${SKIP_STEP16}" == "1" && "${SKIP_STEP17}" == "1" ]]; then
+  echo "SKIP_STEP16 and SKIP_STEP17 cannot both be 1."
+  exit 1
+fi
 
 mkdir -p "${QUEUE_LOG_DIR}"
 exec > >(tee -a "${QUEUE_LOG}") 2>&1
@@ -127,6 +152,7 @@ model_value() {
     llama31:model_path) echo "${LLAMA31_MODEL_PATH}" ;;
     llama31:batch_size) echo "${LLAMA31_BATCH_SIZE}" ;;
     llama31:disable_thinking) echo "${LLAMA31_DISABLE_THINKING}" ;;
+    llama31:prompt_dir) echo "${LLAMA31_PROMPT_DIR}" ;;
     llama31:smoke_limit) echo "${SMOKE_PROMPTS_DEFAULT}" ;;
     gemma12:label) echo "gemma-4-12B-it" ;;
     gemma12:experiment_id) echo "${GEMMA12_EXPERIMENT_ID}" ;;
@@ -134,6 +160,7 @@ model_value() {
     gemma12:model_path) echo "${GEMMA12_MODEL_PATH}" ;;
     gemma12:batch_size) echo "${GEMMA12_BATCH_SIZE}" ;;
     gemma12:disable_thinking) echo "${GEMMA12_DISABLE_THINKING}" ;;
+    gemma12:prompt_dir) echo "${GEMMA12_PROMPT_DIR}" ;;
     gemma12:smoke_limit) echo "${SMOKE_PROMPTS_DEFAULT}" ;;
     gemma26:label) echo "gemma-4-26B-A4B-it" ;;
     gemma26:experiment_id) echo "${GEMMA26_EXPERIMENT_ID}" ;;
@@ -141,6 +168,7 @@ model_value() {
     gemma26:model_path) echo "${GEMMA26_MODEL_PATH}" ;;
     gemma26:batch_size) echo "${GEMMA26_BATCH_SIZE}" ;;
     gemma26:disable_thinking) echo "${GEMMA26_DISABLE_THINKING}" ;;
+    gemma26:prompt_dir) echo "${GEMMA26_PROMPT_DIR}" ;;
     gemma26:smoke_limit) echo "${SMOKE_PROMPTS_DEFAULT}" ;;
     qwen32:label) echo "Qwen3-32B" ;;
     qwen32:experiment_id) echo "${QWEN32_EXPERIMENT_ID}" ;;
@@ -148,6 +176,7 @@ model_value() {
     qwen32:model_path) echo "${QWEN32_MODEL_PATH}" ;;
     qwen32:batch_size) echo "${QWEN32_BATCH_SIZE}" ;;
     qwen32:disable_thinking) echo "${QWEN32_DISABLE_THINKING}" ;;
+    qwen32:prompt_dir) echo "${QWEN32_PROMPT_DIR}" ;;
     qwen32:smoke_limit) echo "${SMOKE_PROMPTS_QWEN32}" ;;
     *) echo "Unknown model field: ${model_key}:${field}" >&2; return 1 ;;
   esac
@@ -161,6 +190,8 @@ write_queue_status() {
     printf 'status=%s\n' "${status}"
     printf 'queue_id=%s\n' "${QUEUE_ID}"
     printf 'run_mode=%s\n' "${RUN_MODE}"
+    printf 'skip_step16=%s\n' "${SKIP_STEP16}"
+    printf 'skip_step17=%s\n' "${SKIP_STEP17}"
     printf 'started_at=%s\n' "${QUEUE_STARTED_AT}"
     printf 'updated_at=%s\n' "$(date --iso-8601=seconds)"
     [[ -n "${finished_at}" ]] && printf 'finished_at=%s\n' "${finished_at}"
@@ -173,7 +204,7 @@ write_queue_status() {
 
 preflight_model() {
   local model_key="$1"
-  local experiment_id config_name model_path config_path group_dir
+  local experiment_id config_name model_path config_path group_dir prompt_dir
   experiment_id="$(model_value "${model_key}" experiment_id)"
   config_name="$(model_value "${model_key}" config)"
   model_path="$(model_value "${model_key}" model_path)"
@@ -183,12 +214,29 @@ preflight_model() {
   [[ -f "${config_path}" ]] || { echo "Missing config: ${config_path}"; return 1; }
   [[ -d "${group_dir}" ]] || { echo "Missing Step 15 group directory: ${group_dir}"; return 1; }
   [[ -d "${model_path}" ]] || { echo "Missing model directory: ${model_path}"; return 1; }
+
+  if [[ "${SKIP_STEP16}" == "1" ]]; then
+    prompt_dir="$(model_value "${model_key}" prompt_dir)"
+    [[ -n "${prompt_dir}" ]] || {
+      echo "SKIP_STEP16=1 requires ${model_key} prompt_dir in the configuration section."
+      return 1
+    }
+    [[ -d "${prompt_dir}" ]] || {
+      echo "Missing existing Step 16 prompt directory for ${model_key}: ${prompt_dir}"
+      return 1
+    }
+    [[ -f "${prompt_dir}/prompt_units_manifest_v1.json" ]] || {
+      echo "Missing prompt manifest for ${model_key}: ${prompt_dir}/prompt_units_manifest_v1.json"
+      return 1
+    }
+  fi
 }
 
 run_model() {
   local model_key="$1"
   local label experiment_id config_name model_path batch_size disable_thinking
-  local config_path group_dir run_id prompt_dir prompt_limit runtime_max_model_len exit_code
+  local config_path group_dir run_id prompt_dir prompt_limit step16_prompt_limit
+  local runtime_max_model_len exit_code
 
   label="$(model_value "${model_key}" label)"
   experiment_id="$(model_value "${model_key}" experiment_id)"
@@ -210,12 +258,21 @@ print(value)
 ' "${config_path}")"
   group_dir="${CLOUD_ROOT}/01_InputFiles/${experiment_id}/05_groups/${GROUPING_LABEL}"
   run_id="run_$(date -u +%Y%m%d_%H%M%S)_${RUN_LABEL}_${model_key}_${RUN_MODE}"
-  prompt_dir="${CLOUD_ROOT}/02_OutputFiles/${experiment_id}/06_prompts/${GROUPING_LABEL}/${run_id}"
+  if [[ "${SKIP_STEP16}" == "1" ]]; then
+    prompt_dir="$(model_value "${model_key}" prompt_dir)"
+  else
+    prompt_dir="${CLOUD_ROOT}/02_OutputFiles/${experiment_id}/06_prompts/${GROUPING_LABEL}/${run_id}"
+  fi
 
   if [[ "${RUN_MODE}" == "smoke" ]]; then
     prompt_limit="$(model_value "${model_key}" smoke_limit)"
   else
     prompt_limit=""
+  fi
+  if [[ "${SKIP_STEP16}" == "1" ]]; then
+    step16_prompt_limit=""
+  else
+    step16_prompt_limit="${prompt_limit}"
   fi
 
   echo
@@ -223,6 +280,9 @@ print(value)
   echo "Starting model: ${label}"
   echo "Run ID: ${run_id}"
   echo "Mode: ${RUN_MODE}"
+  echo "Skip Step 16: ${SKIP_STEP16}"
+  echo "Skip Step 17: ${SKIP_STEP17}"
+  echo "Prompt directory: ${prompt_dir}"
   echo "Prompt limit: ${prompt_limit:-<full population>}"
   echo "Batch size: ${batch_size}"
   echo "Runtime max model len: ${runtime_max_model_len} (from config)"
@@ -240,13 +300,15 @@ print(value)
   PROMPT_DIR="${prompt_dir}" \
   STEP17_BACKEND="${STEP17_BACKEND}" \
   BATCH_SIZE="${batch_size}" \
-  LIMIT_PROMPTS_S16="${prompt_limit}" \
+  LIMIT_PROMPTS_S16="${step16_prompt_limit}" \
   LIMIT_PROMPTS_S17="${prompt_limit}" \
   VLLM_DTYPE="${VLLM_DTYPE}" \
   VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION}" \
   RUNTIME_MAX_MODEL_LEN="${runtime_max_model_len}" \
   TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE}" \
   DISABLE_THINKING="${disable_thinking}" \
+  SKIP_STEP16="${SKIP_STEP16}" \
+  SKIP_STEP17="${SKIP_STEP17}" \
   COMPRESS_STEP16="${COMPRESS_STEP16}" \
   COMPRESS_STEP17="${COMPRESS_STEP17}" \
   PYTHONUNBUFFERED=1 \
@@ -268,6 +330,8 @@ print(value)
 echo "=== Multi-model inference preflight ==="
 echo "Queue ID: ${QUEUE_ID}"
 echo "Run mode: ${RUN_MODE}"
+echo "Skip Step 16: ${SKIP_STEP16}"
+echo "Skip Step 17: ${SKIP_STEP17}"
 echo "Enabled models: ${ENABLED_MODELS[*]}"
 echo "Runner: ${RUNNER}"
 echo "Master log: ${QUEUE_LOG}"
