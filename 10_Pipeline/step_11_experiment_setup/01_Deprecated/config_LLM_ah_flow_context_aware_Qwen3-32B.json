@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_ah_flow_context_aware_gemma-4-12B-it",
-    "description": "Aggressive headers-only CICIDS2017 experiment using the Flow-context-aware grouping policy and expanded_header_editability_v1. Payload remains non-editable. Model used gemma-4-12B-it. Conservative control: experiment 06.",
+    "experiment_id": "exp_cicids2017_ah_flow_context_aware_Qwen3_32B",
+    "description": "Deprecated aggressive headers-only CICIDS2017 candidate retired when the family was reduced to Llama 3.1 8B and Gemma 4 26B-A4B because of full-run runtime cost. It used Flow-context-aware grouping and expanded_header_editability_v1 with non-editable payload. Model used Qwen/Qwen3-32B. Conservative control: experiment 08.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -45,8 +45,8 @@
     "enable_builtin_rules": true
   },
   "llm": {
-    "model_name": "gemma-4-12B-it",
-    "model_path": "/models_root/gemma-4-12B-it/",
+    "model_name": "Qwen/Qwen3-32B",
+    "model_path": "/models_root/Qwen3-32B/",
     "prompt_version": "compact_patch_prompting_v2",
     "prompt_input_json_data_profile": "baseline_input_profile_v1",
     "prompt_instructions_profile": "baseline_instructions_profile_v1",
@@ -57,8 +57,8 @@
     "runtime_max_model_len": 12288,
     "token_budget": {
       "policy": "compact_patch_token_budget_v2",
-      "chars_per_token_estimate": 2.0,
-      "output_token_estimation_safety_factor": 2.5
+      "chars_per_token_estimate": 2.4,
+      "output_token_estimation_safety_factor": 1.2
     },
     "small_payload_min_bytes": 64,
     "small_payload_max_bytes": 512,
@@ -69,9 +69,9 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "aggressive_headers_flow_context_aware_gemma-4-12B-it",
+    "experiment_config_label": "aggressive_headers_flow_context_aware_Qwen3-32B",
     "experiment_config_label_options": [
-      "aggressive_headers_flow_context_aware_gemma-4-12B-it"
+      "aggressive_headers_flow_context_aware_Qwen3-32B"
     ],
     "grouping_policy": "flow_context_aware",
     "grouping_unit": "physical_packet",
