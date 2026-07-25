@@ -62,10 +62,14 @@ def summarize_step19(validated: Path, validation_report: Path, sample_size: int)
     packet_results = report_data.get("packet_results", [])
     status_counts = Counter(packet.get("status", "<missing>") for packet in packet_results)
     evaluation_counts = Counter(packet.get("evaluation_status", "<missing>") for packet in packet_results)
+    authorization_counts = Counter(packet.get("authorization_materialization_status", "<missing>") for packet in packet_results)
+    semantic_counts = Counter(packet.get("semantic_protocol_status", "<missing>") for packet in packet_results)
 
     print("\nSTEP 19 PACKET RESULT COUNTS")
     print("status:", json.dumps(dict(sorted(status_counts.items())), indent=2, ensure_ascii=False))
     print("evaluation_status:", json.dumps(dict(sorted(evaluation_counts.items())), indent=2, ensure_ascii=False))
+    print("authorization_materialization_status:", json.dumps(dict(sorted(authorization_counts.items())), indent=2, ensure_ascii=False))
+    print("semantic_protocol_status:", json.dumps(dict(sorted(semantic_counts.items())), indent=2, ensure_ascii=False))
 
     rejected = [packet for packet in packet_results if packet.get("status") == "rejected"]
     print_json("FIRST REJECTED PACKET RESULTS", rejected[:sample_size], limit=5000)
@@ -82,12 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect Step 19 validation output and report.")
     parser.add_argument(
         "--experiment-root",
-        default="/home/santos/Experiments/exp_cicids2017_baseline_004",
-        help="Experiment root folder. Defaults to the legacy baseline VM path.",
+        required=True,
+        help="Experiment root folder.",
     )
     parser.add_argument(
         "--experiment-config-label",
-        default="baseline-004-headers-only-fixed-size-6",
+        required=True,
         help="Experiment config label used under 09_validation.",
     )
     parser.add_argument(
