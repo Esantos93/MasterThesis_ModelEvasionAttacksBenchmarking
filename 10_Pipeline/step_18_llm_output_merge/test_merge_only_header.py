@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+STEP_ROOT = Path(__file__).resolve().parent
+for path in [PIPELINE_ROOT, STEP_ROOT]:
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
 from merge_llm_outputs import (
+    apply_validated_edits,
     build_editable_region_lookup,
     build_patch_edit,
     read_json,
-    set_header_value,
 )
+from common.header_policy import set_header_value
 
 
 def packet_record() -> dict:
@@ -17,7 +25,20 @@ def packet_record() -> dict:
         "ttl": 64,
         "ip_id": 1234,
         "window": 8192,
-        "ipv4_header": {"tos": 0, "identification": 1234, "ttl": 64},
+        "ipv4_header": {
+            "tos": 0,
+            "identification": 1234,
+            "ttl": 64,
+            "flags_fragment_offset": 0,
+            "flags": {
+                "reserved": False,
+                "dont_fragment": False,
+                "more_fragments": False,
+            },
+            "fragment_offset_units": 0,
+            "fragmented": False,
+            "fragment_offset_bytes": 0,
+        },
         "tcp_header": {"window": 8192},
         "payload_hex": "",
     }
@@ -79,9 +100,9 @@ class HeaderOnlyMergeTests(unittest.TestCase):
         return build_patch_edit(
             patch=patch,
             patch_index=1,
-            prompt_package=prompt,
+            prompt_unit=prompt,
             editable_lookup=build_editable_region_lookup(prompt),
-            header_policy=read_json(Path("step_15_grouping/01_editability_policies/header_v1.json")),
+            header_policy=read_json(PIPELINE_ROOT / "step_15_grouping" / "01_editability_policies" / "header_v1.json"),
             packet_index={"packet_000001": packet_record()},
             parsed_path=Path("parsed.json"),
         )
@@ -168,6 +189,77 @@ class HeaderOnlyMergeTests(unittest.TestCase):
         self.assertEqual(4321, record["ipv4_header"]["identification"])
         self.assertEqual(0, record["window"])
         self.assertEqual(0, record["tcp_header"]["window"])
+
+    def test_apply_validated_edits_uses_common_materialization(self) -> None:
+        edit, error = self.build(
+            {
+                "packet_id": "packet_000001",
+                "region_id": "packet_000001:ipv4.ttl",
+                "region_type": "header_field",
+                "operation": "replace_uint",
+                "replacement_format": "uint",
+                "replacement": 1,
+            }
+        )
+        self.assertIsNone(error)
+        records, applied, no_effect, explicit, derived, relationships, materialization_issues = apply_validated_edits(
+            traffic_records=[packet_record()],
+            edits=[edit],
+        )
+        self.assertEqual(1, records[0]["ttl"])
+        self.assertEqual(1, records[0]["ipv4_header"]["ttl"])
+        self.assertEqual(1, len(applied))
+        self.assertEqual(1, len(explicit))
+        self.assertEqual([], no_effect)
+        self.assertEqual([], derived)
+        self.assertEqual([], relationships)
+        self.assertEqual([], materialization_issues)
+
+    def test_apply_validated_composite_edit_keeps_derivatives_separate(self) -> None:
+        explicit_edit = {
+            "edit_kind": "physical_header",
+            "identity_type": "physical_header_region",
+            "region_type": "header_field",
+            "packet_id": "packet_000001",
+            "field": "ipv4.flags_fragment_offset",
+            "region_id": "packet_000001:ipv4.flags_fragment_offset",
+            "header_region_id": "packet_000001:ipv4.flags_fragment_offset",
+            "operation": "replace_uint",
+            "replacement_format": "uint",
+            "original_value": 0,
+            "replacement": 0x2001,
+            "constraints": {"min": 0, "max": 65535},
+            "patch_index": 1,
+            "prompt_unit_id": "group_000001",
+        }
+
+        (
+            records,
+            applied,
+            no_effect,
+            explicit,
+            derived,
+            relationships,
+            materialization_issues,
+        ) = apply_validated_edits(
+            traffic_records=[packet_record()],
+            edits=[explicit_edit],
+        )
+
+        self.assertEqual(1, len(applied))
+        self.assertEqual(1, len(explicit))
+        self.assertEqual([], no_effect)
+        self.assertGreater(len(derived), 0)
+        self.assertEqual([], relationships)
+        self.assertEqual([], materialization_issues)
+        self.assertIs(
+            True,
+            records[0]["ipv4_header"]["flags"]["more_fragments"],
+        )
+        self.assertEqual(
+            1,
+            records[0]["ipv4_header"]["fragment_offset_units"],
+        )
 
 
 if __name__ == "__main__":

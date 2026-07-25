@@ -56,9 +56,13 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     print_json("STEP 18 SUMMARY", summary)
 
     print("\nSTEP 18 PATCH APPLICATION COUNTS")
+    print("explicit_header_edits:", len(patch_application.get("explicit_header_edits", [])))
     print("applied_patches:", len(patch_application.get("applied_patches", [])))
     print("effective_header_edits:", len(patch_application.get("effective_header_edits", [])))
     print("no_effect_edits:", len(patch_application.get("no_effect_edits", [])))
+    print("derived_header_changes:", len(patch_application.get("derived_header_changes", [])))
+    print("explicit_edit_relationships:", len(patch_application.get("explicit_edit_relationships", [])))
+    print("header_materialization_issues:", len(patch_application.get("header_materialization_issues", [])))
     print("payload_edits:", len(patch_application.get("payload_edits", [])))
     print("modified_packet_ids:", len(patch_application.get("modified_packet_ids", [])))
     print("errors:", len(patch_application.get("errors", [])))
@@ -83,6 +87,19 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     if errors:
         print_json("FIRST STEP 18 PATCH ERRORS", errors[:sample_size], limit=5000)
 
+    materialization_issues = patch_application.get("header_materialization_issues", [])
+    if materialization_issues:
+        print_json("FIRST STEP 18 HEADER MATERIALIZATION ISSUES", materialization_issues[:sample_size], limit=5000)
+
+    relationships = patch_application.get("explicit_edit_relationships", [])
+    if relationships:
+        print_json("FIRST EXPLICIT EDIT RELATIONSHIPS", relationships[:sample_size], limit=5000)
+
+    print_json(
+        "FIRST EXPLICIT HEADER EDITS",
+        patch_application.get("explicit_header_edits", [])[:sample_size],
+        limit=8000,
+    )
     print_json(
         "FIRST EFFECTIVE HEADER EDITS",
         patch_application.get("effective_header_edits", [])[:sample_size],
@@ -93,6 +110,11 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
         patch_application.get("no_effect_edits", [])[:sample_size],
         limit=8000,
     )
+    print_json(
+        "FIRST DERIVED HEADER CHANGES",
+        patch_application.get("derived_header_changes", [])[:sample_size],
+        limit=8000,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,12 +122,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect Step 18 merged output and merge report.")
     parser.add_argument(
         "--experiment-root",
-        default="/home/santos/Experiments/exp_cicids2017_baseline_004",
-        help="Experiment root folder. Defaults to the legacy baseline VM path.",
+        required=True,
+        help="Experiment root folder.",
     )
     parser.add_argument(
         "--experiment-config-label",
-        default="baseline-004-headers-only-fixed-size-6",
+        required=True,
         help="Experiment config label used under 08_merged_outputs.",
     )
     parser.add_argument(

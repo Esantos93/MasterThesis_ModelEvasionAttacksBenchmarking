@@ -20,7 +20,7 @@ from common.header_policy import (
     header_field_value,
     is_editable_header_field,
     load_header_editability_policy,
-    set_header_value,
+    materialize_header_edits,
     validate_uint_replacement,
 )
 from common.io_utils import write_json
@@ -28,10 +28,9 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
-PROMPT_PACKAGE_SCHEMA_VERSION = "prompt_package_v2"
 PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
-MERGED_SCHEMA_VERSION = "patch_applied_traffic_v1"
-REPORT_SCHEMA_VERSION = "patch_application_report_v1"
+MERGED_SCHEMA_VERSION = "patch_applied_traffic_v2"
+REPORT_SCHEMA_VERSION = "patch_application_report_v2"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
@@ -130,7 +129,7 @@ def build_packet_index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any
     return packet_index
 
 
-#This function loads all Step 17 metadata files in a model output folder and indexes them by prompt_unit_id/group_id.
+#This function loads all Step 17 metadata files and indexes them by the required prompt_unit_id.
 def load_metadata_by_prompt_unit(metadata_dir: Path) -> dict[str, dict[str, Any]]:
     metadata_by_unit = {}
     if not metadata_dir.exists():
@@ -138,20 +137,20 @@ def load_metadata_by_prompt_unit(metadata_dir: Path) -> dict[str, dict[str, Any]
     for metadata_path in sorted(metadata_dir.glob("*.metadata.json")):
         metadata = read_json(metadata_path)
         if not isinstance(metadata, dict):
-            continue
-        prompt_unit_id = str(
-            metadata.get("prompt_unit_id")
-            or metadata.get("group_id")
-            or prompt_unit_id_from_path(metadata_path, ".metadata.json")
-        )
+            raise ValueError(f"Step 17 metadata must be a JSON object: {metadata_path}")
+        prompt_unit_id = metadata.get("prompt_unit_id")
+        if not isinstance(prompt_unit_id, str) or not prompt_unit_id:
+            raise ValueError(f"Step 17 metadata must contain prompt_unit_id: {metadata_path}")
+        if prompt_unit_id in metadata_by_unit:
+            raise ValueError(f"Duplicate Step 17 prompt_unit_id {prompt_unit_id!r}: {metadata_path}")
         metadata["_metadata_file"] = str(metadata_path)
         metadata_by_unit[prompt_unit_id] = metadata
     return metadata_by_unit
 
 
-#This function resolves a Step 16 prompt package path from Step 17 metadata.
+#This function resolves a Step 16 prompt unit path from Step 17 metadata.
 #It first trusts the stored path, then searches an optional prompt root by filename.
-def resolve_prompt_package_path(metadata: dict[str, Any], prompt_root: Path | None) -> Path | None:
+def resolve_prompt_unit_path(metadata: dict[str, Any], prompt_root: Path | None) -> Path | None:
     prompt_file = metadata.get("prompt_file")
     if isinstance(prompt_file, str) and prompt_file.strip():
         direct_path = Path(prompt_file).expanduser()
@@ -164,35 +163,29 @@ def resolve_prompt_package_path(metadata: dict[str, Any], prompt_root: Path | No
             matches = list(prompt_root.rglob(direct_path.name)) if prompt_root.exists() else []
             if matches:
                 return matches[0]
-    source_prompt_unit_file = metadata.get("source_prompt_unit_file")
-    if prompt_root is not None and isinstance(source_prompt_unit_file, str):
-        prompt_name = Path(source_prompt_unit_file).name.replace(".prompt_unit.json", ".prompt.json")
-        candidate = prompt_root / prompt_name
-        if candidate.exists():
-            return candidate
     return None
 
 
-#This function loads and minimally validates one Step 16 prompt package/unit.
-def load_prompt_package(metadata: dict[str, Any], prompt_root: Path | None) -> tuple[dict[str, Any] | None, str | None]:
-    prompt_path = resolve_prompt_package_path(metadata, prompt_root)
+#This function loads and validates the active Step 16 prompt_unit_v1 artifact.
+def load_prompt_unit(metadata: dict[str, Any], prompt_root: Path | None) -> tuple[dict[str, Any] | None, str | None]:
+    prompt_path = resolve_prompt_unit_path(metadata, prompt_root)
     if prompt_path is None:
-        return None, "prompt_package_not_found"
-    prompt_package = read_json(prompt_path)
-    if not isinstance(prompt_package, dict):
-        return None, "prompt_package_root_not_object"
-    if prompt_package.get("schema_version") not in {PROMPT_PACKAGE_SCHEMA_VERSION, PROMPT_UNIT_SCHEMA_VERSION}:
-        return None, "prompt_package_schema_version_invalid"
-    if not isinstance(prompt_package.get("input_traceability"), dict):
-        return None, "prompt_package_traceability_missing"
-    prompt_package["_prompt_file"] = str(prompt_path)
-    return prompt_package, None
+        return None, "prompt_unit_not_found"
+    prompt_unit = read_json(prompt_path)
+    if not isinstance(prompt_unit, dict):
+        return None, "prompt_unit_root_not_object"
+    if prompt_unit.get("schema_version") != PROMPT_UNIT_SCHEMA_VERSION:
+        return None, "prompt_unit_schema_version_invalid"
+    if not isinstance(prompt_unit.get("input_traceability"), dict):
+        return None, "prompt_unit_traceability_missing"
+    prompt_unit["_prompt_file"] = str(prompt_path)
+    return prompt_unit, None
 
 
 #This function builds a lookup of editable regions from a Step 16 prompt package.
-def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+def build_editable_region_lookup(prompt_unit: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
     lookup = {}
-    traceability = prompt_package.get("input_traceability", {})
+    traceability = prompt_unit.get("input_traceability", {})
     regions = traceability.get("editable_regions", [])
     if not isinstance(regions, list):
         return lookup
@@ -207,20 +200,15 @@ def build_editable_region_lookup(prompt_package: dict[str, Any]) -> dict[tuple[s
     return lookup
 
 
-#This function returns the packet ids visible to one prompt package for later LLM Output Failure accounting.
-def packet_ids_from_prompt_package(prompt_package: dict[str, Any] | None) -> list[str]:
-    if not prompt_package:
+#This function returns the packet ids visible to one prompt unit for later LLM Output Failure accounting.
+def packet_ids_from_prompt_unit(prompt_unit: dict[str, Any] | None) -> list[str]:
+    if not prompt_unit:
         return []
-    traceability = prompt_package.get("input_traceability", {})
+    traceability = prompt_unit.get("input_traceability", {})
     packet_ids = traceability.get("packet_ids", [])
-    if isinstance(packet_ids, list) and packet_ids:
-        return [str(packet_id) for packet_id in packet_ids]
-    fallback_packet_ids = []
-    for field_name in ["editable_packet_ids", "context_packet_ids"]:
-        values = traceability.get(field_name, [])
-        if isinstance(values, list):
-            fallback_packet_ids.extend(str(packet_id) for packet_id in values)
-    return sorted(set(fallback_packet_ids))
+    if not isinstance(packet_ids, list):
+        raise ValueError("prompt_unit_v1 input_traceability.packet_ids must be a list.")
+    return [str(packet_id) for packet_id in packet_ids]
 
 
 #This function validates one physical header patch and converts it to an edit record.
@@ -228,7 +216,7 @@ def build_header_edit(
     *,
     patch: dict[str, Any],
     patch_index: int,
-    prompt_package: dict[str, Any],
+    prompt_unit: dict[str, Any],
     region: dict[str, Any],
     header_policy: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
@@ -289,11 +277,11 @@ def build_header_edit(
         "constraints": constraints,
         "patch_index": patch_index,
         "parsed_file": str(parsed_path),
-        "prompt_unit_id": prompt_package.get("prompt_unit_id"),
-        "parent_group_id": prompt_package.get("parent_group_id"),
-        "prompt_file": prompt_package.get("_prompt_file"),
-        "source_modification_unit_file": prompt_package.get("source_modification_unit_file"),
-        "source_modification_unit_schema_version": prompt_package.get("source_modification_unit_schema_version"),
+        "prompt_unit_id": prompt_unit.get("prompt_unit_id"),
+        "parent_group_id": prompt_unit.get("parent_group_id"),
+        "prompt_file": prompt_unit.get("_prompt_file"),
+        "source_modification_unit_file": prompt_unit.get("source_modification_unit_file"),
+        "source_modification_unit_schema_version": prompt_unit.get("source_modification_unit_schema_version"),
     }
     return edit, None
 
@@ -303,7 +291,7 @@ def build_payload_edit(
     *,
     patch: dict[str, Any],
     patch_index: int,
-    prompt_package: dict[str, Any],
+    prompt_unit: dict[str, Any],
     region: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
     parsed_path: Path,
@@ -418,9 +406,9 @@ def build_payload_edit(
         "replacement_length_bytes": len(replacement_hex) // 2,
         "patch_index": patch_index,
         "parsed_file": str(parsed_path),
-        "prompt_unit_id": prompt_package.get("prompt_unit_id"),
-        "parent_group_id": prompt_package.get("parent_group_id"),
-        "prompt_file": prompt_package.get("_prompt_file"),
+        "prompt_unit_id": prompt_unit.get("prompt_unit_id"),
+        "parent_group_id": prompt_unit.get("parent_group_id"),
+        "prompt_file": prompt_unit.get("_prompt_file"),
     }, None
 
 
@@ -429,7 +417,7 @@ def build_patch_edit(
     *,
     patch: dict[str, Any],
     patch_index: int,
-    prompt_package: dict[str, Any],
+    prompt_unit: dict[str, Any],
     editable_lookup: dict[tuple[str, str], dict[str, Any]],
     header_policy: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
@@ -440,7 +428,7 @@ def build_patch_edit(
     if packet_id is None or not isinstance(region_id, str):
         return None, {"reason": "patch_missing_packet_or_region", "patch_index": patch_index}
     packet_id_text = str(packet_id)
-    traceability = prompt_package.get("input_traceability", {})
+    traceability = prompt_unit.get("input_traceability", {})
     editable_packet_ids = {str(value) for value in traceability.get("editable_packet_ids", [])}
     if editable_packet_ids and packet_id_text not in editable_packet_ids:
         return None, {"reason": "patch_references_non_editable_packet", "packet_id": packet_id_text, "patch_index": patch_index}
@@ -452,7 +440,7 @@ def build_patch_edit(
         return build_header_edit(
             patch=patch,
             patch_index=patch_index,
-            prompt_package=prompt_package,
+            prompt_unit=prompt_unit,
             region=region,
             header_policy=header_policy,
             packet_index=packet_index,
@@ -461,7 +449,7 @@ def build_patch_edit(
     return build_payload_edit(
         patch=patch,
         patch_index=patch_index,
-        prompt_package=prompt_package,
+        prompt_unit=prompt_unit,
         region=region,
         packet_index=packet_index,
         parsed_path=parsed_path,
@@ -525,18 +513,30 @@ def apply_validated_edits(
     *,
     traffic_records: list[dict[str, Any]],
     edits: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    records_by_packet_id = {str(record["packet_id"]): record for record in traffic_records if isinstance(record, dict) and record.get("packet_id") is not None}
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    records_by_packet_id = {str(record["packet_id"]): copy.deepcopy(record) for record in traffic_records if isinstance(record, dict) and record.get("packet_id") is not None}
+    output_records = [copy.deepcopy(record) for record in traffic_records]
+    output_by_packet_id = {str(record["packet_id"]): record for record in output_records if isinstance(record, dict) and record.get("packet_id") is not None}
     applied = []
     no_effect = []
+    explicit_header_edits = []
+    derived_header_changes = []
+    explicit_edit_relationships = []
+    materialization_errors = []
     header_edits = [edit for edit in edits if edit.get("edit_kind") == "physical_header"]
+    header_edits_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for edit in header_edits:
-        if edit.get("no_effect"):
-            no_effect.append(dict(edit))
-            continue
-        record = records_by_packet_id[edit["packet_id"]]
-        set_header_value(record, str(edit["field"]), int(edit["replacement"]))
-        applied.append(dict(edit))
+        header_edits_by_packet[str(edit["packet_id"])].append(edit)
+    for packet_id in sorted(header_edits_by_packet):
+        materialization = materialize_header_edits(records_by_packet_id[packet_id], header_edits_by_packet[packet_id])
+        output_by_packet_id[packet_id].clear()
+        output_by_packet_id[packet_id].update(materialization["materialized_packet"])
+        explicit_header_edits.extend(materialization["explicit_edits"])
+        applied.extend(materialization["applied_patches"])
+        no_effect.extend(materialization["no_effect_edits"])
+        derived_header_changes.extend(materialization["derived_header_changes"])
+        explicit_edit_relationships.extend(materialization["explicit_edit_relationships"])
+        materialization_errors.extend(materialization["materialization_issues"])
 
     by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for edit in edits:
@@ -545,7 +545,7 @@ def apply_validated_edits(
         by_packet[edit["packet_id"]].append(edit)
 
     for packet_id, packet_edits in by_packet.items():
-        record = records_by_packet_id[packet_id]
+        record = output_by_packet_id[packet_id]
         original_payload = str(record.get("payload_hex", "") or "").lower()
         payload = original_payload
         for edit in sorted(packet_edits, key=lambda item: item["absolute_start_offset_bytes"], reverse=True):
@@ -560,7 +560,7 @@ def apply_validated_edits(
         record["payload_length_bytes"] = new_payload_length
         if isinstance(record.get("packet_length_bytes"), int):
             record["packet_length_bytes"] = record["packet_length_bytes"] + delta
-    return traffic_records, applied, no_effect
+    return output_records, applied, no_effect, explicit_header_edits, derived_header_changes, explicit_edit_relationships, materialization_errors
 
 
 #This function validates and converts all patches from one accepted Step 17 parsed output.
@@ -573,8 +573,8 @@ def collect_edits_for_parsed_output(
     header_policy: dict[str, Any],
     packet_index: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    prompt_package, prompt_error = load_prompt_package(metadata, prompt_root)
-    if prompt_error or prompt_package is None:
+    prompt_unit, prompt_error = load_prompt_unit(metadata, prompt_root)
+    if prompt_error or prompt_unit is None:
         return (
             {
                 "prompt_unit_id": metadata.get("prompt_unit_id") or prompt_unit_id_from_path(parsed_path, ".parsed.json"),
@@ -590,25 +590,25 @@ def collect_edits_for_parsed_output(
             [],
         )
 
-    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_unit_id_from_path(parsed_path, ".parsed.json"))
+    prompt_unit_id = str(prompt_unit["prompt_unit_id"])
     if parsed_output.get("schema_version") != PATCH_OUTPUT_SCHEMA_VERSION or not isinstance(parsed_output.get("patches"), list):
         return (
             {
                 "prompt_unit_id": prompt_unit_id,
-                "parent_group_id": prompt_package.get("parent_group_id"),
+                "parent_group_id": prompt_unit.get("parent_group_id"),
                 "status": "failed",
                 "evaluation_status": "LLM Output Failure",
                 "failure_reason": "parsed_patch_output_schema_invalid",
                 "parsed_file": str(parsed_path),
                 "metadata_file": metadata.get("_metadata_file"),
-                "prompt_file": prompt_package.get("_prompt_file"),
-                "packet_ids": packet_ids_from_prompt_package(prompt_package),
+                "prompt_file": prompt_unit.get("_prompt_file"),
+                "packet_ids": packet_ids_from_prompt_unit(prompt_unit),
             },
             [],
             [],
         )
 
-    editable_lookup = build_editable_region_lookup(prompt_package)
+    editable_lookup = build_editable_region_lookup(prompt_unit)
     edits = []
     patch_errors = []
     for patch_index, patch in enumerate(parsed_output["patches"], start=1):
@@ -618,7 +618,7 @@ def collect_edits_for_parsed_output(
         edit, error = build_patch_edit(
             patch=patch,
             patch_index=patch_index,
-            prompt_package=prompt_package,
+            prompt_unit=prompt_unit,
             editable_lookup=editable_lookup,
             header_policy=header_policy,
             packet_index=packet_index,
@@ -631,7 +631,7 @@ def collect_edits_for_parsed_output(
 
     group = {
         "prompt_unit_id": prompt_unit_id,
-        "parent_group_id": prompt_package.get("parent_group_id"),
+        "parent_group_id": prompt_unit.get("parent_group_id"),
         "status": "accepted" if not patch_errors else "failed",
         "step17_status": metadata.get("status"),
         "evaluation_status": "Pending Step 19 Validation" if not patch_errors else "LLM Output Failure",
@@ -639,11 +639,11 @@ def collect_edits_for_parsed_output(
         "accepted_edit_count": len(edits) if not patch_errors else 0,
         "effective_edit_count": len([edit for edit in edits if not edit.get("no_effect")]) if not patch_errors else 0,
         "no_effect_edit_count": len([edit for edit in edits if edit.get("no_effect")]) if not patch_errors else 0,
-        "packet_ids": packet_ids_from_prompt_package(prompt_package),
-        "editable_packet_ids": [str(value) for value in prompt_package["input_traceability"].get("editable_packet_ids", [])],
+        "packet_ids": packet_ids_from_prompt_unit(prompt_unit),
+        "editable_packet_ids": [str(value) for value in prompt_unit["input_traceability"].get("editable_packet_ids", [])],
         "parsed_file": str(parsed_path),
         "metadata_file": metadata.get("_metadata_file"),
-        "prompt_file": prompt_package.get("_prompt_file"),
+        "prompt_file": prompt_unit.get("_prompt_file"),
         "failure_reason": None if not patch_errors else "patch_application_validation_failed",
         "patch_errors": patch_errors,
     }
@@ -652,17 +652,17 @@ def collect_edits_for_parsed_output(
 
 #This function converts a failed Step 17 metadata record into the Step 18 LLM Output Failure report format.
 def summarize_llm_output_failure(metadata: dict[str, Any], prompt_root: Path | None, model_name: str) -> dict[str, Any]:
-    prompt_package, prompt_error = load_prompt_package(metadata, prompt_root)
+    prompt_unit, prompt_error = load_prompt_unit(metadata, prompt_root)
     validation_result = metadata.get("validation_result")
     return {
         "model_name": model_name,
-        "prompt_unit_id": metadata.get("prompt_unit_id") or metadata.get("group_id"),
+        "prompt_unit_id": metadata.get("prompt_unit_id"),
         "parent_group_id": metadata.get("parent_group_id"),
         "status": metadata.get("status"),
         "evaluation_status": "LLM Output Failure",
         "failure_reason": metadata.get("failure_reason") or prompt_error,
         "validation_result": validation_result,
-        "packet_ids": packet_ids_from_prompt_package(prompt_package),
+        "packet_ids": packet_ids_from_prompt_unit(prompt_unit),
         "output_paths": metadata.get("output_paths", {}),
         "prompt_file": metadata.get("prompt_file"),
         "metadata_file": metadata.get("_metadata_file"),
@@ -779,11 +779,48 @@ def apply_model_patches(
         or edit in safe_payload_edits
     ]
 
-    modified_records = copy.deepcopy(reference_records)
-    modified_records, applied_patches, no_effect_edits = apply_validated_edits(traffic_records=modified_records, edits=candidate_edits)
+    (
+        modified_records,
+        applied_patches,
+        no_effect_edits,
+        explicit_header_edits,
+        derived_header_changes,
+        explicit_edit_relationships,
+        materialization_errors,
+    ) = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits)
     modified_packet_ids = sorted({patch["packet_id"] for patch in applied_patches})
     applied_header_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "physical_header"]
     applied_payload_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "canonical_payload"]
+    explicit_header_count_by_prompt_unit: dict[str, int] = defaultdict(int)
+    payload_count_by_prompt_unit: dict[str, int] = defaultdict(int)
+    effective_count_by_prompt_unit: dict[str, int] = defaultdict(int)
+    no_effect_count_by_prompt_unit: dict[str, int] = defaultdict(int)
+    derived_count_by_prompt_unit: dict[str, int] = defaultdict(int)
+    for edit in explicit_header_edits:
+        explicit_header_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    for edit in applied_patches:
+        effective_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    for edit in no_effect_edits:
+        no_effect_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    for edit in applied_payload_edits:
+        payload_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    for change in derived_header_changes:
+        patch_index = change.get("patch_index")
+        packet_id = change.get("packet_id")
+        matching_edits = [
+            edit
+            for edit in explicit_header_edits
+            if edit.get("packet_id") == packet_id and edit.get("patch_index") == patch_index
+        ]
+        for edit in matching_edits[:1]:
+            derived_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    for group in accepted_groups:
+        prompt_unit_key = str(group.get("prompt_unit_id"))
+        group["explicit_header_edit_count"] = explicit_header_count_by_prompt_unit[prompt_unit_key]
+        group["accepted_edit_count"] = explicit_header_count_by_prompt_unit[prompt_unit_key] + payload_count_by_prompt_unit[prompt_unit_key]
+        group["effective_edit_count"] = effective_count_by_prompt_unit[prompt_unit_key]
+        group["no_effect_edit_count"] = no_effect_count_by_prompt_unit[prompt_unit_key]
+        group["derived_header_change_count"] = derived_count_by_prompt_unit[prompt_unit_key]
 
     return {
         "model_name": model_root.name,
@@ -795,10 +832,14 @@ def apply_model_patches(
         "accepted_groups": accepted_groups,
         "llm_output_failure_groups": llm_output_failure_groups,
         "patch_application_errors": patch_application_errors,
+        "explicit_header_edits": sorted(explicit_header_edits, key=lambda item: (item["packet_id"], item.get("field", ""), item["patch_index"], item.get("materialization_sequence_index", 0))),
         "applied_patches": sorted(applied_patches, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
         "effective_header_edits": sorted(applied_header_edits, key=lambda item: (item["packet_id"], item["field"], item["patch_index"])),
         "payload_edits": sorted(applied_payload_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
         "no_effect_edits": sorted(no_effect_edits, key=lambda item: (item["packet_id"], item.get("field", ""), item["patch_index"])),
+        "derived_header_changes": sorted(derived_header_changes, key=lambda item: (item.get("packet_id", ""), item.get("derived_field", ""), item.get("patch_index", 0))),
+        "explicit_edit_relationships": sorted(explicit_edit_relationships, key=lambda item: (item.get("packet_id", ""), item.get("field", ""), item.get("patch_index", 0), item.get("classification", ""))),
+        "header_materialization_issues": sorted(materialization_errors, key=lambda item: (item.get("packet_id", ""), item.get("reason", ""))),
         "modified_packet_ids": modified_packet_ids,
         "summary": {
             "reference_packet_count": len(reference_records),
@@ -808,6 +849,10 @@ def apply_model_patches(
             "llm_output_failure_group_count": len(llm_output_failure_groups),
             "applied_patch_count": len(applied_patches),
             "effective_header_edit_count": len(applied_header_edits),
+            "explicit_header_edit_count": len(explicit_header_edits),
+            "derived_header_change_count": len(derived_header_changes),
+            "explicit_edit_relationship_count": len(explicit_edit_relationships),
+            "header_materialization_issue_count": len(materialization_errors),
             "payload_edit_count": len(applied_payload_edits),
             "no_effect_edit_count": len(no_effect_edits),
             "modified_packet_count": len(modified_packet_ids),
@@ -872,10 +917,15 @@ def merge_model_outputs(
             "llm_output_failure_groups": model_report["llm_output_failure_groups"],
         },
         "patch_application": {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "explicit_header_edits": model_report["explicit_header_edits"],
             "applied_patches": model_report["applied_patches"],
             "effective_header_edits": model_report["effective_header_edits"],
             "payload_edits": model_report["payload_edits"],
             "no_effect_edits": model_report["no_effect_edits"],
+            "derived_header_changes": model_report["derived_header_changes"],
+            "explicit_edit_relationships": model_report["explicit_edit_relationships"],
+            "header_materialization_issues": model_report["header_materialization_issues"],
             "modified_packet_ids": model_report["modified_packet_ids"],
             "errors": model_report["patch_application_errors"],
         },
@@ -909,6 +959,10 @@ def merge_model_outputs(
         "modified_packet_count": model_report["summary"]["modified_packet_count"],
         "patch_application_error_count": model_report["summary"]["patch_application_error_count"],
         "effective_header_edit_count": model_report["summary"]["effective_header_edit_count"],
+        "explicit_header_edit_count": model_report["summary"]["explicit_header_edit_count"],
+        "derived_header_change_count": model_report["summary"]["derived_header_change_count"],
+        "explicit_edit_relationship_count": model_report["summary"]["explicit_edit_relationship_count"],
+        "header_materialization_issue_count": model_report["summary"]["header_materialization_issue_count"],
         "payload_edit_count": model_report["summary"]["payload_edit_count"],
         "no_effect_edit_count": model_report["summary"]["no_effect_edit_count"],
     }
@@ -996,8 +1050,12 @@ def main() -> None:
         print(f"Accepted groups: {result['accepted_group_count']}")
         print(f"LLM Output Failure groups: {result['llm_output_failure_group_count']}")
         print(f"Applied patches: {result['applied_patch_count']}")
+        print(f"Explicit header edits: {result['explicit_header_edit_count']}")
         print(f"Effective header edits: {result['effective_header_edit_count']}")
         print(f"No-effect edits: {result['no_effect_edit_count']}")
+        print(f"Derived header changes: {result['derived_header_change_count']}")
+        print(f"Explicit edit relationships: {result['explicit_edit_relationship_count']}")
+        print(f"Header materialization issues: {result['header_materialization_issue_count']}")
         print(f"Payload edits: {result['payload_edit_count']}")
         print(f"Modified packets: {result['modified_packet_count']}")
         print(f"Patch application errors: {result['patch_application_error_count']}")
