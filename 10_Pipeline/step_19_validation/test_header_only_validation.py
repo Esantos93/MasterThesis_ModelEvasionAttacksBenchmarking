@@ -243,7 +243,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertIn("contradictory_header_overlap", result["summary"]["issue_counts_by_reason"])
         self.assertEqual(1, result["summary"]["invalid_traffic_packet_count"])
 
-    def test_v2_expanded_policy_accepts_composite_to_subfield_derivatives(self) -> None:
+    def test_v2_expanded_policy_recognizes_derivatives_but_rejects_fragmentation(self) -> None:
         explicit_edit = self.explicit_edit("ipv4.flags_fragment_offset", 0x2001)
         explicit_edit["original_value"] = 0
         explicit_edit["constraints"] = {"min": 0, "max": 65535}
@@ -263,12 +263,20 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(0, result["summary"]["error_count"])
         self.assertNotIn(
             "header_field_changed_without_applied_edit",
             result["summary"]["issue_counts_by_reason"],
         )
-        self.assertEqual(1, result["summary"]["accepted_packet_count"])
+        self.assertIn(
+            "ipv4_fragmentation_without_coherent_fragment_set",
+            result["summary"]["issue_counts_by_reason"],
+        )
+        self.assertEqual(0, result["summary"]["accepted_packet_count"])
+        self.assertEqual(1, result["summary"]["invalid_traffic_packet_count"])
+        self.assertEqual(
+            reference_record(),
+            result["reconstruction_packets"][0],
+        )
 
     def test_v2_reports_malformed_explicit_edit_without_crashing(self) -> None:
         merged = self.v2_merged_from_edits([])

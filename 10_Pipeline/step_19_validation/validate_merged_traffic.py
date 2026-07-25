@@ -443,7 +443,7 @@ def validate_payload_preservation_for_record(
     return issues
 
 
-#This function performs explicit protocol-semantic checks that are safe to classify without guessing intent.
+# This function performs explicit protocol-semantic checks that are safe to classify without guessing intent.
 def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) -> list[dict[str, Any]]:
     issues = []
     packet_id = record.get("packet_id")
@@ -458,6 +458,21 @@ def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) 
             fragment_offset_units = ipv4_header.get("fragment_offset_units")
             if dont_fragment and (more_fragments or (isinstance(fragment_offset_units, int) and fragment_offset_units > 0)):
                 issues.append(issue("error", "ipv4_df_incompatible_with_fragmentation", "IPv4 DF is incompatible with MF or non-zero fragment offset.", record_index=record_index, packet_id=packet_id))
+            if more_fragments or (
+                isinstance(fragment_offset_units, int)
+                and fragment_offset_units > 0
+            ):
+                issues.append(
+                    issue(
+                        "error",
+                        "ipv4_fragmentation_without_coherent_fragment_set",
+                        "The selected dataset contains unfragmented IPv4/TCP packets, and the pipeline does not materialize coherent fragment sets from a per-packet header edit.",
+                        record_index=record_index,
+                        packet_id=packet_id,
+                        more_fragments=more_fragments,
+                        fragment_offset_units=fragment_offset_units,
+                    )
+                )
     tcp_header = record.get("tcp_header")
     if isinstance(tcp_header, dict):
         flags = tcp_header.get("flags")
