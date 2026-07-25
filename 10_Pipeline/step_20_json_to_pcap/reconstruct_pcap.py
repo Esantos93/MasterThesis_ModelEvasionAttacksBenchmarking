@@ -1403,6 +1403,21 @@ def audit_reconstructed_pcap(
                     if is_editable_header_field(header_policy, ipv4_policy_fields.get(field, "")):
                         continue
                     record_issue(record_index, "ipv4_immutable_field_changed", "An immutable IPv4 field differs from Step 13.", field=field)
+            if scapy["TCP"] not in reference_packet:
+                record_issue(
+                    record_index,
+                    "reference_tcp_layer_missing",
+                    "The Step 13 reference packet does not expose the TCP layer required by the selected-dataset contract.",
+                )
+                continue
+            if scapy["TCP"] not in packet:
+                record_issue(
+                    record_index,
+                    "tcp_layer_missing_after_reconstruction",
+                    "The reconstructed IPv4 packet no longer exposes a TCP layer; this can occur when an invalid fragmentation edit changes Scapy's protocol dissection.",
+                    ipv4_fragment_field=fragment_field,
+                )
+                continue
             reference_tcp = reference_packet[scapy["TCP"]]
             output_tcp = packet[scapy["TCP"]]
             tcp_policy_fields = {
