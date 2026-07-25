@@ -5,6 +5,7 @@ import copy
 import json
 import re
 import sys
+import time
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -32,6 +33,22 @@ PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
 MERGED_SCHEMA_VERSION = "patch_applied_traffic_v2"
 REPORT_SCHEMA_VERSION = "patch_application_report_v2"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
+
+
+#This function returns a lightweight heartbeat printer for long Step 18 runs.
+def make_heartbeat(interval_seconds: float = 30.0):
+    last_report = {"time": 0.0}
+
+    def heartbeat(message: str, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if force or now - last_report["time"] >= interval_seconds:
+            timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            print(f"[Step 18 heartbeat {timestamp}] {message}", flush=True)
+            last_report["time"] = now
+
+    return heartbeat
+
+
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
@@ -513,7 +530,10 @@ def apply_validated_edits(
     *,
     traffic_records: list[dict[str, Any]],
     edits: list[dict[str, Any]],
+    heartbeat=None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if heartbeat:
+        heartbeat(f"Preparing in-memory packet indexes for {len(traffic_records)} reference records and {len(edits)} candidate edits.", force=True)
     records_by_packet_id = {str(record["packet_id"]): copy.deepcopy(record) for record in traffic_records if isinstance(record, dict) and record.get("packet_id") is not None}
     output_records = [copy.deepcopy(record) for record in traffic_records]
     output_by_packet_id = {str(record["packet_id"]): record for record in output_records if isinstance(record, dict) and record.get("packet_id") is not None}
@@ -527,7 +547,12 @@ def apply_validated_edits(
     header_edits_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for edit in header_edits:
         header_edits_by_packet[str(edit["packet_id"])].append(edit)
-    for packet_id in sorted(header_edits_by_packet):
+    header_packet_ids = sorted(header_edits_by_packet)
+    if heartbeat:
+        heartbeat(f"Materializing header edits for {len(header_packet_ids)} packets.", force=True)
+    for packet_index, packet_id in enumerate(header_packet_ids, start=1):
+        if heartbeat:
+            heartbeat(f"Materialized {packet_index}/{len(header_packet_ids)} edited-header packets.")
         materialization = materialize_header_edits(records_by_packet_id[packet_id], header_edits_by_packet[packet_id])
         output_by_packet_id[packet_id].clear()
         output_by_packet_id[packet_id].update(materialization["materialized_packet"])
@@ -544,7 +569,13 @@ def apply_validated_edits(
             continue
         by_packet[edit["packet_id"]].append(edit)
 
-    for packet_id, packet_edits in by_packet.items():
+    payload_packet_ids = sorted(by_packet)
+    if heartbeat and payload_packet_ids:
+        heartbeat(f"Applying payload edits for {len(payload_packet_ids)} packets.", force=True)
+    for payload_packet_index, packet_id in enumerate(payload_packet_ids, start=1):
+        packet_edits = by_packet[packet_id]
+        if heartbeat:
+            heartbeat(f"Applied payload edits for {payload_packet_index}/{len(payload_packet_ids)} packets.")
         record = output_by_packet_id[packet_id]
         original_payload = str(record.get("payload_hex", "") or "").lower()
         payload = original_payload
@@ -676,6 +707,7 @@ def apply_model_patches(
     prompt_root: Path | None,
     header_policy: dict[str, Any],
     reference_records: list[dict[str, Any]],
+    heartbeat=None,
 ) -> dict[str, Any]:
     parsed_dir = model_root / "parsed"
     metadata_dir = model_root / "metadata"
@@ -683,16 +715,24 @@ def apply_model_patches(
     if not parsed_dir.exists():
         raise FileNotFoundError(f"Parsed output folder does not exist: {parsed_dir}")
 
+    if heartbeat:
+        heartbeat(f"Loading Step 17 metadata from {metadata_dir}.", force=True)
     metadata_by_unit = load_metadata_by_prompt_unit(metadata_dir)
+    if heartbeat:
+        heartbeat(f"Indexing {len(reference_records)} Step 14 reference packets.", force=True)
     packet_index = build_packet_index(reference_records)
     parsed_paths = sorted(parsed_dir.glob("*.parsed.json"), key=lambda path: prompt_unit_id_from_path(path, ".parsed.json"))
     parsed_prompt_unit_ids = {prompt_unit_id_from_path(path, ".parsed.json") for path in parsed_paths}
+    if heartbeat:
+        heartbeat(f"Found {len(parsed_paths)} parsed Step 17 outputs and {len(metadata_by_unit)} metadata records.", force=True)
     accepted_groups = []
     llm_output_failure_groups = []
     patch_application_errors = []
     candidate_edits = []
 
-    for parsed_path in parsed_paths:
+    for parsed_index, parsed_path in enumerate(parsed_paths, start=1):
+        if heartbeat:
+            heartbeat(f"Processed {parsed_index}/{len(parsed_paths)} parsed Step 17 outputs.")
         prompt_unit_id = prompt_unit_id_from_path(parsed_path, ".parsed.json")
         metadata = metadata_by_unit.get(prompt_unit_id, {"prompt_unit_id": prompt_unit_id, "status": "accepted"})
         parsed_output = read_json(parsed_path)
@@ -728,6 +768,8 @@ def apply_model_patches(
             accepted_groups.append(group)
             candidate_edits.extend(edits)
 
+    if heartbeat:
+        heartbeat("Reconciling metadata records without parsed outputs.", force=True)
     for prompt_unit_id, metadata in metadata_by_unit.items():
         if prompt_unit_id in parsed_prompt_unit_ids:
             continue
@@ -748,6 +790,8 @@ def apply_model_patches(
                 }
             )
 
+    if heartbeat:
+        heartbeat(f"Collected {len(candidate_edits)} candidate edits from accepted outputs.", force=True)
     payload_candidate_edits = [edit for edit in candidate_edits if edit.get("edit_kind") == "canonical_payload"]
     safe_payload_edits, conflicting_prompt_unit_ids, overlap_errors = partition_overlapping_edits(payload_candidate_edits)
     patch_application_errors.extend(overlap_errors)
@@ -787,7 +831,9 @@ def apply_model_patches(
         derived_header_changes,
         explicit_edit_relationships,
         materialization_errors,
-    ) = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits)
+    ) = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits, heartbeat=heartbeat)
+    if heartbeat:
+        heartbeat("Building Step 18 V2 summary indexes.", force=True)
     modified_packet_ids = sorted({patch["packet_id"] for patch in applied_patches})
     applied_header_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "physical_header"]
     applied_payload_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "canonical_payload"]
@@ -804,15 +850,12 @@ def apply_model_patches(
         no_effect_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
     for edit in applied_payload_edits:
         payload_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    explicit_edit_by_packet_patch: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for edit in explicit_header_edits:
+        explicit_edit_by_packet_patch.setdefault((edit.get("packet_id"), edit.get("patch_index")), edit)
     for change in derived_header_changes:
-        patch_index = change.get("patch_index")
-        packet_id = change.get("packet_id")
-        matching_edits = [
-            edit
-            for edit in explicit_header_edits
-            if edit.get("packet_id") == packet_id and edit.get("patch_index") == patch_index
-        ]
-        for edit in matching_edits[:1]:
+        edit = explicit_edit_by_packet_patch.get((change.get("packet_id"), change.get("patch_index")))
+        if edit is not None:
             derived_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
     for group in accepted_groups:
         prompt_unit_key = str(group.get("prompt_unit_id"))
@@ -871,14 +914,21 @@ def merge_model_outputs(
     output_dir: Path,
     experiment_config_label: str,
 ) -> dict[str, Any]:
+    heartbeat = make_heartbeat()
+    heartbeat("Starting Step 18 merge.", force=True)
+    heartbeat(f"Loading Step 14 reference traffic from {reference_json}.", force=True)
     reference, reference_records = load_reference_traffic(reference_json)
+    heartbeat(f"Loaded {len(reference_records)} Step 14 reference records.", force=True)
+    heartbeat("Loading header editability policy.", force=True)
     header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
     model_report = apply_model_patches(
         model_root=model_root,
         prompt_root=prompt_root,
         header_policy=header_policy,
         reference_records=reference_records,
+        heartbeat=heartbeat,
     )
+    heartbeat("Assembling Step 18 output objects.", force=True)
     traffic = model_report.pop("traffic")
     output_root = output_dir / experiment_config_label
     merged_path = output_root / "merged_modified_traffic.json"
@@ -947,8 +997,12 @@ def merge_model_outputs(
         "patch_application": merged["patch_application"],
         "model_output": model_report,
     }
+    heartbeat(f"Writing merged traffic JSON to {merged_path}.", force=True)
     write_json(merged_path, merged)
+    heartbeat(f"Finished writing merged traffic JSON to {merged_path}.", force=True)
+    heartbeat(f"Writing merge report JSON to {report_path}.", force=True)
     write_json(report_path, report)
+    heartbeat(f"Finished writing merge report JSON to {report_path}.", force=True)
     return {
         "merged_output": str(merged_path),
         "merge_report": str(report_path),
