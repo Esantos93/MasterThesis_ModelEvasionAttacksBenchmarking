@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import traceback
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,9 +20,22 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
-COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v4"
+COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v5"
 DEFAULT_MATCHING_POLICY = "packet_tcp_conversation"
 SUPPORTED_MATCHING_POLICIES = {"packet", "packet_tcp_conversation"}
+STRICT_DELAYED_EMISSION_FIELDS = (
+    "signature_key",
+    "timestamp",
+    "proto",
+    "src_addr",
+    "src_port",
+    "dst_addr",
+    "dst_port",
+)
+STRICT_DELAYED_EMISSION_IDENTITY_VERSION = "strict_delayed_emission_event_v1"
+STRICT_DELAYED_EMISSION_MATCH_TYPE = "strict_delayed_emission_same_signature_exact_timestamp_directed_tuple_different_packet"
+SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL = "Snort Event Packet-Anchor Shift"
+SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE = "strict_event_identity_packet_anchor_tuple_mismatch"
 
 
 # This function reads a JSON file and returns the parsed Python value.
@@ -150,6 +163,13 @@ def alert_ref(alert: dict[str, Any] | None) -> dict[str, Any] | None:
         "reduced_packet_index": alert.get("reduced_packet_index"),
         "tcp_connection_id": alert.get("tcp_connection_id"),
         "tcp_stream_id": alert.get("tcp_stream_id"),
+        "packet_anchor_tcp_connection_id": alert.get("packet_anchor_tcp_connection_id"),
+        "packet_anchor_tcp_stream_id": alert.get("packet_anchor_tcp_stream_id"),
+        "packet_anchor_proto": alert.get("packet_anchor_proto"),
+        "packet_anchor_src_addr": alert.get("packet_anchor_src_addr"),
+        "packet_anchor_src_port": alert.get("packet_anchor_src_port"),
+        "packet_anchor_dst_addr": alert.get("packet_anchor_dst_addr"),
+        "packet_anchor_dst_port": alert.get("packet_anchor_dst_port"),
         "timestamp": alert.get("timestamp"),
         "src_addr": alert.get("src_addr"),
         "src_port": alert.get("src_port"),
@@ -196,7 +216,7 @@ def packet_anchor(alert: dict[str, Any]) -> str | None:
 
 
 def tcp_conversation_anchor(alert: dict[str, Any]) -> str | None:
-    connection_id = alert.get("tcp_connection_id")
+    connection_id = alert.get("packet_anchor_tcp_connection_id") or alert.get("tcp_connection_id")
     if isinstance(connection_id, str) and connection_id.strip():
         return connection_id
     return None
@@ -210,6 +230,76 @@ def alert_sort_key(alert: dict[str, Any]) -> tuple[Any, ...]:
         int(alert.get("alert_index") or 0),
         str(alert.get("normalized_alert_id") or ""),
     )
+
+
+def alert_consumption_id(alert: dict[str, Any]) -> Any:
+    return alert.get("normalized_alert_id") or id(alert)
+
+
+def normalized_proto(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        if value == 6:
+            return "TCP"
+        if value == 17:
+            return "UDP"
+        return str(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text == "6":
+        return "TCP"
+    if text == "17":
+        return "UDP"
+    return text.upper()
+
+
+def canonical_connection_key(
+    proto: Any,
+    src_addr: Any,
+    src_port: Any,
+    dst_addr: Any,
+    dst_port: Any,
+) -> tuple[Any, ...] | None:
+    protocol = normalized_proto(proto)
+    if protocol is None or src_addr is None or src_port is None or dst_addr is None or dst_port is None:
+        return None
+    try:
+        left = (str(src_addr), int(src_port))
+        right = (str(dst_addr), int(dst_port))
+    except (TypeError, ValueError):
+        return None
+    first, second = sorted([left, right])
+    return (protocol, first, second)
+
+
+def alert_event_connection_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
+    return canonical_connection_key(
+        alert.get("proto"),
+        alert.get("src_addr"),
+        alert.get("src_port"),
+        alert.get("dst_addr"),
+        alert.get("dst_port"),
+    )
+
+
+def packet_anchor_connection_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
+    return canonical_connection_key(
+        alert.get("packet_anchor_proto"),
+        alert.get("packet_anchor_src_addr"),
+        alert.get("packet_anchor_src_port"),
+        alert.get("packet_anchor_dst_addr"),
+        alert.get("packet_anchor_dst_port"),
+    )
+
+
+def packet_anchor_matches_alert_event_tuple(alert: dict[str, Any]) -> bool | None:
+    event_key = alert_event_connection_key(alert)
+    anchor_key = packet_anchor_connection_key(alert)
+    if event_key is None or anchor_key is None:
+        return None
+    return event_key == anchor_key
 
 
 def conversation_compatible(pre_alert: dict[str, Any], post_alert: dict[str, Any], matching_policy: str) -> bool:
@@ -232,6 +322,31 @@ def same_tcp_conversation(pre_alert: dict[str, Any], post_alert: dict[str, Any])
     return pre_connection is not None and pre_connection == post_connection
 
 
+def strict_delayed_emission_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
+    values = []
+    for field in STRICT_DELAYED_EMISSION_FIELDS:
+        value = alert.get(field)
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        values.append(value)
+    return tuple(values)
+
+
+def strict_delayed_emission_key_summary(key: tuple[Any, ...]) -> dict[str, Any]:
+    return dict(zip(STRICT_DELAYED_EMISSION_FIELDS, key))
+
+
+def alerts_by_strict_delayed_emission_key(alerts: list[dict[str, Any]]) -> dict[tuple[Any, ...], list[dict[str, Any]]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for alert in alerts:
+        key = strict_delayed_emission_key(alert)
+        if key is not None:
+            grouped[key].append(alert)
+    return {key: sorted(values, key=alert_sort_key) for key, values in grouped.items()}
+
+
 def pop_first_matching(
     candidates: list[dict[str, Any]],
     predicate: Any,
@@ -252,8 +367,9 @@ def make_comparison_record(
     pre_alert: dict[str, Any],
     post_alert: dict[str, Any] | None,
     reason: str,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "comparison_id": f"cmp-{comparison_index:06d}",
         "classification": classification,
         "match_type": match_type,
@@ -267,10 +383,13 @@ def make_comparison_record(
         "post_alert": alert_ref(post_alert),
         "reason": reason,
     }
+    if extra:
+        record.update(extra)
+    return record
 
 
 # This function compares PRE and POST through the packet -> alert -> signature/rule chain.
-# The primary unit is packet identity, with tcp_connection_id used to catch displaced detections.
+# pkt_num is treated as Snort's emission anchor; strict event identity handles delayed re-emissions.
 def compare_alerts_by_comparable_unit(
     pre_alerts: list[dict[str, Any]],
     post_alerts: list[dict[str, Any]],
@@ -281,10 +400,19 @@ def compare_alerts_by_comparable_unit(
 
     comparison_records = []
     induced_alerts = []
+    ambiguous_delayed_emission_matches = []
     remaining_pre = sorted(pre_alerts, key=alert_sort_key)
     remaining_post = sorted(post_alerts, key=alert_sort_key)
 
-    def append_record(classification: str, match_type: str, phase: int, pre_alert: dict[str, Any], post_alert: dict[str, Any] | None, reason: str) -> None:
+    def append_record(
+        classification: str,
+        match_type: str,
+        phase: int,
+        pre_alert: dict[str, Any],
+        post_alert: dict[str, Any] | None,
+        reason: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         comparison_records.append(
             make_comparison_record(
                 comparison_index=len(comparison_records) + 1,
@@ -295,6 +423,7 @@ def compare_alerts_by_comparable_unit(
                 pre_alert=pre_alert,
                 post_alert=post_alert,
                 reason=reason,
+                extra=extra,
             )
         )
 
@@ -320,6 +449,91 @@ def compare_alerts_by_comparable_unit(
         )
     remaining_pre = next_remaining_pre
 
+    if matching_policy == "packet_tcp_conversation":
+        pre_by_delayed_key = alerts_by_strict_delayed_emission_key(remaining_pre)
+        post_by_delayed_key = alerts_by_strict_delayed_emission_key(remaining_post)
+        consumed_pre_ids = set()
+        consumed_post_ids = set()
+        delayed_pairs = []
+        for delayed_key in sorted(set(pre_by_delayed_key) & set(post_by_delayed_key)):
+            pre_group = pre_by_delayed_key[delayed_key]
+            post_group = [
+                post_alert
+                for post_alert in post_by_delayed_key[delayed_key]
+                if any(packet_anchor(pre_alert) != packet_anchor(post_alert) for pre_alert in pre_group)
+            ]
+            if not pre_group or not post_group:
+                continue
+            if len(pre_group) != 1 or len(post_group) != 1:
+                ambiguous_delayed_emission_matches.append(
+                    {
+                        "identity_version": STRICT_DELAYED_EMISSION_IDENTITY_VERSION,
+                        "identity_fields": list(STRICT_DELAYED_EMISSION_FIELDS),
+                        "identity": strict_delayed_emission_key_summary(delayed_key),
+                        "status": "ambiguous_unmatched",
+                        "reason": "Strict delayed-emission identity matched across PRE/POST, but the evidence was not exactly one PRE alert and one POST alert.",
+                        "pre_alerts": [alert_ref(alert) for alert in pre_group],
+                        "post_alerts": [alert_ref(alert) for alert in post_group],
+                    }
+                )
+                continue
+            candidate_pairs = list(zip(pre_group, post_group))
+            if any(packet_anchor(pre_alert) == packet_anchor(post_alert) for pre_alert, post_alert in candidate_pairs):
+                ambiguous_delayed_emission_matches.append(
+                    {
+                        "identity_version": STRICT_DELAYED_EMISSION_IDENTITY_VERSION,
+                        "identity_fields": list(STRICT_DELAYED_EMISSION_FIELDS),
+                        "identity": strict_delayed_emission_key_summary(delayed_key),
+                        "status": "ambiguous_unmatched",
+                        "reason": "Strict delayed-emission identity was not uniquely assignable to different packet anchors.",
+                        "pre_alerts": [alert_ref(alert) for alert in pre_group],
+                        "post_alerts": [alert_ref(alert) for alert in post_group],
+                    }
+                )
+                continue
+            delayed_pairs.extend(candidate_pairs)
+
+        for pre_alert, matching_post in sorted(delayed_pairs, key=lambda pair: (strict_delayed_emission_key(pair[0]) or (), alert_sort_key(pair[0]), alert_sort_key(pair[1]))):
+            consumed_pre_ids.add(alert_consumption_id(pre_alert))
+            consumed_post_ids.add(alert_consumption_id(matching_post))
+            post_anchor_matches_event = packet_anchor_matches_alert_event_tuple(matching_post)
+            same_packet_anchor_conversation = same_tcp_conversation(pre_alert, matching_post)
+            classification = "TCP-Conversation Displaced Detection" if same_packet_anchor_conversation else SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL
+            match_type = STRICT_DELAYED_EMISSION_MATCH_TYPE if same_packet_anchor_conversation else SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE
+            if same_packet_anchor_conversation:
+                reason = "The same Snort event identity reappeared on a different packet anchor inside the same packet-anchor TCP conversation."
+            elif post_anchor_matches_event is False:
+                reason = "The same Snort event identity reappeared, but Snort used a different PRE/POST emission anchor and the POST pkt_num maps to a physical packet whose tuple does not match the alert event tuple."
+            elif post_anchor_matches_event is True:
+                reason = "The same Snort event identity reappeared, but Snort used a different PRE/POST emission anchor and the POST packet anchor belongs to another packet-anchor TCP conversation."
+            else:
+                reason = "The same Snort event identity reappeared, but packet-anchor tuple evidence is unavailable to prove a same-conversation displacement."
+            append_record(
+                classification,
+                match_type,
+                2,
+                pre_alert,
+                matching_post,
+                reason,
+                {
+                    "delayed_emission_match": {
+                        "identity_version": STRICT_DELAYED_EMISSION_IDENTITY_VERSION,
+                        "identity_fields": list(STRICT_DELAYED_EMISSION_FIELDS),
+                        "identity": strict_delayed_emission_key_summary(strict_delayed_emission_key(pre_alert) or ()),
+                        "timestamp_policy": "exact_string_equality_no_tolerance",
+                        "cardinality_policy": "exactly_one_pre_alert_and_one_post_alert_after_phase_1_consumption",
+                        "pre_alert_event_connection_key": alert_event_connection_key(pre_alert),
+                        "post_alert_event_connection_key": alert_event_connection_key(matching_post),
+                        "pre_packet_anchor_connection_key": packet_anchor_connection_key(pre_alert),
+                        "post_packet_anchor_connection_key": packet_anchor_connection_key(matching_post),
+                        "post_packet_anchor_matches_alert_event_tuple": post_anchor_matches_event,
+                        "same_packet_anchor_tcp_connection": same_packet_anchor_conversation,
+                    }
+                },
+            )
+        remaining_pre = [alert for alert in remaining_pre if alert_consumption_id(alert) not in consumed_pre_ids]
+        remaining_post = [alert for alert in remaining_post if alert_consumption_id(alert) not in consumed_post_ids]
+
     next_remaining_pre = []
     for pre_alert in remaining_pre:
         matching_post = pop_first_matching(
@@ -335,7 +549,7 @@ def compare_alerts_by_comparable_unit(
         append_record(
             "Alert Mutation",
             "same_packet_same_tcp_conversation_different_signature",
-            2,
+            3,
             pre_alert,
             matching_post,
             "The same packet anchor no longer generated the PRE signature, but it generated a different POST alert.",
@@ -358,7 +572,7 @@ def compare_alerts_by_comparable_unit(
         append_record(
             "TCP-Conversation Displaced Detection",
             "same_tcp_conversation_same_signature_different_packet",
-            3,
+            4,
             pre_alert,
             matching_post,
             "The same signature remained inside the same TCP conversation, but the alert emission anchor moved to a different packet.",
@@ -369,7 +583,7 @@ def compare_alerts_by_comparable_unit(
         append_record(
             "Successful Evasion",
             "no_unconsumed_post_alert_in_packet_or_tcp_conversation",
-            4,
+            5,
             pre_alert,
             None,
             "No unconsumed POST alert matched the same packet, and the same signature did not remain in the same TCP conversation.",
@@ -379,7 +593,7 @@ def compare_alerts_by_comparable_unit(
         induced_alerts.append(
             {
                 "matching_policy": matching_policy,
-                "matching_phase": 5,
+                "matching_phase": 6,
                 "comparable_unit_key": comparable_unit_key(post_alert, "post", matching_policy),
                 "comparable_unit_type": comparable_unit_type(matching_policy),
                 "packet_anchor": packet_anchor(post_alert),
@@ -401,6 +615,15 @@ def compare_alerts_by_comparable_unit(
     pre_unit_keys = {comparable_unit_key(alert, "pre", matching_policy) for alert in pre_alerts}
     post_unit_keys = {comparable_unit_key(alert, "post", matching_policy) for alert in post_alerts}
     tcp_displaced_count = sum(record["classification"] == "TCP-Conversation Displaced Detection" for record in comparison_records)
+    snort_event_packet_anchor_shift_count = sum(record["classification"] == SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL for record in comparison_records)
+    strict_delayed_emission_displaced_count = sum(
+        record["match_type"] == STRICT_DELAYED_EMISSION_MATCH_TYPE
+        for record in comparison_records
+    )
+    strict_delayed_emission_match_count = sum(
+        record["match_type"] in {STRICT_DELAYED_EMISSION_MATCH_TYPE, SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE}
+        for record in comparison_records
+    )
     alert_mutation_count = sum(record["classification"] == "Alert Mutation" for record in comparison_records)
     failed_evasion_count = sum(record["classification"] == "Failed Evasion" for record in comparison_records)
     successful_evasion_count = sum(record["classification"] == "Successful Evasion" for record in comparison_records)
@@ -423,6 +646,11 @@ def compare_alerts_by_comparable_unit(
             "same_signature_matches": failed_evasion_count,
             "different_signature_replacements": alert_mutation_count,
             "tcp_conversation_displaced_detection_count": tcp_displaced_count,
+            "snort_event_packet_anchor_shift_count": snort_event_packet_anchor_shift_count,
+            "delayed_snort_event_re_emission_count": snort_event_packet_anchor_shift_count,
+            "strict_delayed_emission_displaced_detection_count": strict_delayed_emission_displaced_count,
+            "strict_delayed_emission_match_count": strict_delayed_emission_match_count,
+            "ambiguous_delayed_emission_match_count": len(ambiguous_delayed_emission_matches),
             "induced_alert_count": len(induced_alerts),
             "post_only_unmatched_count": len(induced_alerts),
             "classification_counts": dict(sorted(classification_counts.items())),
@@ -430,6 +658,7 @@ def compare_alerts_by_comparable_unit(
             "alert_mutation_count": alert_mutation_count,
             "failed_evasion_count": failed_evasion_count,
         },
+        "ambiguous_delayed_emission_matches": ambiguous_delayed_emission_matches,
     }
 
 
@@ -526,19 +755,36 @@ def compare_normalized_alerts(
             "comparable_unit_type": comparable_unit_type(matching_policy),
             "comparable_unit_field": comparable_unit_field(matching_policy),
             "detection_evidence": "Any normalized alert record counts as detection evidence, regardless of action value.",
+            "strict_delayed_emission_fallback": {
+                "identity_version": STRICT_DELAYED_EMISSION_IDENTITY_VERSION,
+                "identity_fields": list(STRICT_DELAYED_EMISSION_FIELDS),
+                "timestamp_policy": "Exact normalized Snort timestamp string equality; no time tolerance is applied.",
+                "tuple_policy": "Directed tuple equality: proto, src_addr, src_port, dst_addr, dst_port.",
+                "cardinality_policy": "Only identity groups with exactly one PRE alert and exactly one POST alert are consumed. Any multiplicity on either side is reported as ambiguous_delayed_emission_matches and is not force-matched, even when PRE and POST counts are equal.",
+                "packet_anchor_tuple_policy": "Step 22 v3 exposes the physical Step 14 tuple for the packet referenced by Snort pkt_num. This tuple is distinct from the alert tuple reported by Snort.",
+                "same_packet_anchor_tcp_conversation_category": "TCP-Conversation Displaced Detection",
+                "packet_anchor_tuple_or_connection_mismatch_category": SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL,
+                "packet_anchor_tuple_or_connection_mismatch_definition": "A PRE and POST alert share the same strict Snort event identity (signature_key + exact alert timestamp + directed alert tuple), but Snort uses a different packet emission anchor in PRE and POST, and the POST pkt_num points to a packet anchor whose physical tuple / packet-anchor TCP conversation belongs to another tcp_connection_id or otherwise does not support classifying the detection as a same-conversation packet displacement.",
+                "match_types": [
+                    STRICT_DELAYED_EMISSION_MATCH_TYPE,
+                    SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE,
+                ],
+            },
             "classification_labels": [
                 "Failed Evasion",
                 "Alert Mutation",
                 "TCP-Conversation Displaced Detection",
+                SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL,
                 "Successful Evasion",
                 "Induced Alert",
             ],
             "phase_order": [
                 "Phase 1: same packet + same TCP conversation + same signature -> Failed Evasion",
-                "Phase 2: same packet + same TCP conversation + different signature -> Alert Mutation",
-                "Phase 3: same tcp_connection_id + same signature + different packet -> TCP-Conversation Displaced Detection",
-                "Phase 4: unconsumed PRE alerts -> Successful Evasion",
-                "Phase 5: unconsumed POST alerts -> Induced Alert",
+                "Phase 2: strict Snort event identity + different packet -> TCP-Conversation Displaced Detection or Snort Event Packet-Anchor Shift",
+                "Phase 3: same packet + same TCP conversation + different signature -> Alert Mutation",
+                "Phase 4: same tcp_connection_id + same signature + different packet -> TCP-Conversation Displaced Detection",
+                "Phase 5: unconsumed PRE alerts -> Successful Evasion",
+                "Phase 6: unconsumed POST alerts -> Induced Alert",
             ],
             "new_post_alert_policy": "Unconsumed POST alerts after phased matching are reported as Induced Alert.",
             "invalid_or_llm_output_failure_policy": "Invalid Traffic and LLM Output Failure come from previous pipeline stages, not from Snort comparison alone.",
@@ -558,6 +804,7 @@ def compare_normalized_alerts(
         "comparison_records": comparison["records"],
         "induced_alerts": comparison["induced_alerts"],
         "post_only_unmatched_alerts": comparison["induced_alerts"],
+        "ambiguous_delayed_emission_matches": comparison["ambiguous_delayed_emission_matches"],
     }
     signature_artifact = {
         "metadata": metadata,
@@ -591,6 +838,11 @@ def compare_normalized_alerts(
         "alert_mutation_count": comparison["summary"]["alert_mutation_count"],
         "failed_evasion_count": comparison["summary"]["failed_evasion_count"],
         "tcp_conversation_displaced_detection_count": comparison["summary"]["tcp_conversation_displaced_detection_count"],
+        "snort_event_packet_anchor_shift_count": comparison["summary"]["snort_event_packet_anchor_shift_count"],
+        "delayed_snort_event_re_emission_count": comparison["summary"]["delayed_snort_event_re_emission_count"],
+        "strict_delayed_emission_displaced_detection_count": comparison["summary"]["strict_delayed_emission_displaced_detection_count"],
+        "strict_delayed_emission_match_count": comparison["summary"]["strict_delayed_emission_match_count"],
+        "ambiguous_delayed_emission_match_count": comparison["summary"]["ambiguous_delayed_emission_match_count"],
         "induced_alert_count": comparison["summary"]["induced_alert_count"],
         "post_only_unmatched_count": comparison["summary"]["post_only_unmatched_count"],
         "alert_comparison": str(comparison_path),
@@ -672,6 +924,7 @@ def main() -> None:
         print(f"Successful evasion: {result['successful_evasion_count']}")
         print(f"Alert mutation: {result['alert_mutation_count']}")
         print(f"TCP-conversation displaced detection: {result['tcp_conversation_displaced_detection_count']}")
+        print(f"Snort event packet-anchor shift: {result['snort_event_packet_anchor_shift_count']}")
         print(f"Failed evasion: {result['failed_evasion_count']}")
         print(f"Induced alert: {result['induced_alert_count']}")
         print(f"Alert comparison: {result['alert_comparison']}")
