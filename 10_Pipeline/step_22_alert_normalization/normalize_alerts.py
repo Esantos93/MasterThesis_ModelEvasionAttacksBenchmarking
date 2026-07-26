@@ -20,7 +20,7 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import terminal_log
 
 
-NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v2"
+NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v3"
 PRE_COMMON_EXPERIMENT_LABEL = "PRE-modification-traffic"
 
 
@@ -131,6 +131,11 @@ def packet_trace_by_reduced_index(packet_json_path: Path) -> dict[int, dict[str,
             "reduced_packet_index": reduced_index,
             "tcp_connection_id": packet.get("tcp_connection_id"),
             "tcp_stream_id": packet.get("tcp_stream_id"),
+            "packet_anchor_proto": packet.get("transport_protocol") or packet.get("proto"),
+            "packet_anchor_src_addr": packet.get("src_ip"),
+            "packet_anchor_src_port": optional_int(packet.get("src_port")),
+            "packet_anchor_dst_addr": packet.get("dst_ip"),
+            "packet_anchor_dst_port": optional_int(packet.get("dst_port")),
             "assigned_flow_ids": (packet.get("flow_context") or {}).get("assigned_flow_ids", []),
             "candidate_flow_ids": (packet.get("flow_context") or {}).get("candidate_flow_ids", []),
             "packet_mapping_status": (packet.get("flow_context") or {}).get("packet_mapping_status"),
@@ -228,6 +233,13 @@ def normalize_one_alert(
         "reduced_packet_index": trace.get("reduced_packet_index"),
         "tcp_connection_id": trace.get("tcp_connection_id"),
         "tcp_stream_id": trace.get("tcp_stream_id"),
+        "packet_anchor_tcp_connection_id": trace.get("tcp_connection_id"),
+        "packet_anchor_tcp_stream_id": trace.get("tcp_stream_id"),
+        "packet_anchor_proto": trace.get("packet_anchor_proto"),
+        "packet_anchor_src_addr": trace.get("packet_anchor_src_addr"),
+        "packet_anchor_src_port": trace.get("packet_anchor_src_port"),
+        "packet_anchor_dst_addr": trace.get("packet_anchor_dst_addr"),
+        "packet_anchor_dst_port": trace.get("packet_anchor_dst_port"),
         "assigned_flow_ids": trace.get("assigned_flow_ids", []),
         "candidate_flow_ids": trace.get("candidate_flow_ids", []),
         "packet_mapping_status": trace.get("packet_mapping_status"),
@@ -379,6 +391,14 @@ def normalize_one_traffic_version(
                     "packet_anchor": "packet_id",
                     "tcp_conversation_anchor": "tcp_connection_id",
                     "tcp_stream_anchor": "tcp_stream_id",
+                    "packet_anchor_tuple_fields": [
+                        "packet_anchor_proto",
+                        "packet_anchor_src_addr",
+                        "packet_anchor_src_port",
+                        "packet_anchor_dst_addr",
+                        "packet_anchor_dst_port",
+                    ],
+                    "packet_anchor_tuple_basis": "Physical Step 14 packet tuple for the packet referenced by Snort pkt_num, not the alert tuple reported by Snort.",
                 },
                 "detector_source": {
                     "basis": "Inferred from Snort gid because alert_json has no explicit source field.",
