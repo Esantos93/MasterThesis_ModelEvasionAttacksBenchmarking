@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "experiment_id": "19_exp_payload_baseline_flow_context_gemma-4-26B-A4B-it",
+    "experiment_id": "20_exp_payload_baseline_flow_context_gemma-4-26B-A4B-it",
     "description": "Payload-involved CICIDS2017 comparison run using Flow-context-aware grouping, conservative header editability, and the hybrid header plus canonical payload modification strategy. Model used google/gemma-4-26B-A4B-it.",
     "output_root": "/home/santos/Experiments"
   },
@@ -52,7 +52,7 @@
     "prompt_instructions_profile": "baseline_instructions_profile_v1",
     "temperature": 0.0,
     "top_p": 0.95,
-    "prompt_target_context": 4096,
+    "prompt_target_context": 8192,
     "prompt_template_overhead_tokens": 500,
     "runtime_max_model_len": 12288,
     "token_budget": {
