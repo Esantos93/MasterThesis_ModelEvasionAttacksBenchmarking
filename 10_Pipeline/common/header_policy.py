@@ -8,6 +8,13 @@ from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 HEADER_POLICY_SCHEMA_VERSION = "header_editability_policy_v1"
+HEADER_EDITABILITY_POLICY_FILES = {
+    "conservative_header_editability_v1": "conservative_header_editability_v1.json",
+    "aggressive_header_editability_v1": "aggressive_header_editability_v1.json",
+}
+HEADER_EDITABILITY_POLICY_DIR = (
+    PIPELINE_ROOT / "step_15_grouping" / "01_editability_policies"
+)
 KNOWN_HEADER_PROTOCOLS = {"ethernet", "ipv4", "tcp"}
 HEADER_FIELD_ALIASES = {
     "ipv4.tos": "tos",
@@ -91,18 +98,23 @@ def read_json(path: str | Path) -> Any:
         return json.load(input_file)
 
 
-#This function resolves the header editability policy selected by the active config.
+#This function resolves the named header editability policy selected by the active config.
 def resolve_header_policy_path(config: dict[str, Any], config_path: str | Path) -> Path:
-    policy_value = config.get("pipeline", {}).get("header_editability_policy_path")
-    if not policy_value:
-        raise ValueError("pipeline.header_editability_policy_path is required for header editability.")
-    policy_path = Path(str(policy_value)).expanduser()
-    if policy_path.is_absolute():
-        return policy_path
-    config_relative = Path(config_path).expanduser().parent / policy_path
-    if config_relative.exists():
-        return config_relative
-    return PIPELINE_ROOT / policy_path
+    del config_path
+    policy_id = config.get("pipeline", {}).get("header_editability_policy")
+    if not isinstance(policy_id, str) or not policy_id.strip():
+        raise ValueError(
+            "pipeline.header_editability_policy must be a non-empty string."
+        )
+    policy_id = policy_id.strip()
+    filename = HEADER_EDITABILITY_POLICY_FILES.get(policy_id)
+    if filename is None:
+        supported = ", ".join(sorted(HEADER_EDITABILITY_POLICY_FILES))
+        raise ValueError(
+            f"Unsupported pipeline.header_editability_policy {policy_id!r}. "
+            f"Supported values: {supported}."
+        )
+    return HEADER_EDITABILITY_POLICY_DIR / filename
 
 
 #This function expands the policy rules into a field->rule lookup.
@@ -141,6 +153,12 @@ def load_header_editability_policy(config: dict[str, Any], config_path: str | Pa
         raise ValueError(
             f"Header policy schema must be {HEADER_POLICY_SCHEMA_VERSION!r}; "
             f"found {policy.get('schema_version')!r}: {policy_path}"
+        )
+    configured_policy_id = config["pipeline"]["header_editability_policy"]
+    if policy.get("policy_id") != configured_policy_id:
+        raise ValueError(
+            f"Header policy_id must match the configured selector "
+            f"{configured_policy_id!r}: {policy_path}"
         )
     if not isinstance(policy.get("rules"), list):
         raise ValueError(f"Header editability policy must contain a rules list: {policy_path}")
