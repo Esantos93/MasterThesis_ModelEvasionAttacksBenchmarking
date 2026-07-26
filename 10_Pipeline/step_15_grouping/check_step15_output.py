@@ -24,6 +24,7 @@ from common.token_budget import (
 )
 from step_15_grouping.ids_context_mapping import IdsContextMapping, load_ids_context_mapping
 from step_15_grouping.payload_v3 import PAYLOAD_OWNERSHIP_POLICY, PAYLOAD_SEGMENTATION_POLICY
+from step_15_grouping.runtime_diagnostics import summarize_token_plan
 
 
 MANIFEST_SCHEMA = "compact_modification_units_manifest_v3"
@@ -208,6 +209,11 @@ def check_common_manifest(
         )
     if metadata.get("token_budget_policy") != TOKEN_BUDGET_POLICY:
         raise ValueError(f"Manifest must use token budget policy {TOKEN_BUDGET_POLICY}.")
+    planning_diagnostics = metadata.get("planning_diagnostics")
+    if not isinstance(planning_diagnostics, dict):
+        raise ValueError("Manifest lacks bounded planning_diagnostics.")
+    if int(planning_diagnostics.get("modification_unit_count") or -1) != len(units):
+        raise ValueError("Manifest planning_diagnostics has the wrong unit count.")
 
     return check_header_classification_artifacts(metadata, manifest_path.parent)
 
@@ -1230,8 +1236,14 @@ def check_v3_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, A
             )
         token_plan_policy_counts[str(unit["token_plan"]["policy"])] += 1
         token_plan_overflow_count += int(overflow_tokens > 0)
-        if summary_entry.get("token_plan") != unit.get("token_plan"):
-            raise ValueError(f"Unit summary {unit_path} has a different token plan.")
+        if "token_plan" in summary_entry:
+            raise ValueError(
+                f"Unit summary {unit_path} duplicates the unbounded source token plan."
+            )
+        if summary_entry.get("token_plan_summary") != summarize_token_plan(
+            unit["token_plan"]
+        ):
+            raise ValueError(f"Unit summary {unit_path} has a different token-plan summary.")
 
         represented_packet_ids = represented_parent_packet_ids(
             unit=unit,
@@ -1353,6 +1365,29 @@ def check_v3_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, A
         raise ValueError("Manifest lacks over_budget_summary.")
     if int(over_budget_summary.get("over_budget_editable_count") or 0) != 0:
         raise ValueError("Manifest reports over-budget routable V3 units.")
+
+    planning_diagnostics = metadata["planning_diagnostics"]
+    expected_presence_counts = {
+        ("mixed" if label == "hybrid" else label): count
+        for label, count in target_presence_counts.items()
+    }
+    expected_planning_counts = {
+        "header_packet_atom_count": len(header_packet_ids),
+        "payload_entry_count": canonical_payload_entry_count,
+        "payload_editable_byte_count": payload_coverage[
+            "editable_canonical_payload_byte_count"
+        ],
+    }
+    for field, expected_value in expected_planning_counts.items():
+        if int(planning_diagnostics.get(field) or 0) != expected_value:
+            raise ValueError(
+                f"Manifest planning_diagnostics.{field} is inconsistent: "
+                f"expected {expected_value}, found {planning_diagnostics.get(field)!r}."
+            )
+    if planning_diagnostics.get("unit_target_presence_counts") != dict(
+        sorted(expected_presence_counts.items())
+    ):
+        raise ValueError("Manifest planning_diagnostics target-presence counts are inconsistent.")
 
     return {
         "source_packet_json": str(source_path),

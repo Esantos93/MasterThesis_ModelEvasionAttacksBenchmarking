@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import copy
+import heapq
 import json
 import sys
+import tempfile
 import time
 import traceback
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 #This allows the script to find the folder common/ with shared code, even if the script is run from a different working directory.
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +49,12 @@ from step_15_grouping.payload_v3 import (
     build_semantic_partitions,
     payload_bytes,
     payload_entry_interval,
-    validate_canonical_payload_coverage,
+)
+from step_15_grouping.runtime_diagnostics import (
+    PlanningDiagnostics,
+    memory_snapshot_text,
+    process_memory_snapshot,
+    summarize_token_plan,
 )
 
 
@@ -958,10 +965,6 @@ def atom_source_packets(atom: dict[str, Any]) -> list[dict[str, Any]]:
     return [packet for packet in source_packets if isinstance(packet, dict)]
 
 
-def atom_order_key(atom: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(atom["order_key"])
-
-
 def unit_type_for_atoms(atoms: list[dict[str, Any]], grouping_policy: str, fragmented: bool) -> str:
     has_headers = any(atom["kind"] == "physical_header" for atom in atoms)
     has_payload = any(atom["kind"] == "canonical_payload" for atom in atoms)
@@ -993,7 +996,8 @@ def build_v3_modification_units_for_group(
     token_config: dict[str, Any],
     packets_by_id: dict[str, dict[str, Any]],
     ids_context_mapping: IdsContextMapping | None = None,
-) -> list[dict[str, Any]]:
+    planning_spool_dir: Path | None = None,
+) -> Iterator[dict[str, Any]]:
     parent_group_id = str(parent_group["parent_group_id"])
     group_metadata = build_group_metadata(
         parent_group_id,
@@ -1102,24 +1106,6 @@ def build_v3_modification_units_for_group(
             fragment_compact_unit_context=fragment_compact_unit_context,
         )
 
-    atoms: list[dict[str, Any]] = []
-    if capabilities.allows_header_edits:
-        for packet in parent_packets:
-            packet_id = str(packet["packet_id"])
-            atoms.append(
-                {
-                    "kind": "physical_header",
-                    "order_key": (
-                        int(packet["reduced_packet_index"]),
-                        0,
-                        packet_id,
-                        0,
-                    ),
-                    "physical_packet": compact_packets_by_id[packet_id],
-                    "source_packets": [packet],
-                }
-            )
-
     def payload_atom(entry: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
         _region_id, start, _end = payload_entry_interval(entry)
         source_packets = [
@@ -1143,6 +1129,11 @@ def build_v3_modification_units_for_group(
             "canonical_payload_region": entry,
             "source_packets": source_packets,
         }
+
+    records_by_id = {
+        str(record["canonical_region_id"]): record
+        for record in parent_group.get("records", [])
+    }
 
     def candidate_entry_fits(entry: dict[str, Any], record: dict[str, Any]) -> bool:
         # Reserve the longest normal fragment id/count envelope during range sizing.
@@ -1239,8 +1230,60 @@ def build_v3_modification_units_for_group(
             best = max(best, interval_best)
         return best
 
-    if capabilities.allows_payload_edits:
-        for record in parent_group.get("records", []):
+    def payload_descriptor(
+        record: dict[str, Any],
+        *,
+        start: int,
+        end: int,
+        mode: str,
+        provenance: dict[str, Any],
+        range_index: int = 1,
+        range_count: int = 1,
+    ) -> dict[str, Any]:
+        return {
+            "kind": "canonical_payload",
+            "order_key": [
+                int(record["first_reduced_packet_index"]),
+                1,
+                str(record["canonical_region_id"]),
+                start,
+            ],
+            "canonical_region_id": str(record["canonical_region_id"]),
+            "start": start,
+            "end": end,
+            "mode": mode,
+            "provenance": provenance,
+            "range_index": range_index,
+            "range_count": range_count,
+        }
+
+    def iter_header_descriptors() -> Iterator[dict[str, Any]]:
+        if not capabilities.allows_header_edits:
+            return
+        for packet in parent_packets:
+            packet_id = str(packet["packet_id"])
+            yield {
+                "kind": "physical_header",
+                "order_key": [
+                    int(packet["reduced_packet_index"]),
+                    0,
+                    packet_id,
+                    0,
+                ],
+                "packet_id": packet_id,
+            }
+
+    def iter_payload_descriptors() -> Iterator[dict[str, Any]]:
+        if not capabilities.allows_payload_edits:
+            return
+        ordered_records = sorted(
+            records_by_id.values(),
+            key=lambda record: (
+                int(record["first_reduced_packet_index"]),
+                str(record["canonical_region_id"]),
+            ),
+        )
+        for record in ordered_records:
             payload_length = len(payload_bytes(record))
             if payload_length == 0:
                 continue
@@ -1256,7 +1299,13 @@ def build_v3_modification_units_for_group(
                 provenance=full_provenance,
             )
             if candidate_entry_fits(full_entry, record):
-                atoms.append(payload_atom(full_entry, record))
+                yield payload_descriptor(
+                    record,
+                    start=0,
+                    end=payload_length,
+                    mode="canonical_region_full",
+                    provenance=full_provenance,
+                )
                 continue
 
             partitions, semantic_summary = build_semantic_partitions(record)
@@ -1278,7 +1327,13 @@ def build_v3_modification_units_for_group(
                         provenance=provenance,
                     )
                     if candidate_entry_fits(whole_entry, record):
-                        atoms.append(payload_atom(whole_entry, record))
+                        yield payload_descriptor(
+                            record,
+                            start=partition_start,
+                            end=partition_end,
+                            mode=whole_mode,
+                            provenance=provenance,
+                        )
                         continue
                 else:
                     provenance = {
@@ -1308,7 +1363,7 @@ def build_v3_modification_units_for_group(
                     }
                     if indivisible_overflow:
                         range_provenance["indivisible_overflow"] = True
-                    entry = build_entry(
+                    yield payload_descriptor(
                         record,
                         start=range_start,
                         end=range_end,
@@ -1317,47 +1372,115 @@ def build_v3_modification_units_for_group(
                         range_index=range_index,
                         range_count=len(ranges),
                     )
-                    atoms.append(payload_atom(entry, record))
 
-    atoms.sort(key=atom_order_key)
-    if not atoms:
-        return []
+    def materialize_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
+        if descriptor["kind"] == "physical_header":
+            packet_id = str(descriptor["packet_id"])
+            return {
+                "kind": "physical_header",
+                "order_key": tuple(descriptor["order_key"]),
+                "physical_packet": compact_packets_by_id[packet_id],
+                "source_packets": [packets_by_id[packet_id]],
+            }
+        region_id = str(descriptor["canonical_region_id"])
+        record = records_by_id[region_id]
+        entry = build_entry(
+            record,
+            start=int(descriptor["start"]),
+            end=int(descriptor["end"]),
+            mode=str(descriptor["mode"]),
+            provenance=dict(descriptor["provenance"]),
+            range_index=int(descriptor["range_index"]),
+            range_count=int(descriptor["range_count"]),
+        )
+        return payload_atom(entry, record)
+
+    def build_from_descriptors(
+        descriptors: list[dict[str, Any]],
+        fragment_index: int,
+        fragment_count: int,
+    ) -> dict[str, Any]:
+        return build_from_atoms(
+            [materialize_descriptor(descriptor) for descriptor in descriptors],
+            fragment_index,
+            fragment_count,
+        )
+
+    descriptors = heapq.merge(
+        iter_header_descriptors(),
+        iter_payload_descriptors(),
+        key=lambda descriptor: tuple(descriptor["order_key"]),
+    )
 
     if grouping_policy == "fixed_packet_count" and ids_context_mapping is not None:
-        return [build_from_atoms(atoms, 1, 1)]
+        all_descriptors = list(descriptors)
+        if all_descriptors:
+            yield build_from_descriptors(all_descriptors, 1, 1)
+        return
 
-    chunks: list[list[dict[str, Any]]] = []
-    current_chunk: list[dict[str, Any]] = []
-    for atom in atoms:
-        candidate_chunk = current_chunk + [atom]
-        candidate = build_from_atoms(candidate_chunk, len(chunks) + 1, 1)
-        if current_chunk and not token_plan_fits(candidate):
-            chunks.append(current_chunk)
-            current_chunk = [atom]
-        else:
-            current_chunk = candidate_chunk
-    if current_chunk:
-        chunks.append(current_chunk)
+    spool_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        prefix=f"{parent_group_id}_chunks_",
+        suffix=".tmp",
+        dir=planning_spool_dir,
+        delete=False,
+    )
+    spool_path = Path(spool_handle.name)
 
-    while True:
-        fragment_count = len(chunks)
-        units = [
-            build_from_atoms(chunk, fragment_index, fragment_count)
-            for fragment_index, chunk in enumerate(chunks, start=1)
-        ]
-        oversized_index = next(
-            (
-                index
-                for index, unit in enumerate(units)
-                if not token_plan_fits(unit) and len(chunks[index]) > 1
-            ),
-            None,
-        )
-        if oversized_index is None:
-            indivisible_unit = next(
-                (unit for unit in units if not token_plan_fits(unit)),
-                None,
+    def write_chunk(handle: Any, chunk: list[dict[str, Any]]) -> None:
+        handle.write(
+            json.dumps(
+                chunk,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
             )
+        )
+        handle.write("\n")
+
+    def iter_spooled_chunks(path: Path) -> Iterator[list[dict[str, Any]]]:
+        with path.open("r", encoding="utf-8") as input_file:
+            for line in input_file:
+                if line.strip():
+                    chunk = json.loads(line)
+                    if not isinstance(chunk, list) or not chunk:
+                        raise ValueError("Step 15 planning spool contains an invalid chunk.")
+                    yield chunk
+
+    chunk_count = 0
+    current_chunk: list[dict[str, Any]] = []
+    try:
+        for descriptor in descriptors:
+            candidate_chunk = current_chunk + [descriptor]
+            candidate = build_from_descriptors(candidate_chunk, chunk_count + 1, 1)
+            if current_chunk and not token_plan_fits(candidate):
+                write_chunk(spool_handle, current_chunk)
+                chunk_count += 1
+                current_chunk = [descriptor]
+            else:
+                current_chunk = candidate_chunk
+        if current_chunk:
+            write_chunk(spool_handle, current_chunk)
+            chunk_count += 1
+        spool_handle.close()
+
+        if chunk_count == 0:
+            return
+
+        while True:
+            oversized_indexes: set[int] = set()
+            indivisible_unit = None
+            for index, chunk in enumerate(iter_spooled_chunks(spool_path)):
+                unit = build_from_descriptors(chunk, index + 1, chunk_count)
+                if token_plan_fits(unit):
+                    continue
+                if len(chunk) > 1:
+                    oversized_indexes.add(index)
+                else:
+                    indivisible_unit = unit
+                    break
             if indivisible_unit is not None:
                 has_payload = bool(indivisible_unit.get("canonical_payload_regions"))
                 reason = (
@@ -1369,13 +1492,45 @@ def build_v3_modification_units_for_group(
                     f"{reason}: unit={indivisible_unit['modification_unit_id']!r}, "
                     f"overflow_tokens={indivisible_unit['token_plan']['overflow_tokens']}."
                 )
-            return units
-        oversized_chunk = chunks[oversized_index]
-        midpoint = max(1, len(oversized_chunk) // 2)
-        chunks[oversized_index : oversized_index + 1] = [
-            oversized_chunk[:midpoint],
-            oversized_chunk[midpoint:],
-        ]
+            if not oversized_indexes:
+                break
+
+            replacement_handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                prefix=f"{parent_group_id}_chunks_replanned_",
+                suffix=".tmp",
+                dir=planning_spool_dir,
+                delete=False,
+            )
+            replacement_path = Path(replacement_handle.name)
+            try:
+                for index, chunk in enumerate(iter_spooled_chunks(spool_path)):
+                    if index not in oversized_indexes:
+                        write_chunk(replacement_handle, chunk)
+                        continue
+                    midpoint = max(1, len(chunk) // 2)
+                    write_chunk(replacement_handle, chunk[:midpoint])
+                    write_chunk(replacement_handle, chunk[midpoint:])
+                replacement_handle.close()
+                spool_path.unlink()
+                replacement_path.replace(spool_path)
+                chunk_count += len(oversized_indexes)
+            finally:
+                if not replacement_handle.closed:
+                    replacement_handle.close()
+                replacement_path.unlink(missing_ok=True)
+
+        for fragment_index, chunk in enumerate(
+            iter_spooled_chunks(spool_path),
+            start=1,
+        ):
+            yield build_from_descriptors(chunk, fragment_index, chunk_count)
+    finally:
+        if not spool_handle.closed:
+            spool_handle.close()
+        spool_path.unlink(missing_ok=True)
 
 
 def validate_v3_prompt_unit(
@@ -1444,44 +1599,6 @@ def validate_v3_prompt_unit(
                 raise ValueError("V3 payload replacement byte/hex limits are inconsistent.")
 
 
-def validate_v3_population(
-    *,
-    header_packet_ids: list[str],
-    payload_entries: list[dict[str, Any]],
-    ordered_packets: list[dict[str, Any]],
-    canonical_records: list[dict[str, Any]],
-    capabilities: ModificationCapabilities,
-) -> dict[str, Any]:
-    if capabilities.allows_header_edits:
-        expected_packet_ids = [str(packet["packet_id"]) for packet in ordered_packets]
-        if Counter(header_packet_ids) != Counter(expected_packet_ids):
-            raise ValueError("V3 editable-header packet ownership is incomplete or duplicated.")
-    elif header_packet_ids:
-        raise ValueError("Payload-only V3 population contains physical header edit owners.")
-
-    if capabilities.allows_payload_edits:
-        payload_coverage = validate_canonical_payload_coverage(
-            entries=payload_entries,
-            canonical_records=canonical_records,
-        )
-    else:
-        if payload_entries:
-            raise ValueError("Header-only V3 population contains canonical payload edit owners.")
-        payload_coverage = {
-            "canonical_region_count": len(canonical_records),
-            "editable_canonical_region_count": 0,
-            "editable_canonical_payload_byte_count": 0,
-            "duplicate_editable_byte_count": 0,
-            "missing_editable_byte_count": 0,
-            "overlapping_editable_interval_count": 0,
-        }
-    return {
-        "header_owner_physical_packet_count": len(header_packet_ids),
-        "duplicate_header_owner_physical_packet_count": 0,
-        **payload_coverage,
-    }
-
-
 def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -> dict[str, Any]:
     group_metadata = prompt_unit.get("group_metadata", {})
     summary = {
@@ -1490,7 +1607,7 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "unit_type": prompt_unit["unit_type"],
         "modification_unit_file": str(prompt_unit_path),
         "estimated_input_tokens": prompt_unit["estimated_input_tokens"],
-        "token_plan": prompt_unit.get("token_plan"),
+        "token_plan_summary": summarize_token_plan(prompt_unit["token_plan"]),
         "token_planning_validation_status": prompt_unit.get("token_planning_validation_status"),
         "physical_packet_count": len(prompt_unit.get("physical_packets", [])),
         "canonical_payload_region_entry_count": len(prompt_unit.get("canonical_payload_regions", [])),
@@ -1510,35 +1627,182 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
     return summary
 
 
-#This function separates over-budget prompt units that can be routed to the LLM from context-only units Step 17 will auto-accept.
-def build_over_budget_summary(prompt_unit_summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    summary = {
-        "over_budget_count": 0,
-        "over_budget_editable_count": 0,
-        "over_budget_non_routable_count": 0,
-        "over_budget_context_only_count": 0,
-        "over_budget_reasons": {},
-    }
-    reason_counts: Counter[str] = Counter()
-    for prompt_unit in prompt_unit_summaries:
-        token_plan = prompt_unit.get("token_plan")
-        if isinstance(token_plan, dict) and int(token_plan.get("overflow_tokens") or 0) == 0:
-            continue
-        summary["over_budget_count"] += 1
-        editable_region_count = int(prompt_unit.get("editable_region_count") or 0)
-        if editable_region_count > 0:
-            summary["over_budget_editable_count"] += 1
+class UnitPopulationAccumulator:
+    def __init__(self) -> None:
+        self.modification_unit_count = 0
+        self.over_budget_summary = {
+            "over_budget_count": 0,
+            "over_budget_editable_count": 0,
+            "over_budget_non_routable_count": 0,
+            "over_budget_context_only_count": 0,
+            "over_budget_reasons": {},
+        }
+        self.ids_context_compact_units_with_records = 0
+        self.ids_context_total_materialized_detector_record_count = 0
+
+    def observe(self, prompt_unit: dict[str, Any]) -> None:
+        self.modification_unit_count += 1
+        token_plan = prompt_unit["token_plan"]
+        if int(token_plan.get("overflow_tokens") or 0) > 0:
+            self.over_budget_summary["over_budget_count"] += 1
+            if int(prompt_unit.get("editable_region_count") or 0) > 0:
+                self.over_budget_summary["over_budget_editable_count"] += 1
+            else:
+                self.over_budget_summary["over_budget_non_routable_count"] += 1
+                self.over_budget_summary["over_budget_context_only_count"] += 1
+        ids_context = prompt_unit.get("ids_context")
+        if isinstance(ids_context, dict):
+            records = ids_context.get("records", [])
+            record_count = len(records) if isinstance(records, list) else 0
+            self.ids_context_total_materialized_detector_record_count += record_count
+            if record_count:
+                self.ids_context_compact_units_with_records += 1
+
+
+class EditableOwnershipCoverageTracker:
+    def __init__(self) -> None:
+        self.header_packet_counts: Counter[str] = Counter()
+        self.payload_region_cursors: dict[str, int] = {}
+        self.payload_editable_byte_count = 0
+
+    def observe(self, prompt_unit: dict[str, Any]) -> None:
+        self.header_packet_counts.update(
+            str(packet["packet_id"])
+            for packet in prompt_unit.get("physical_packets", [])
+        )
+        for entry in prompt_unit.get("canonical_payload_regions", []):
+            region_id, start, end = payload_entry_interval(entry)
+            expected_start = self.payload_region_cursors.get(region_id, 0)
+            if start != expected_start:
+                relationship = "overlap" if start < expected_start else "gap"
+                raise ValueError(
+                    f"Canonical payload ownership {relationship} for region {region_id!r}: "
+                    f"expected_start={expected_start}, actual_start={start}."
+                )
+            self.payload_region_cursors[region_id] = end
+            self.payload_editable_byte_count += end - start
+
+    def finalize(
+        self,
+        *,
+        ordered_packets: list[dict[str, Any]],
+        canonical_records: list[dict[str, Any]],
+        capabilities: ModificationCapabilities,
+    ) -> dict[str, Any]:
+        if capabilities.allows_header_edits:
+            expected_packet_ids = [str(packet["packet_id"]) for packet in ordered_packets]
+            if self.header_packet_counts != Counter(expected_packet_ids):
+                raise ValueError("V3 editable-header packet ownership is incomplete or duplicated.")
+        elif self.header_packet_counts:
+            raise ValueError("Payload-only V3 population contains physical header edit owners.")
+
+        if capabilities.allows_payload_edits:
+            editable_region_count = 0
+            for record in canonical_records:
+                region_id = str(record["canonical_region_id"])
+                payload_length = int(
+                    record.get("payload_length_bytes", record.get("length", 0)) or 0
+                )
+                if payload_length:
+                    editable_region_count += 1
+                covered_end = self.payload_region_cursors.pop(region_id, 0)
+                if covered_end != payload_length:
+                    raise ValueError(
+                        f"Canonical payload ownership gap for region {region_id!r}: "
+                        f"covered={covered_end}, expected={payload_length}."
+                    )
+            if self.payload_region_cursors:
+                raise ValueError(
+                    "V3 payload entries reference unknown canonical regions: "
+                    f"{sorted(self.payload_region_cursors)[:10]}"
+                )
+            payload_coverage = {
+                "canonical_region_count": len(canonical_records),
+                "editable_canonical_region_count": editable_region_count,
+                "editable_canonical_payload_byte_count": self.payload_editable_byte_count,
+                "duplicate_editable_byte_count": 0,
+                "missing_editable_byte_count": 0,
+                "overlapping_editable_interval_count": 0,
+            }
         else:
-            summary["over_budget_non_routable_count"] += 1
-            summary["over_budget_context_only_count"] += 1
-        context_truncation = prompt_unit.get("context_truncation")
-        if isinstance(context_truncation, dict):
-            reason = str(context_truncation.get("reason", "unknown") or "unknown")
-        else:
-            reason = "unknown"
-        reason_counts[reason] += 1
-    summary["over_budget_reasons"] = dict(sorted(reason_counts.items()))
-    return summary
+            if self.payload_region_cursors:
+                raise ValueError("Header-only V3 population contains canonical payload edit owners.")
+            payload_coverage = {
+                "canonical_region_count": len(canonical_records),
+                "editable_canonical_region_count": 0,
+                "editable_canonical_payload_byte_count": 0,
+                "duplicate_editable_byte_count": 0,
+                "missing_editable_byte_count": 0,
+                "overlapping_editable_interval_count": 0,
+            }
+        return {
+            "header_owner_physical_packet_count": sum(self.header_packet_counts.values()),
+            "duplicate_header_owner_physical_packet_count": 0,
+            **payload_coverage,
+        }
+
+
+class ManifestSummarySpool:
+    def __init__(self, output_dir: Path) -> None:
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix="step15_manifest_entries_",
+            suffix=".tmp",
+            dir=output_dir,
+            delete=False,
+        )
+        self.path = Path(handle.name)
+        self._handle = handle
+        self._closed = False
+
+    def append(self, summary: dict[str, Any]) -> None:
+        self._handle.write(
+            json.dumps(
+                summary,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        self._handle.write("\n")
+
+    def close(self) -> None:
+        if not self._closed:
+            self._handle.close()
+            self._closed = True
+
+    def remove(self) -> None:
+        self.close()
+        self.path.unlink(missing_ok=True)
+
+
+def write_manifest_streaming(
+    *,
+    manifest_path: Path,
+    metadata: dict[str, Any],
+    parent_group_index: list[dict[str, Any]],
+    summary_spool_path: Path,
+) -> None:
+    with manifest_path.open("w", encoding="utf-8", newline="\n") as output_file:
+        output_file.write("{\n  \"metadata\": ")
+        json.dump(metadata, output_file, ensure_ascii=False, indent=2, sort_keys=True)
+        output_file.write(",\n  \"parent_groups\": ")
+        json.dump(parent_group_index, output_file, ensure_ascii=False, indent=2, sort_keys=True)
+        output_file.write(",\n  \"compact_modification_units\": [")
+        first_entry = True
+        with summary_spool_path.open("r", encoding="utf-8") as spool_file:
+            for line in spool_file:
+                serialized_entry = line.strip()
+                if not serialized_entry:
+                    continue
+                output_file.write("\n    " if first_entry else ",\n    ")
+                output_file.write(serialized_entry)
+                first_entry = False
+        if not first_entry:
+            output_file.write("\n  ")
+        output_file.write("]\n}\n")
 
 
 def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]], ordered_packets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1565,8 +1829,8 @@ def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]],
     }
 
 
-#This function builds the top-level compact modification-units manifest artifact.
-def build_manifest(
+#This function builds bounded top-level metadata for the streamed modification-units manifest.
+def build_manifest_metadata(
     *,
     config: dict[str, Any],
     input_json_path: Path,
@@ -1578,9 +1842,9 @@ def build_manifest(
     header_policy: dict[str, Any],
     capabilities: ModificationCapabilities,
     parent_group_count: int,
-    parent_group_index: list[dict[str, Any]],
     parent_group_stats: dict[str, Any],
-    prompt_unit_summaries: list[dict[str, Any]],
+    unit_population: UnitPopulationAccumulator,
+    planning_diagnostics: PlanningDiagnostics,
     header_classification_artifacts: dict[str, Any],
     physical_parent_group_coverage: dict[str, Any],
     editable_ownership_coverage: dict[str, Any],
@@ -1606,7 +1870,7 @@ def build_manifest(
             "parent_group_count": parent_group_count,
             "parent_group_index_representation": PARENT_GROUP_INDEX_REPRESENTATION,
             "parent_group_size_statistics": parent_group_stats,
-            "modification_unit_count": len(prompt_unit_summaries),
+            "modification_unit_count": unit_population.modification_unit_count,
             "total_packet_count": len(packet_json["traffic"]),
             "total_canonical_region_count": len(packet_json["canonical_tcp_regions"]),
             "compact_view_schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
@@ -1635,9 +1899,10 @@ def build_manifest(
             },
             "token_budget_policy": TOKEN_BUDGET_POLICY,
             "token_planning_validation_status": "validated_v3_planning_path",
-            "over_budget_summary": build_over_budget_summary(prompt_unit_summaries),
+            "over_budget_summary": unit_population.over_budget_summary,
             "physical_parent_group_coverage": physical_parent_group_coverage,
             "editable_ownership_coverage": editable_ownership_coverage,
+            "planning_diagnostics": planning_diagnostics.as_dict(),
     }
     if group_size_packets is not None:
         metadata["group_size_packets"] = group_size_packets
@@ -1674,25 +1939,21 @@ def build_manifest(
             "payload_replacement_size_policy": token_config["payload_replacement_size_policy"],
         }
     if ids_context_mapping is not None:
-        nonempty_unit_count = sum(
-            1 for summary in prompt_unit_summaries if int(summary.get("ids_context_record_count") or 0) > 0
-        )
-        total_materialized_records = sum(
-            int(summary.get("ids_context_record_count") or 0) for summary in prompt_unit_summaries
+        nonempty_unit_count = unit_population.ids_context_compact_units_with_records
+        total_materialized_records = (
+            unit_population.ids_context_total_materialized_detector_record_count
         )
         metadata.update(ids_context_mapping.manifest_metadata())
         metadata.update(
             {
                 "ids_context_compact_units_with_records": nonempty_unit_count,
-                "ids_context_compact_units_without_records": len(prompt_unit_summaries) - nonempty_unit_count,
+                "ids_context_compact_units_without_records": (
+                    unit_population.modification_unit_count - nonempty_unit_count
+                ),
                 "ids_context_total_materialized_detector_record_count": total_materialized_records,
             }
         )
-    return {
-        "metadata": metadata,
-        "parent_groups": parent_group_index,
-        "compact_modification_units": prompt_unit_summaries,
-    }
+    return metadata
 
 
 #This function removes every previous Step 15 JSON artifact from the selected policy directory.
@@ -1710,6 +1971,7 @@ def run_grouping(
     output_dir: str | Path | None,
     group_size_packets: int | None,
     heartbeat_seconds: int,
+    planning_diagnostic_only: bool = False,
 ) -> dict[str, Any]:
     if heartbeat_seconds < 0:
         raise ValueError("--heartbeat-seconds must be zero or a positive integer.")
@@ -1754,10 +2016,14 @@ def run_grouping(
         parent_groups=parent_groups,
     )
     physical_parent_group_coverage = validate_physical_parent_group_coverage(parent_groups, ordered_traffic)
-    parent_group_index = build_parent_group_index(
-        parent_groups=parent_groups,
-        grouping_policy=grouping_policy,
-        group_size_packets=effective_group_size,
+    parent_group_index = (
+        []
+        if planning_diagnostic_only
+        else build_parent_group_index(
+            parent_groups=parent_groups,
+            grouping_policy=grouping_policy,
+            group_size_packets=effective_group_size,
+        )
     )
     canonical_region_count = len(packet_json["canonical_tcp_regions"])
     parent_group_stats = parent_group_size_statistics(parent_groups)
@@ -1771,7 +2037,13 @@ def run_grouping(
         current_time = time.monotonic()
         if force or current_time - last_heartbeat_time[0] >= heartbeat_seconds:
             elapsed_seconds = round(current_time - start_time, 1)
-            print(f"Step 15 heartbeat: {message}, elapsed_seconds={elapsed_seconds}", flush=True)
+            memory_text = memory_snapshot_text()
+            memory_suffix = f", {memory_text}" if memory_text else ""
+            print(
+                f"Step 15 heartbeat: {message}, elapsed_seconds={elapsed_seconds}"
+                f"{memory_suffix}",
+                flush=True,
+            )
             last_heartbeat_time[0] = current_time
 
     heartbeat(
@@ -1783,135 +2055,177 @@ def run_grouping(
         force=True,
     )
 
-    clear_previous_output_files(output_group_dir)
-    heartbeat("writing_header_classification_artifacts=started", force=True)
-    header_classification_artifacts = write_header_classification_artifacts(
-        output_dir=output_group_dir,
-        input_json_path=input_json_path,
-        packet_json=packet_json,
-        ordered_packets=ordered_traffic,
-        header_policy=header_policy,
-    )
-    heartbeat(
-        f"writing_header_classification_artifacts=completed, "
-        f"classified_packets={header_classification_artifacts['packet_count']}",
-        force=True,
-    )
-    prompt_unit_summaries = []
-    generated_header_packet_ids: list[str] = []
-    generated_payload_entries: list[dict[str, Any]] = []
+    header_classification_artifacts = None
+    summary_spool = None
+    if planning_diagnostic_only:
+        heartbeat(
+            "planning_diagnostic_only=true, output_artifacts_will_not_be_modified",
+            force=True,
+        )
+    else:
+        clear_previous_output_files(output_group_dir)
+        heartbeat("writing_header_classification_artifacts=started", force=True)
+        header_classification_artifacts = write_header_classification_artifacts(
+            output_dir=output_group_dir,
+            input_json_path=input_json_path,
+            packet_json=packet_json,
+            ordered_packets=ordered_traffic,
+            header_policy=header_policy,
+        )
+        heartbeat(
+            f"writing_header_classification_artifacts=completed, "
+            f"classified_packets={header_classification_artifacts['packet_count']}",
+            force=True,
+        )
+        summary_spool = ManifestSummarySpool(output_group_dir)
+
+    unit_population = UnitPopulationAccumulator()
+    coverage_tracker = EditableOwnershipCoverageTracker()
+    planning_diagnostics = PlanningDiagnostics()
     experiment_id = config["experiment"]["experiment_id"]
     source_schema = str(packet_json.get("metadata", {}).get("schema_version", ""))
     packets_by_id = {str(packet["packet_id"]): packet for packet in ordered_traffic}
+    try:
+        for processed_parent_groups, parent_group in enumerate(parent_groups, start=1):
+            heartbeat(
+                f"processing_parent_group={parent_group['parent_group_id']}, "
+                f"parent_group_index={processed_parent_groups}/{len(parent_groups)}, "
+                f"parent_group_physical_packets={len(parent_group.get('physical_packets', []))}, "
+                f"modification_units_planned={unit_population.modification_unit_count}"
+            )
+            modification_units = build_v3_modification_units_for_group(
+                experiment_id=experiment_id,
+                source_packet_json=input_json_path,
+                source_packet_json_schema_version=source_schema,
+                grouping_policy=grouping_policy,
+                group_size_packets=effective_group_size,
+                parent_group=parent_group,
+                header_field_definitions=packet_json["header_field_definitions"],
+                header_policy=header_policy,
+                capabilities=capabilities,
+                token_config=token_config,
+                packets_by_id=packets_by_id,
+                ids_context_mapping=ids_mapping,
+                planning_spool_dir=(
+                    None if planning_diagnostic_only else output_group_dir
+                ),
+            )
+            for modification_unit in modification_units:
+                if (
+                    ids_mapping is not None
+                    and grouping_policy == "fixed_packet_count"
+                    and not token_plan_fits(modification_unit)
+                ):
+                    raise ValueError(
+                        "IDS-aware fixed_packet_count Compact Unit exceeds prompt_target_context; "
+                        "Step 15 will not remove packets or detector evidence. "
+                        f"unit={modification_unit['modification_unit_id']!r}, "
+                        f"overflow_tokens={modification_unit['token_plan']['overflow_tokens']}"
+                    )
+                if not token_plan_fits(modification_unit):
+                    raise ValueError(
+                        "Step 15 generated an over-budget V3 Compact Unit that cannot be routed: "
+                        f"unit={modification_unit['modification_unit_id']!r}, "
+                        f"overflow_tokens={modification_unit['token_plan']['overflow_tokens']}."
+                    )
+                validate_v3_prompt_unit(modification_unit, capabilities)
+                unit_population.observe(modification_unit)
+                coverage_tracker.observe(modification_unit)
+                planning_diagnostics.observe_unit(modification_unit)
 
-    for processed_parent_groups, parent_group in enumerate(parent_groups, start=1):
-        heartbeat(
-            f"processing_parent_group={parent_group['parent_group_id']}, "
-            f"parent_group_index={processed_parent_groups}/{len(parent_groups)}, "
-            f"parent_group_physical_packets={len(parent_group.get('physical_packets', []))}, "
-            f"modification_units_written={len(prompt_unit_summaries)}"
+                if not planning_diagnostic_only:
+                    modification_unit_path = (
+                        output_group_dir / f"{modification_unit['modification_unit_id']}.json"
+                    )
+                    write_json(modification_unit_path, modification_unit)
+                    if summary_spool is None:
+                        raise AssertionError("Manifest summary spool is not available.")
+                    summary_spool.append(
+                        summarize_prompt_unit(modification_unit, modification_unit_path)
+                    )
+            heartbeat(
+                f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
+                f"modification_units_planned={unit_population.modification_unit_count}"
+            )
+
+        editable_ownership_coverage = coverage_tracker.finalize(
+            ordered_packets=ordered_traffic,
+            canonical_records=canonical_records,
+            capabilities=capabilities,
         )
-        modification_units = build_v3_modification_units_for_group(
-            experiment_id=experiment_id,
-            source_packet_json=input_json_path,
-            source_packet_json_schema_version=source_schema,
+        diagnostic_report = planning_diagnostics.as_dict()
+        if planning_diagnostic_only:
+            heartbeat(
+                f"planning_diagnostic_completed=true, "
+                f"modification_units_planned={unit_population.modification_unit_count}",
+                force=True,
+            )
+            return {
+                "status": "planning_diagnostic_complete",
+                "planning_diagnostic_only": True,
+                "manifest_path": None,
+                "output_dir": str(output_group_dir),
+                "parent_group_count": len(parent_groups),
+                "modification_unit_count": unit_population.modification_unit_count,
+                "packet_count": len(traffic),
+                "canonical_region_count": canonical_region_count,
+                "group_size_packets": effective_group_size,
+                "parent_group_size_statistics": parent_group_stats,
+                "modification_strategy": capabilities.strategy,
+                "manifest_schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
+                "editable_ownership_coverage": editable_ownership_coverage,
+                "planning_diagnostics": diagnostic_report,
+                "memory": process_memory_snapshot(),
+            }
+
+        if summary_spool is None or header_classification_artifacts is None:
+            raise AssertionError("Step 15 output state was not initialized.")
+        summary_spool.close()
+        metadata = build_manifest_metadata(
+            config=config,
+            input_json_path=input_json_path,
+            output_dir=output_group_dir,
+            packet_json=packet_json,
             grouping_policy=grouping_policy,
             group_size_packets=effective_group_size,
-            parent_group=parent_group,
-            header_field_definitions=packet_json["header_field_definitions"],
+            token_config=token_config,
             header_policy=header_policy,
             capabilities=capabilities,
-            token_config=token_config,
-            packets_by_id=packets_by_id,
+            parent_group_count=len(parent_groups),
+            parent_group_stats=parent_group_stats,
+            unit_population=unit_population,
+            planning_diagnostics=planning_diagnostics,
+            header_classification_artifacts=header_classification_artifacts,
+            physical_parent_group_coverage=physical_parent_group_coverage,
+            editable_ownership_coverage=editable_ownership_coverage,
             ids_context_mapping=ids_mapping,
         )
-        for modification_unit in modification_units:
-            if ids_mapping is not None and grouping_policy == "fixed_packet_count" and not token_plan_fits(modification_unit):
-                raise ValueError(
-                    "IDS-aware fixed_packet_count Compact Unit exceeds prompt_target_context; "
-                    "Step 15 will not remove packets or detector evidence. "
-                    f"unit={modification_unit['modification_unit_id']!r}, "
-                    f"overflow_tokens={modification_unit['token_plan']['overflow_tokens']}"
-                )
-            if not token_plan_fits(modification_unit):
-                raise ValueError(
-                    "Step 15 generated an over-budget V3 Compact Unit that cannot be routed: "
-                    f"unit={modification_unit['modification_unit_id']!r}, "
-                    f"overflow_tokens={modification_unit['token_plan']['overflow_tokens']}."
-                )
-            validate_v3_prompt_unit(modification_unit, capabilities)
-            modification_unit_path = (
-                output_group_dir / f"{modification_unit['modification_unit_id']}.json"
-            )
-            write_json(modification_unit_path, modification_unit)
-            prompt_unit_summaries.append(
-                summarize_prompt_unit(modification_unit, modification_unit_path)
-            )
-            generated_header_packet_ids.extend(
-                str(packet["packet_id"])
-                for packet in modification_unit.get("physical_packets", [])
-            )
-            generated_payload_entries.extend(
-                {
-                    "canonical_region_id": entry["canonical_region_id"],
-                    "editable_regions": [
-                        {
-                            "start_offset_bytes": region["start_offset_bytes"],
-                            "end_offset_bytes": region["end_offset_bytes"],
-                        }
-                        for region in entry.get("editable_regions", [])
-                    ],
-                }
-                for entry in modification_unit.get("canonical_payload_regions", [])
-            )
-        heartbeat(
-            f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
-            f"modification_units_written={len(prompt_unit_summaries)}"
+        manifest_path = output_group_dir / "compact_modification_units_manifest_v3.json"
+        write_manifest_streaming(
+            manifest_path=manifest_path,
+            metadata=metadata,
+            parent_group_index=parent_group_index,
+            summary_spool_path=summary_spool.path,
         )
 
-    editable_ownership_coverage = validate_v3_population(
-        header_packet_ids=generated_header_packet_ids,
-        payload_entries=generated_payload_entries,
-        ordered_packets=ordered_traffic,
-        canonical_records=canonical_records,
-        capabilities=capabilities,
-    )
-    manifest = build_manifest(
-        config=config,
-        input_json_path=input_json_path,
-        output_dir=output_group_dir,
-        packet_json=packet_json,
-        grouping_policy=grouping_policy,
-        group_size_packets=effective_group_size,
-        token_config=token_config,
-        header_policy=header_policy,
-        capabilities=capabilities,
-        parent_group_count=len(parent_groups),
-        parent_group_index=parent_group_index,
-        parent_group_stats=parent_group_stats,
-        prompt_unit_summaries=prompt_unit_summaries,
-        header_classification_artifacts=header_classification_artifacts,
-        physical_parent_group_coverage=physical_parent_group_coverage,
-        editable_ownership_coverage=editable_ownership_coverage,
-        ids_context_mapping=ids_mapping,
-    )
-    manifest_path = output_group_dir / "compact_modification_units_manifest_v3.json"
-    write_json(manifest_path, manifest)
-
-    return {
-        "manifest_path": str(manifest_path),
-        "headers_full_classification_manifest": header_classification_artifacts["manifest_path"],
-        "headers_full_classification_jsonl": header_classification_artifacts["jsonl_path"],
-        "output_dir": str(output_group_dir),
-        "parent_group_count": len(parent_groups),
-        "modification_unit_count": len(prompt_unit_summaries),
-        "packet_count": len(traffic),
-        "canonical_region_count": canonical_region_count,
-        "group_size_packets": effective_group_size,
-        "parent_group_size_statistics": parent_group_stats,
-        "modification_strategy": capabilities.strategy,
-        "manifest_schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
-    }
+        return {
+            "manifest_path": str(manifest_path),
+            "headers_full_classification_manifest": header_classification_artifacts["manifest_path"],
+            "headers_full_classification_jsonl": header_classification_artifacts["jsonl_path"],
+            "output_dir": str(output_group_dir),
+            "parent_group_count": len(parent_groups),
+            "modification_unit_count": unit_population.modification_unit_count,
+            "packet_count": len(traffic),
+            "canonical_region_count": canonical_region_count,
+            "group_size_packets": effective_group_size,
+            "parent_group_size_statistics": parent_group_stats,
+            "modification_strategy": capabilities.strategy,
+            "manifest_schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
+            "planning_diagnostics": diagnostic_report,
+        }
+    finally:
+        if summary_spool is not None:
+            summary_spool.remove()
 
 
 #This function resolves the Step 15 terminal log path from CLI arguments and the active config.
@@ -1941,6 +2255,14 @@ def parse_cli_args() -> argparse.Namespace:
         help="Override pipeline.group_size_packets; under packet_json_v4 this counts physical packets.",
     )
     parser.add_argument("--heartbeat-seconds", type=int, default=30, help="Print progress heartbeat every N seconds. Use 0 to disable.")
+    parser.add_argument(
+        "--planning-diagnostic-only",
+        action="store_true",
+        help=(
+            "Plan and validate every V3 Compact Unit without clearing or writing Step 15 "
+            "artifacts. Use this to calibrate prompt_target_context before a full generation."
+        ),
+    )
     parser.add_argument("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_15_grouping/<experiment_config_label>/step_15_grouping_<timestamp>.log.")
     return parser.parse_args()
 
@@ -1957,6 +2279,7 @@ def main() -> None:
                 output_dir=args.output_dir,
                 group_size_packets=args.group_size_packets,
                 heartbeat_seconds=args.heartbeat_seconds,
+                planning_diagnostic_only=args.planning_diagnostic_only,
             )
         except Exception:
             print("Step 15 failed. Traceback follows:", file=sys.stderr)
@@ -1971,7 +2294,14 @@ def main() -> None:
             print(f"Configured group size (physical packets): {result['group_size_packets']}")
         print(f"Parent group size statistics: {result['parent_group_size_statistics']}")
         print(f"Output directory: {result['output_dir']}")
-        print(f"Modification-units manifest written to: {result['manifest_path']}")
+        if result.get("planning_diagnostic_only"):
+            print("Planning diagnostic only: no Step 15 output artifacts were modified.")
+            print(
+                "Planning diagnostics: "
+                + json.dumps(result["planning_diagnostics"], sort_keys=True)
+            )
+        else:
+            print(f"Modification-units manifest written to: {result['manifest_path']}")
 
 
 if __name__ == "__main__":

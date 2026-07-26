@@ -718,6 +718,156 @@ class CanonicalStep15Tests(unittest.TestCase):
             ],
         )
 
+    def test_payload_context_calibration_reduces_unit_growth_without_changing_coverage(self) -> None:
+        payload = bytes(index % 251 for index in range(1000))
+        source = packet_json_v4([tcp_record(1, 1000, payload)])
+        observed_counts = {}
+
+        for prompt_target_context in (4096, 6144, 8192):
+            with self.subTest(prompt_target_context=prompt_target_context):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    active_config = config(
+                        root,
+                        "flow_context_aware",
+                        modification_strategy="canonical_payload_only_strategy_v1",
+                    )
+                    active_config["llm"]["prompt_target_context"] = prompt_target_context
+                    active_config["llm"]["runtime_max_model_len"] = 12288
+                    active_config["llm"]["payload_window_left_context_bytes"] = 128
+                    active_config["llm"]["payload_window_right_context_bytes"] = 128
+                    active_config["llm"]["token_budget"]["chars_per_token_estimate"] = 2.0
+                    active_config["llm"]["token_budget"][
+                        "output_token_estimation_safety_factor"
+                    ] = 1.35
+                    manifest, units = self.run_step15(
+                        copy.deepcopy(source),
+                        active_config,
+                        root,
+                    )
+
+                observed_counts[prompt_target_context] = len(units)
+                self.assertEqual(
+                    len(payload),
+                    manifest["metadata"]["editable_ownership_coverage"][
+                        "editable_canonical_payload_byte_count"
+                    ],
+                )
+                self.assertTrue(
+                    all(unit["token_plan"]["overflow_tokens"] == 0 for unit in units)
+                )
+
+        self.assertGreater(observed_counts[4096], observed_counts[6144])
+        self.assertGreater(observed_counts[6144], observed_counts[8192])
+        self.assertEqual(1, observed_counts[8192])
+
+    def test_large_payload_with_many_aliases_stays_bounded_when_budget_allows(self) -> None:
+        payload = bytes(index % 251 for index in range(2000))
+        source = packet_json_v4(
+            [
+                tcp_record(packet_number, 1000, payload)
+                for packet_number in range(1, 9)
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="canonical_payload_only_strategy_v1",
+            )
+            active_config["llm"]["prompt_target_context"] = 16384
+            active_config["llm"]["runtime_max_model_len"] = 16384
+            manifest, units = self.run_step15(source, active_config, root)
+
+        payload_entries = [
+            entry
+            for unit in units
+            for entry in unit.get("canonical_payload_regions", [])
+        ]
+        self.assertEqual(1, len(payload_entries))
+        self.assertEqual(8, len(payload_entries[0]["physical_aliases"]))
+        self.assertEqual("canonical_region_full", payload_entries[0]["payload_view"]["mode"])
+        self.assertEqual(1, len(units))
+        self.assertEqual(
+            len(payload),
+            manifest["metadata"]["editable_ownership_coverage"][
+                "editable_canonical_payload_byte_count"
+            ],
+        )
+
+    def test_planning_diagnostic_does_not_write_or_clear_step15_outputs(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"A" * 1000)])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="hybrid_header_canonical_payload_strategy_v1",
+            )
+            input_path = root / "selected_packet_records.json"
+            config_path = root / "config.json"
+            output_dir = root / "05_groups"
+            existing_output = output_dir / "flow_context_aware"
+            existing_output.mkdir(parents=True)
+            sentinel_path = existing_output / "existing_population.json"
+            sentinel_path.write_text('{"keep":true}', encoding="utf-8")
+            input_path.write_text(json.dumps(source), encoding="utf-8")
+            config_path.write_text(json.dumps(active_config), encoding="utf-8")
+
+            result = run_grouping(
+                config_path=config_path,
+                input_json=input_path,
+                output_dir=output_dir,
+                group_size_packets=None,
+                heartbeat_seconds=0,
+                planning_diagnostic_only=True,
+            )
+
+            self.assertEqual("planning_diagnostic_complete", result["status"])
+            self.assertTrue(result["planning_diagnostic_only"])
+            self.assertIsNone(result["manifest_path"])
+            self.assertGreater(result["modification_unit_count"], 0)
+            self.assertEqual(
+                result["modification_unit_count"],
+                result["planning_diagnostics"]["modification_unit_count"],
+            )
+            self.assertEqual('{"keep":true}', sentinel_path.read_text(encoding="utf-8"))
+            self.assertFalse(
+                (existing_output / "compact_modification_units_manifest_v3.json").exists()
+            )
+
+    def test_manifest_uses_bounded_token_plan_summaries(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"A" * 1000)])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="canonical_payload_only_strategy_v1",
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+
+        summary = manifest["compact_modification_units"][0]
+        self.assertNotIn("token_plan", summary)
+        self.assertIn("token_plan_summary", summary)
+        self.assertNotIn(
+            "worst_case_output",
+            summary["token_plan_summary"]["breakdown"],
+        )
+        self.assertNotIn(
+            "payload_replacement_limits",
+            summary["token_plan_summary"]["breakdown"],
+        )
+        self.assertIn("worst_case_output", units[0]["token_plan"]["breakdown"])
+        self.assertEqual(
+            units[0]["token_plan"]["total_planned_tokens"],
+            summary["token_plan_summary"]["total_planned_tokens"],
+        )
+
     def test_payload_v3_fails_when_an_indivisible_byte_exceeds_the_token_target(self) -> None:
         source = packet_json_v4([tcp_record(1, 1000, b"x")])
 

@@ -226,8 +226,8 @@ def build_payload_entry(
             "value": payload[end_offset_bytes:context_end].hex(),
         }
 
-    physical_aliases = [dict(alias) for alias in record.get("physical_aliases", [])]
-    if not physical_aliases:
+    physical_aliases = record.get("physical_aliases", [])
+    if not isinstance(physical_aliases, list) or not physical_aliases:
         raise ValueError(f"Canonical region {canonical_region_id!r} has no physical alias context.")
 
     segmentation = {
