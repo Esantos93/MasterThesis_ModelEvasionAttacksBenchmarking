@@ -116,6 +116,17 @@ def require_int(summary: dict[str, Any], key: str) -> int:
     return value
 
 
+def optional_int(summary: dict[str, Any], key: str, default: int = 0) -> int:
+    if key not in summary:
+        return default
+    value = summary.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Step 23 summary field must be an integer: {key}")
+    if value < 0:
+        raise ValueError(f"Step 23 summary field must be non-negative: {key}")
+    return value
+
+
 def safe_rate(numerator: int | float, denominator: int) -> float:
     if denominator == 0:
         raise ValueError(
@@ -223,7 +234,12 @@ def build_metrics(
     failed_evasion_count = require_int(comparison_summary, "failed_evasion_count")
     successful_evasion_count = require_int(comparison_summary, "successful_evasion_count")
     alert_mutation_count = require_int(comparison_summary, "alert_mutation_count")
-    tcp_conversation_displaced_detection_count = int(comparison_summary.get("tcp_conversation_displaced_detection_count", 0) or 0)
+    tcp_conversation_displaced_detection_count = optional_int(comparison_summary, "tcp_conversation_displaced_detection_count")
+    snort_event_packet_anchor_shift_count = optional_int(
+        comparison_summary,
+        "snort_event_packet_anchor_shift_count",
+        optional_int(comparison_summary, "delayed_snort_event_re_emission_count"),
+    )
     induced_alert_count = int(
         comparison_summary.get("induced_alert_count", comparison_summary.get("post_only_unmatched_count", 0)) or 0
     )
@@ -240,7 +256,11 @@ def build_metrics(
         )
 
     signature_mutation_weight = signature_mutation_weight_from_config(config)
-    partial_credit_candidate_count = alert_mutation_count + tcp_conversation_displaced_detection_count
+    partial_credit_candidate_count = (
+        alert_mutation_count
+        + tcp_conversation_displaced_detection_count
+        + snort_event_packet_anchor_shift_count
+    )
     weighted_success = successful_evasion_count + (signature_mutation_weight * partial_credit_candidate_count)
     signature_breakdowns = summarize_signature_rows(signature_summary)
     return {
@@ -250,6 +270,8 @@ def build_metrics(
         "successful_evasion_count": successful_evasion_count,
         "alert_mutation_count": alert_mutation_count,
         "tcp_conversation_displaced_detection_count": tcp_conversation_displaced_detection_count,
+        "snort_event_packet_anchor_shift_count": snort_event_packet_anchor_shift_count,
+        "delayed_snort_event_re_emission_count": snort_event_packet_anchor_shift_count,
         "induced_alert_count": induced_alert_count,
         "post_only_unmatched_count": post_only_unmatched_count,
         "same_signature_match_count": same_signature_match_count,
@@ -262,6 +284,8 @@ def build_metrics(
         "failed_evasion_rate": safe_rate(failed_evasion_count, pre_alert_count),
         "alert_mutation_rate_raw": safe_rate(alert_mutation_count, pre_alert_count),
         "tcp_conversation_displaced_detection_rate": safe_rate(tcp_conversation_displaced_detection_count, pre_alert_count),
+        "snort_event_packet_anchor_shift_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
+        "delayed_snort_event_re_emission_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
         "post_alert_retention_rate": safe_rate(post_alert_count, pre_alert_count),
         "induced_alert_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
         "post_only_unmatched_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
@@ -283,6 +307,8 @@ def write_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "successful_evasion_count",
         "alert_mutation_count",
         "tcp_conversation_displaced_detection_count",
+        "snort_event_packet_anchor_shift_count",
+        "delayed_snort_event_re_emission_count",
         "induced_alert_count",
         "post_only_unmatched_count",
         "same_signature_match_count",
@@ -295,6 +321,8 @@ def write_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "failed_evasion_rate",
         "alert_mutation_rate_raw",
         "tcp_conversation_displaced_detection_rate",
+        "snort_event_packet_anchor_shift_rate",
+        "delayed_snort_event_re_emission_rate",
         "post_alert_retention_rate",
         "induced_alert_rate_vs_pre",
         "post_only_unmatched_rate_vs_pre",
@@ -345,6 +373,7 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"| Successful Evasion | {metrics['successful_evasion_count']} |",
         f"| Alert Mutation | {metrics['alert_mutation_count']} |",
         f"| TCP-Conversation Displaced Detection | {metrics['tcp_conversation_displaced_detection_count']} |",
+        f"| Snort Event Packet-Anchor Shift | {metrics['snort_event_packet_anchor_shift_count']} |",
         f"| Induced Alert | {metrics['induced_alert_count']} |",
         "",
         "## Supporting Rates",
@@ -355,6 +384,7 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"| Failed evasion rate | {percentage(metrics['failed_evasion_rate'])} |",
         f"| Alert mutation rate raw | {percentage(metrics['alert_mutation_rate_raw'])} |",
         f"| TCP-conversation displaced detection rate | {percentage(metrics['tcp_conversation_displaced_detection_rate'])} |",
+        f"| Snort event packet-anchor shift rate | {percentage(metrics['snort_event_packet_anchor_shift_rate'])} |",
         f"| Induced alert rate vs PRE | {percentage(metrics['induced_alert_rate_vs_pre'])} |",
         f"| POST alert retention rate | {percentage(metrics['post_alert_retention_rate'])} |",
         "",
@@ -445,12 +475,14 @@ def compute_metrics(
         "source_alert_comparison": str(alert_comparison_path),
         "source_signature_summary": str(signature_summary_path),
         "metric_policy": {
-            "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * (alert_mutation_count + tcp_conversation_displaced_detection_count)) / pre_alert_count",
+            "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * (alert_mutation_count + tcp_conversation_displaced_detection_count + snort_event_packet_anchor_shift_count)) / pre_alert_count",
             "current_policy": "With signature_mutation_weight = 0, only successful_evasion_count contributes to SER.",
-            "partial_credit_candidate_policy": "If partial credit is enabled later, Alert Mutation and TCP-Conversation Displaced Detection are the weighted candidate categories.",
+            "partial_credit_candidate_policy": "If partial credit is enabled later, Alert Mutation, TCP-Conversation Displaced Detection, and Snort Event Packet-Anchor Shift are the weighted candidate categories.",
             "signature_mutation_weight_source": "pipeline.signature_mutation_weight",
             "zero_pre_alert_policy": "fail clearly because SER is undefined without PRE detections.",
             "tcp_conversation_displaced_detection_policy": "reported separately and not counted as evasion.",
+            "snort_event_packet_anchor_shift_policy": "reported separately and not counted as evasion.",
+            "delayed_snort_event_re_emission_policy": "legacy alias for snort_event_packet_anchor_shift_count.",
             "induced_alert_policy": "reported separately and not counted as evasion.",
             "post_only_unmatched_policy": "legacy alias for induced_alert_count.",
         },
@@ -528,6 +560,7 @@ def main() -> None:
         print(f"Successful evasion: {metrics['successful_evasion_count']}")
         print(f"Alert mutation: {metrics['alert_mutation_count']}")
         print(f"TCP-conversation displaced detection: {metrics['tcp_conversation_displaced_detection_count']}")
+        print(f"Snort event packet-anchor shift: {metrics['snort_event_packet_anchor_shift_count']}")
         print(f"Failed evasion: {metrics['failed_evasion_count']}")
         print(f"Induced alert: {metrics['induced_alert_count']}")
         print(f"Signature mutation weight: {metrics['signature_mutation_weight']}")

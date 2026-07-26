@@ -29,6 +29,7 @@ class Step24MetricsTests(unittest.TestCase):
         mutation: int,
         induced: int = 0,
         displaced: int = 0,
+        delayed: int = 0,
         weight: float = 0.0,
         detector_policy: str = "security-ips",
         signatures: list[dict] | None = None,
@@ -77,6 +78,7 @@ class Step24MetricsTests(unittest.TestCase):
             "same_signature_matches": failed,
             "different_signature_replacements": mutation,
             "tcp_conversation_displaced_detection_count": displaced,
+            "snort_event_packet_anchor_shift_count": delayed,
             "induced_alert_count": induced,
             "post_only_unmatched_count": induced,
             "classification_counts": {
@@ -85,6 +87,7 @@ class Step24MetricsTests(unittest.TestCase):
                 "Induced Alert": induced,
                 "Successful Evasion": successful,
                 "TCP-Conversation Displaced Detection": displaced,
+                "Snort Event Packet-Anchor Shift": delayed,
             },
             "successful_evasion_count": successful,
             "alert_mutation_count": mutation,
@@ -144,22 +147,23 @@ class Step24MetricsTests(unittest.TestCase):
             result = compute_metrics(config_path=config)
             self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.2)
 
-    def test_partial_credit_weight_includes_mutation_and_displaced_detection(self) -> None:
+    def test_partial_credit_weight_includes_mutation_displaced_detection_and_delayed_re_emission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = self.make_fixture(
                 root,
                 pre_count=10,
                 post_count=10,
-                failed=4,
+                failed=3,
                 successful=1,
                 mutation=2,
                 displaced=3,
+                delayed=1,
                 weight=0.5,
             )
             result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["partial_credit_candidate_count"], 5)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.35)
+            self.assertEqual(result["metrics"]["partial_credit_candidate_count"], 6)
+            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.4)
 
     def test_induced_alert_reported_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -176,6 +180,15 @@ class Step24MetricsTests(unittest.TestCase):
             result = compute_metrics(config_path=config)
             self.assertEqual(result["metrics"]["tcp_conversation_displaced_detection_count"], 2)
             self.assertEqual(result["metrics"]["tcp_conversation_displaced_detection_rate"], 0.2)
+            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
+
+    def test_snort_event_packet_anchor_shift_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_fixture(root, pre_count=10, post_count=10, failed=8, successful=0, mutation=0, delayed=2)
+            result = compute_metrics(config_path=config)
+            self.assertEqual(result["metrics"]["snort_event_packet_anchor_shift_count"], 2)
+            self.assertEqual(result["metrics"]["snort_event_packet_anchor_shift_rate"], 0.2)
             self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
 
     def test_zero_pre_alerts_fails(self) -> None:
