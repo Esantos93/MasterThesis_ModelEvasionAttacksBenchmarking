@@ -20,6 +20,7 @@ from common.config import load_json_config, require_keys
 from common.header_policy import editable_header_fields_from_policy, header_field_value, is_editable_header_field, load_header_editability_policy
 from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
+from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
 
 REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v1"
@@ -75,6 +76,7 @@ def validate_config(config: dict[str, Any]) -> None:
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+    resolve_post_llm_traffic_validation_policy(config)
 
 
 # This function returns the single pipeline.experiment_config_label configured for this run.
@@ -1597,6 +1599,7 @@ def reconstruct_validated_traffic(
     traffic = validated_json.get("traffic") if isinstance(validated_json, dict) else None
     if not isinstance(traffic, list):
         raise ValueError(f"Validated traffic JSON must contain a top-level traffic list: {input_json_path}")
+    validation_policy = resolve_post_llm_traffic_validation_policy(config)
 
     required_indices = set()
     for record in traffic:
@@ -1698,7 +1701,11 @@ def reconstruct_validated_traffic(
                 "packet_results": [],
             },
         )
-        raise
+        if validation_policy.step20_reconstruction_error_action == "fail_run":
+            raise
+        raise AssertionError(
+            "Unsupported Step 20 reconstruction error action reached execution."
+        )
     packets = []
     packet_results = []
     for record_index, record in enumerate(traffic, start=1):
@@ -1838,8 +1845,12 @@ def reconstruct_validated_traffic(
     }
     write_json(report_path, report)
     if network_protocol_validation_error_count or translation_plan["summary"]["tcp_reconstruction_error_count"]:
-        raise RuntimeError(
-            "Step 20 wrote its diagnostic report but the reconstructed PCAP failed network/transport protocol validation."
+        if validation_policy.step20_protocol_audit_error_action == "fail_run":
+            raise RuntimeError(
+                "Step 20 wrote its diagnostic report but the reconstructed PCAP failed network/transport protocol validation."
+            )
+        raise AssertionError(
+            "Unsupported Step 20 protocol audit error action reached execution."
         )
     return {
         "input_json": str(input_json_path),
