@@ -15,8 +15,10 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 from common.config import load_json_config, require_keys
+from common.header_policy import load_header_editability_policy
 from common.ids_context import validate_pre_snort_context_bundle
 from common.token_budget import load_token_budget_config
+from common.validation_policy import resolve_post_llm_traffic_validation_policy
 from common.io_utils import write_json
 from common.paths import create_experiment_dirs
 from common.prompt_projection import (
@@ -26,6 +28,7 @@ from common.prompt_projection import (
 )
 
 SUPPORTED_GROUPING_POLICIES = {"fixed_packet_count", "flow_context_aware"}
+SUPPORTED_STEP13_TRAFFIC_SELECTION_POLICIES = {"conservative_v1"}
 PRE_SNORT_CONTEXT_SOURCE_SUBDIR = Path("05_groups") / "pre_snort_context_source"
 CANONICAL_PRE_SNORT_CONTEXT_FILENAME = "pre_snort_context_bundle_v1.json"
 
@@ -61,8 +64,9 @@ def validate_config_shape(config: dict[str, Any]) -> None:
             "experiment_config_label",
             "experiment_config_label_options",
             "grouping_policy",
-            "traffic_selection_policy",
-            "validation_policy",
+            "header_editability_policy",
+            "pre_llm_traffic_selection_policy",
+            "post_llm_traffic_validation_policy",
         ],
         "pipeline",
     )
@@ -82,6 +86,15 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     if grouping_policy not in SUPPORTED_GROUPING_POLICIES:
         supported = ", ".join(sorted(SUPPORTED_GROUPING_POLICIES))
         raise ValueError(f"pipeline.grouping_policy must be one of: {supported}.")
+    traffic_selection_policy = config["pipeline"]["pre_llm_traffic_selection_policy"]
+    if traffic_selection_policy not in SUPPORTED_STEP13_TRAFFIC_SELECTION_POLICIES:
+        supported = ", ".join(sorted(SUPPORTED_STEP13_TRAFFIC_SELECTION_POLICIES))
+        raise ValueError(
+            "pipeline.pre_llm_traffic_selection_policy must be one of: "
+            f"{supported}."
+        )
+    load_header_editability_policy(config, config.get("_config_path", ""))
+    resolve_post_llm_traffic_validation_policy(config)
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")

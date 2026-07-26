@@ -63,8 +63,9 @@ def base_config(output_root: Path, *, ids_aware: bool = False, instructions_only
             "grouping_policy": "flow_context_aware" if ids_aware else "fixed_packet_count",
             "grouping_unit": "physical_packet",
             "group_size_packets": 6,
-            "traffic_selection_policy": "conservative_v1",
-            "validation_policy": "reject_invalid",
+            "header_editability_policy": "conservative_header_editability_v1",
+            "pre_llm_traffic_selection_policy": "conservative_v1",
+            "post_llm_traffic_validation_policy": "reject_invalid_v1",
         },
     }
 
