@@ -18,12 +18,18 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.config import load_json_config, require_keys
 from common.header_policy import editable_header_fields_from_policy, header_field_value, load_header_editability_policy, materialize_header_edits
 from common.io_utils import write_json
+from common.modification_strategy import ModificationCapabilities, resolve_modification_strategy
+from common.payload_materialization import materialize_payload_edits
 from common.terminal_logging import default_step_log_path, terminal_log
+from common.validation_policy import (
+    PostLlmTrafficValidationPolicy,
+    resolve_post_llm_traffic_validation_policy,
+)
 
 
-VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v2"
-VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v2"
-PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v2"
+VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v3"
+VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v3"
+PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v3"
 DEFAULT_IMMUTABLE_FIELDS = [
     "packet_id",
     "original_packet_number",
@@ -75,6 +81,8 @@ def validate_config(config: dict[str, Any]) -> None:
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+    resolve_modification_strategy(config)
+    resolve_post_llm_traffic_validation_policy(config)
 
 
 #This function returns the single experiment label configured for this run.
@@ -277,7 +285,7 @@ def validate_basic_record_schema(record: Any, record_index: int, required_fields
 
 #This function loads an optional original Step 14 reference JSON and indexes it by packet_id.
 #The reference lets Step 19 compare immutable fields against the original packet records when available.
-def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
+def build_original_by_packet_id(reference_json_path: str | Path | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     if not reference_json_path:
         return {}, DEFAULT_IMMUTABLE_FIELDS
     reference_json = read_json(reference_json_path)
@@ -286,13 +294,13 @@ def build_reference_by_packet_id(reference_json_path: str | Path | None) -> tupl
     immutable_fields = reference_json.get("immutable_fields", DEFAULT_IMMUTABLE_FIELDS)
     if not isinstance(immutable_fields, list):
         immutable_fields = DEFAULT_IMMUTABLE_FIELDS
-    reference_by_packet_id = {}
+    original_by_packet_id = {}
     for record in reference_json["traffic"]:
         if isinstance(record, dict) and record.get("packet_id") is not None:
-            reference_by_packet_id[str(record["packet_id"])] = record
-    return reference_by_packet_id, [str(field) for field in immutable_fields]
+            original_by_packet_id[str(record["packet_id"])] = record
+    return original_by_packet_id, [str(field) for field in immutable_fields]
 
-#This function builds the active packet-to-patch indexes from Step 18 V2 metadata.
+#This function builds the active packet-to-patch indexes from Step 18 V3 metadata.
 def build_patch_application_indexes(merged_json: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], set[str]]:
     patch_application = merged_json.get("patch_application", {})
     if not isinstance(patch_application, dict):
@@ -328,7 +336,7 @@ def canonical_json_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json_text(value).encode("utf-8")).hexdigest()
 
 
-#This helper groups Step 18 V2 materialization records by packet_id.
+#This helper groups Step 18 V3 materialization records by packet_id.
 def records_by_packet_id(records: list[Any]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     if not isinstance(records, list):
@@ -339,20 +347,34 @@ def records_by_packet_id(records: list[Any]) -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
-#This function indexes Step 18 V2 explicit edits, derivatives, relationships, and materialization issues.
-def build_materialization_indexes(merged_json: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+#This function indexes Step 18 V3 explicit edits, derivatives, relationships, and materialization issues.
+def build_materialization_indexes(merged_json: dict[str, Any]) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+]:
     patch_application = merged_json.get("patch_application", {})
     if not isinstance(patch_application, dict):
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}, {}
     explicit_header_edits = patch_application.get("explicit_header_edits", [])
+    explicit_payload_edits = patch_application.get("explicit_payload_edits", patch_application.get("payload_edits", []))
     derived_header_changes = patch_application.get("derived_header_changes", [])
     explicit_edit_relationships = patch_application.get("explicit_edit_relationships", [])
+    payload_edit_relationships = patch_application.get("payload_edit_relationships", [])
     header_materialization_issues = patch_application.get("header_materialization_issues", [])
+    payload_materialization_issues = patch_application.get("payload_materialization_issues", [])
     return (
         records_by_packet_id(explicit_header_edits),
+        records_by_packet_id(explicit_payload_edits),
         records_by_packet_id(derived_header_changes),
         records_by_packet_id(explicit_edit_relationships),
+        records_by_packet_id(payload_edit_relationships),
         records_by_packet_id(header_materialization_issues),
+        records_by_packet_id(payload_materialization_issues),
     )
 
 
@@ -367,9 +389,7 @@ def llm_output_failure_packet_ids(llm_output_failure_groups: list[Any]) -> set[s
     for group in llm_output_failure_groups:
         if not isinstance(group, dict):
             continue
-        group_packet_ids = group.get("packet_ids", [])
-        if isinstance(group_packet_ids, list):
-            packet_ids.update(str(packet_id) for packet_id in group_packet_ids)
+        packet_ids.update(stable_group_packet_ids(group))
     return packet_ids
 
 
@@ -382,12 +402,50 @@ def llm_output_failure_group_by_packet_id(llm_output_failure_groups: list[Any]) 
         prompt_unit_id = group.get("prompt_unit_id")
         if prompt_unit_id is None:
             continue
-        packet_ids = group.get("packet_ids", [])
-        if not isinstance(packet_ids, list):
-            continue
-        for packet_id in packet_ids:
+        for packet_id in stable_group_packet_ids(group):
             packet_to_group.setdefault(str(packet_id), str(prompt_unit_id))
     return packet_to_group
+
+
+def stable_group_packet_ids(group: dict[str, Any]) -> list[str]:
+    packet_ids = group.get("packet_ids", [])
+    editable_packet_ids = group.get("editable_packet_ids", [])
+    if not isinstance(packet_ids, list):
+        packet_ids = []
+    if not isinstance(editable_packet_ids, list):
+        editable_packet_ids = []
+    return list(dict.fromkeys(str(packet_id) for packet_id in (packet_ids or editable_packet_ids)))
+
+
+#This function reports inconsistent duplicated packet-id traceability in Step 18 group outcomes.
+def group_traceability_issues(group_outcomes: dict[str, Any]) -> list[dict[str, Any]]:
+    issues = []
+    for group_type in ["accepted_groups", "llm_output_failure_groups"]:
+        groups = group_outcomes.get(group_type, [])
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            packet_ids = group.get("packet_ids", [])
+            editable_packet_ids = group.get("editable_packet_ids", [])
+            if not isinstance(packet_ids, list) or not isinstance(editable_packet_ids, list):
+                continue
+            normalized_packet_ids = list(dict.fromkeys(str(packet_id) for packet_id in packet_ids))
+            normalized_editable_packet_ids = list(dict.fromkeys(str(packet_id) for packet_id in editable_packet_ids))
+            if normalized_packet_ids and normalized_editable_packet_ids and normalized_packet_ids != normalized_editable_packet_ids:
+                issues.append(
+                    issue(
+                        "error",
+                        "group_packet_ids_editable_packet_ids_mismatch",
+                        "Step 18 group_outcomes packet_ids and editable_packet_ids disagree.",
+                        group_type=group_type,
+                        prompt_unit_id=group.get("prompt_unit_id"),
+                        packet_ids=normalized_packet_ids,
+                        editable_packet_ids=normalized_editable_packet_ids,
+                    )
+                )
+    return issues
 
 
 #This function maps packet ids back to accepted Step 18 prompt units whenever Step 18 could resolve prompt traceability.
@@ -402,10 +460,7 @@ def accepted_group_by_packet_id(group_outcomes: dict[str, Any]) -> dict[str, str
         prompt_unit_id = group.get("prompt_unit_id")
         if prompt_unit_id is None:
             continue
-        packet_ids = group.get("packet_ids", [])
-        if not isinstance(packet_ids, list):
-            continue
-        for packet_id in packet_ids:
+        for packet_id in stable_group_packet_ids(group):
             packet_to_group.setdefault(str(packet_id), str(prompt_unit_id))
     return packet_to_group
 
@@ -415,21 +470,21 @@ def validate_payload_preservation_for_record(
     *,
     record: dict[str, Any],
     record_index: int,
-    reference_by_packet_id: dict[str, dict[str, Any]],
+    original_by_packet_id: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    if not reference_by_packet_id:
+    if not original_by_packet_id:
         return []
     packet_id = record.get("packet_id")
     if packet_id is None:
         return []
     packet_id_text = str(packet_id)
-    reference = reference_by_packet_id.get(packet_id_text)
-    if reference is None:
+    original_packet = original_by_packet_id.get(packet_id_text)
+    if original_packet is None:
         return []
-    reference_payload = reference.get("payload_hex")
+    original_payload = original_packet.get("payload_hex")
     actual_payload = record.get("payload_hex")
     issues = []
-    if actual_payload != reference_payload:
+    if actual_payload != original_payload:
         issues.append(
             issue(
                 "error",
@@ -481,29 +536,30 @@ def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) 
     return issues
 
 
-#This function independently re-materializes Step 18 V2 header edits and compares the result with the merged packet.
+#This function independently re-materializes Step 18 V3 header edits and compares the result with the merged packet.
 def validate_header_materialization_for_record(
     *,
     record: dict[str, Any],
     record_index: int,
-    reference_by_packet_id: dict[str, dict[str, Any]],
+    original_by_packet_id: dict[str, dict[str, Any]],
     header_policy: dict[str, Any],
     explicit_header_edits_by_packet: dict[str, list[dict[str, Any]]],
     recorded_derived_by_packet: dict[str, list[dict[str, Any]]],
     recorded_relationships_by_packet: dict[str, list[dict[str, Any]]],
     recorded_materialization_issues_by_packet: dict[str, list[dict[str, Any]]],
+    compare_materialized_packet: bool = True,
 ) -> list[dict[str, Any]]:
     packet_id = record.get("packet_id")
     if packet_id is None:
         return []
     packet_id_text = str(packet_id)
-    reference = reference_by_packet_id.get(packet_id_text)
-    if reference is None:
+    original_packet = original_by_packet_id.get(packet_id_text)
+    if original_packet is None:
         return []
     explicit_edits = explicit_header_edits_by_packet.get(packet_id_text, [])
     issues = []
     try:
-        materialized = materialize_header_edits(reference, explicit_edits)
+        materialized = materialize_header_edits(original_packet, explicit_edits)
     except ValueError as error:
         return [
             issue(
@@ -541,10 +597,10 @@ def validate_header_materialization_for_record(
                 issues.append(issue("error", "explicit_header_edit_replacement_below_min", "Explicit header edit replacement is below its declared minimum.", record_index=record_index, packet_id=packet_id, field=field, replacement=replacement, min=min_value))
             if isinstance(max_value, int) and replacement > max_value:
                 issues.append(issue("error", "explicit_header_edit_replacement_above_max", "Explicit header edit replacement is above its declared maximum.", record_index=record_index, packet_id=packet_id, field=field, replacement=replacement, max=max_value))
-        if isinstance(field, str) and edit.get("original_value") != header_field_value(reference, field):
-            issues.append(issue("error", "explicit_header_edit_original_value_mismatch", "Explicit header edit original_value does not match Step 14.", record_index=record_index, packet_id=packet_id, field=field, expected_value=header_field_value(reference, field), actual_value=edit.get("original_value")))
+        if isinstance(field, str) and edit.get("original_value") != header_field_value(original_packet, field):
+            issues.append(issue("error", "explicit_header_edit_original_value_mismatch", "Explicit header edit original_value does not match Step 14.", record_index=record_index, packet_id=packet_id, field=field, expected_value=header_field_value(original_packet, field), actual_value=edit.get("original_value")))
     expected_packet = materialized["materialized_packet"]
-    if canonical_json_text(expected_packet) != canonical_json_text(record):
+    if compare_materialized_packet and canonical_json_text(expected_packet) != canonical_json_text(record):
         issues.append(
             issue(
                 "error",
@@ -600,22 +656,72 @@ def validate_header_materialization_for_record(
             issues.append(issue("error", str(materialization_issue.get("reason", "header_materialization_issue")), "Step 18 recorded a header materialization issue for this packet.", record_index=record_index, packet_id=packet_id, materialization_issue=materialization_issue))
     return issues
 
-#This function compares one modified packet record against the original reference record for the same packet_id.
-#Any immutable-field difference is an error because it breaks PRE/POST traceability.
-def validate_against_reference(
+
+#This function validates payload edits and payload preservation according to the active modification strategy.
+def validate_payload_changes(
     *,
     record: dict[str, Any],
     record_index: int,
-    reference_by_packet_id: dict[str, dict[str, Any]],
+    original_packet: dict[str, Any],
+    explicit_payload_edits: list[dict[str, Any]],
+    recorded_relationships: list[dict[str, Any]],
+    recorded_materialization_issues: list[dict[str, Any]],
+    capabilities: ModificationCapabilities,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    issues = []
+    packet_id = record.get("packet_id")
+    if explicit_payload_edits and not capabilities.allows_payload_edits:
+        issues.append(issue("error", "payload_edits_not_allowed_by_modification_strategy", "The active modification strategy does not allow payload edits.", record_index=record_index, packet_id=packet_id, modification_strategy=capabilities.strategy))
+    if capabilities.requires_payload_preservation and record.get("payload_hex") != original_packet.get("payload_hex"):
+        issues.append(issue("error", "payload_changed_in_header_only_output", "payload_hex differs from Step 14 in a payload-preserving Step 18 output.", record_index=record_index, packet_id=packet_id))
+    if not explicit_payload_edits:
+        return issues, deepcopy(original_packet)
+    try:
+        materialized = materialize_payload_edits(original_packet, explicit_payload_edits)
+    except ValueError as error:
+        issues.append(issue("error", "payload_materialization_recalculation_failed", "Step 19 could not independently rematerialize the recorded explicit payload edits.", record_index=record_index, packet_id=packet_id, detail=str(error)))
+        return issues, None
+    expected_relationships = canonical_record_list(materialized["explicit_edit_relationships"])
+    if canonical_json_text(expected_relationships) != canonical_json_text(canonical_record_list(recorded_relationships)):
+        issues.append(issue("error", "payload_edit_relationships_mismatch", "Step 18 recorded payload edit relationships do not match independent materialization.", record_index=record_index, packet_id=packet_id))
+    expected_issues = canonical_record_list(materialized["materialization_issues"])
+    if canonical_json_text(expected_issues) != canonical_json_text(canonical_record_list(recorded_materialization_issues)):
+        issues.append(issue("error", "payload_materialization_issues_mismatch", "Step 18 payload materialization issues do not match independent materialization.", record_index=record_index, packet_id=packet_id))
+    for relationship in recorded_relationships:
+        if relationship.get("classification") == "contradictory_overlap":
+            issues.append(issue("error", "contradictory_payload_overlap", "Step 18 recorded contradictory explicit payload edits for this packet.", record_index=record_index, packet_id=packet_id, relationship=relationship))
+    for materialization_issue in recorded_materialization_issues:
+        if materialization_issue.get("severity") == "error":
+            issues.append(issue("error", str(materialization_issue.get("reason", "payload_materialization_issue")), "Step 18 recorded a payload materialization issue for this packet.", record_index=record_index, packet_id=packet_id, materialization_issue=materialization_issue))
+    return issues, materialized["materialized_packet"]
+
+
+#This function independently materializes the complete expected packet from original Step 14 plus explicit Step 18 edits.
+def expected_packet_from_explicit_edits(
+    *,
+    original_packet: dict[str, Any],
+    explicit_header_edits: list[dict[str, Any]],
+    explicit_payload_edits: list[dict[str, Any]],
+) -> dict[str, Any]:
+    header_result = materialize_header_edits(original_packet, explicit_header_edits)
+    return materialize_payload_edits(header_result["materialized_packet"], explicit_payload_edits)["materialized_packet"]
+
+#This function compares one modified packet record against the original reference record for the same packet_id.
+#Any immutable-field difference is an error because it breaks PRE/POST traceability.
+def validate_against_original(
+    *,
+    record: dict[str, Any],
+    record_index: int,
+    original_by_packet_id: dict[str, dict[str, Any]],
     immutable_fields: list[str],
 ) -> list[dict[str, Any]]:
-    if not reference_by_packet_id:
+    if not original_by_packet_id:
         return []
     packet_id = record.get("packet_id")
     if packet_id is None:
         return []
-    reference = reference_by_packet_id.get(str(packet_id))
-    if reference is None:
+    original_packet = original_by_packet_id.get(str(packet_id))
+    if original_packet is None:
         return [
             issue(
                 "error",
@@ -628,7 +734,7 @@ def validate_against_reference(
 
     issues = []
     for field in immutable_fields:
-        expected_value = reference.get(field)
+        expected_value = original_packet.get(field)
         actual_value = record.get(field)
         if actual_value != expected_value:
             issues.append(
@@ -677,11 +783,19 @@ def group_key_for_record(
 def validate_merged_traffic(
     *,
     merged_json: dict[str, Any],
-    reference_by_packet_id: dict[str, dict[str, Any]],
+    original_by_packet_id: dict[str, dict[str, Any]],
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
+    validation_policy: PostLlmTrafficValidationPolicy,
     immutable_fields: list[str],
     required_fields: list[str],
 ) -> dict[str, Any]:
+    if validation_policy.step19_invalid_group_action != "preserve_original_packets":
+        raise ValueError(
+            "Step 19 supports only preserve_original_packets for invalid groups."
+        )
+    if validation_policy.step19_semantic_error_action != "reject_group":
+        raise ValueError("Step 19 supports only reject_group for semantic errors.")
     root_issues = []
     if not isinstance(merged_json, dict):
         return {
@@ -716,10 +830,24 @@ def validate_merged_traffic(
         llm_output_failure_groups = []
     error_count = 0
     warning_count = 0
+    for traceability_issue in group_traceability_issues(group_outcomes):
+        root_issues.append(traceability_issue)
+        if traceability_issue["severity"] == "error":
+            error_count += 1
+        elif traceability_issue["severity"] == "warning":
+            warning_count += 1
     llm_output_failure_packet_id_set = llm_output_failure_packet_ids(llm_output_failure_groups)
     llm_output_failure_group_by_packet = llm_output_failure_group_by_packet_id(llm_output_failure_groups)
     patches_by_packet, payload_edits, _patch_group_keys = build_patch_application_indexes(merged_json)
-    explicit_header_edits_by_packet, recorded_derived_by_packet, recorded_relationships_by_packet, recorded_materialization_issues_by_packet = build_materialization_indexes(merged_json)
+    (
+        explicit_header_edits_by_packet,
+        explicit_payload_edits_by_packet,
+        recorded_derived_by_packet,
+        recorded_relationships_by_packet,
+        recorded_payload_relationships_by_packet,
+        recorded_materialization_issues_by_packet,
+        recorded_payload_materialization_issues_by_packet,
+    ) = build_materialization_indexes(merged_json)
     patch_application = merged_json.get("patch_application", {}) if isinstance(merged_json.get("patch_application"), dict) else {}
     if patch_application.get("schema_version") != PATCH_APPLICATION_SCHEMA_VERSION:
         root_issues.append(
@@ -735,16 +863,6 @@ def validate_merged_traffic(
     if not isinstance(no_effect_edits, list):
         no_effect_edits = []
     accepted_group_by_packet = accepted_group_by_packet_id(group_outcomes)
-    if payload_edits:
-        root_issues.append(
-            issue(
-                "error",
-                "payload_edits_present_in_header_only_output",
-                "Header-only Step 18 output must not contain canonical payload edits.",
-                payload_edit_count=len(payload_edits),
-            )
-        )
-        error_count += 1
 
     packet_id_counts = Counter(
         str(record.get("packet_id"))
@@ -787,32 +905,81 @@ def validate_merged_traffic(
                     )
                 )
             record_issues.extend(
-                validate_against_reference(
+                validate_against_original(
                     record=record,
                     record_index=record_index,
-                    reference_by_packet_id=reference_by_packet_id,
+                    original_by_packet_id=original_by_packet_id,
                     immutable_fields=immutable_fields,
-                )
-            )
-            record_issues.extend(
-                validate_payload_preservation_for_record(
-                    record=record,
-                    record_index=record_index,
-                    reference_by_packet_id=reference_by_packet_id,
                 )
             )
             record_issues.extend(
                 validate_header_materialization_for_record(
                     record=record,
                     record_index=record_index,
-                    reference_by_packet_id=reference_by_packet_id,
+                    original_by_packet_id=original_by_packet_id,
                     header_policy=header_policy,
                     explicit_header_edits_by_packet=explicit_header_edits_by_packet,
                     recorded_derived_by_packet=recorded_derived_by_packet,
                     recorded_relationships_by_packet=recorded_relationships_by_packet,
                     recorded_materialization_issues_by_packet=recorded_materialization_issues_by_packet,
+                    compare_materialized_packet=False,
                 )
             )
+            original_packet = original_by_packet_id.get(str(packet_id)) if packet_id is not None else None
+            if isinstance(original_packet, dict):
+                explicit_header_edits = explicit_header_edits_by_packet.get(str(packet_id), [])
+                explicit_payload_edits = explicit_payload_edits_by_packet.get(str(packet_id), [])
+                if explicit_header_edits and not capabilities.allows_header_edits:
+                    record_issues.append(
+                        issue(
+                            "error",
+                            "header_edits_not_allowed_by_modification_strategy",
+                            "The active modification strategy does not allow header edits.",
+                            record_index=record_index,
+                            packet_id=packet_id,
+                            modification_strategy=capabilities.strategy,
+                        )
+                    )
+                payload_issues, _payload_expected = validate_payload_changes(
+                    record=record,
+                    record_index=record_index,
+                    original_packet=original_packet,
+                    explicit_payload_edits=explicit_payload_edits,
+                    recorded_relationships=recorded_payload_relationships_by_packet.get(str(packet_id), []),
+                    recorded_materialization_issues=recorded_payload_materialization_issues_by_packet.get(str(packet_id), []),
+                    capabilities=capabilities,
+                )
+                record_issues.extend(payload_issues)
+                if capabilities.allows_header_edits or capabilities.allows_payload_edits:
+                    try:
+                        expected_packet = expected_packet_from_explicit_edits(
+                            original_packet=original_packet,
+                            explicit_header_edits=explicit_header_edits,
+                            explicit_payload_edits=explicit_payload_edits,
+                        )
+                        if canonical_json_text(expected_packet) != canonical_json_text(record):
+                            record_issues.append(
+                                issue(
+                                    "error",
+                                    "merged_packet_does_not_match_independent_materialization",
+                                    "Merged packet is not exactly the independently materialized Step 14 packet plus explicit Step 18 edits.",
+                                    record_index=record_index,
+                                    packet_id=packet_id,
+                                    expected_hash=canonical_json_hash(expected_packet),
+                                    actual_hash=canonical_json_hash(record),
+                                )
+                            )
+                    except ValueError as error:
+                        record_issues.append(
+                            issue(
+                                "error",
+                                "combined_materialization_recalculation_failed",
+                                "Step 19 could not independently rematerialize the complete expected packet.",
+                                record_index=record_index,
+                                packet_id=packet_id,
+                                detail=str(error),
+                            )
+                        )
             record_issues.extend(validate_semantic_protocol_rules(record, record_index))
 
         has_error = any(item["severity"] == "error" for item in record_issues)
@@ -828,12 +995,23 @@ def validate_merged_traffic(
                 "multiple_prompt_unit_",
                 "applied_header_",
                 "header_field_",
+                "header_edits_",
                 "payload_changed_",
+                "payload_edit_",
+                "payload_materialization_",
+                "contradictory_payload_",
+                "combined_materialization_",
             ))
             for item in record_issues
         )
         semantic_errors = [item for item in record_issues if item["severity"] == "error" and str(item["reason"]).startswith(("ipv4_", "tcp_"))]
         semantic_warnings = [item for item in record_issues if item["severity"] == "warning" and str(item["reason"]).startswith(("ipv4_", "tcp_"))]
+        packet_id_text = str(record.get("packet_id")) if isinstance(record, dict) and record.get("packet_id") is not None else None
+        payload_functional_coherence_status = (
+            "indeterminate"
+            if packet_id_text is not None and explicit_payload_edits_by_packet.get(packet_id_text)
+            else "not_applicable"
+        )
         error_count += sum(1 for item in record_issues if item["severity"] == "error")
         warning_count += sum(1 for item in record_issues if item["severity"] == "warning")
         groups[group_key]["record_indexes"].append(record_index)
@@ -845,6 +1023,7 @@ def validate_merged_traffic(
                 "record_has_error": has_error,
                 "authorization_materialization_status": "invalid" if authorization_materialization_has_error else "valid",
                 "semantic_protocol_status": "invalid" if semantic_errors else "potentially_invalid" if semantic_warnings else "valid",
+                "payload_functional_coherence_status": payload_functional_coherence_status,
                 "issues": record_issues,
                 "record_index": record_index,
             }
@@ -867,12 +1046,18 @@ def validate_merged_traffic(
                 "multiple_prompt_unit_",
                 "applied_header_",
                 "header_field_",
+                "header_edits_",
                 "payload_changed_",
+                "payload_edit_",
+                "payload_materialization_",
+                "contradictory_payload_",
+                "combined_materialization_",
             ))
             for item in group["issues"]
         )
         group_semantic_invalid = any(item["severity"] == "error" and str(item["reason"]).startswith(("ipv4_", "tcp_")) for item in group["issues"])
         group_semantic_warning = any(item["severity"] == "warning" and str(item["reason"]).startswith(("ipv4_", "tcp_")) for item in group["issues"])
+        group_has_payload_edits = any(str(packet_id) in explicit_payload_edits_by_packet for packet_id in group["packet_ids"])
         group_has_llm_output_failure = any(str(packet_id) in llm_output_failure_packet_id_set for packet_id in group["packet_ids"])
         group_status = (
             "Invalid Traffic"
@@ -892,6 +1077,7 @@ def validate_merged_traffic(
                 "status": group_status,
                 "authorization_materialization_status": "invalid" if group_authorization_materialization_invalid else "valid",
                 "semantic_protocol_status": "invalid" if group_semantic_invalid else "potentially_invalid" if group_semantic_warning else "valid",
+                "payload_functional_coherence_status": "indeterminate" if group_has_payload_edits else "not_applicable",
                 "invalid_traffic": group_has_error,
                 "llm_output_failure": group_has_llm_output_failure,
                 "packet_count": len(group["record_indexes"]),
@@ -914,7 +1100,7 @@ def validate_merged_traffic(
         group_invalid = item["group_key"] in invalid_group_keys
         packet_id = record.get("packet_id") if isinstance(record, dict) else None
         llm_output_failure = packet_id is not None and str(packet_id) in llm_output_failure_packet_id_set
-        reference_record = reference_by_packet_id.get(str(packet_id)) if packet_id is not None else None
+        original_packet = original_by_packet_id.get(str(packet_id)) if packet_id is not None else None
         packet_result = {
             "group_key": item["group_key"],
             "record_index": item["record_index"],
@@ -922,6 +1108,7 @@ def validate_merged_traffic(
             "status": "rejected" if group_invalid or llm_output_failure else "accepted",
             "authorization_materialization_status": item["authorization_materialization_status"],
             "semantic_protocol_status": item["semantic_protocol_status"],
+            "payload_functional_coherence_status": item["payload_functional_coherence_status"],
             "evaluation_status": (
                 "LLM Output Failure"
                 if llm_output_failure
@@ -948,8 +1135,8 @@ def validate_merged_traffic(
                 invalid_traffic_packets.append(packet_result)
             if llm_output_failure:
                 llm_output_failure_packets.append(packet_result)
-            if isinstance(reference_record, dict):
-                reconstruction_packets.append(deepcopy(reference_record))
+            if isinstance(original_packet, dict):
+                reconstruction_packets.append(deepcopy(original_packet))
                 if group_invalid:
                     preserved_invalid_traffic_packets.append(packet_result)
                 elif llm_output_failure:
@@ -961,9 +1148,9 @@ def validate_merged_traffic(
             reconstruction_packets.append(record)
 
     reference_missing_packet_ids = []
-    if reference_by_packet_id:
+    if original_by_packet_id:
         merged_packet_ids = set(packet_id_counts)
-        reference_missing_packet_ids = sorted(set(reference_by_packet_id) - merged_packet_ids)
+        reference_missing_packet_ids = sorted(set(original_by_packet_id) - merged_packet_ids)
         if reference_missing_packet_ids:
             root_issues.append(
                 issue(
@@ -997,6 +1184,7 @@ def validate_merged_traffic(
         issue_counts_by_reason[item["reason"]] += 1
     authorization_materialization_status_counts = Counter(item["authorization_materialization_status"] for item in packet_results)
     semantic_protocol_status_counts = Counter(item["semantic_protocol_status"] for item in packet_results)
+    payload_functional_coherence_status_counts = Counter(item["payload_functional_coherence_status"] for item in packet_results)
 
     return {
         "root_issues": root_issues,
@@ -1047,12 +1235,14 @@ def validate_merged_traffic(
             ),
             "no_effect_edit_count": len(no_effect_edits),
             "payload_edit_count": len(payload_edits),
+            "explicit_payload_edit_count": sum(len(edits) for edits in explicit_payload_edits_by_packet.values()),
             "explicit_header_edit_count": sum(len(edits) for edits in explicit_header_edits_by_packet.values()),
             "derived_header_change_count": sum(len(changes) for changes in recorded_derived_by_packet.values()),
             "explicit_edit_relationship_count": sum(len(relationships) for relationships in recorded_relationships_by_packet.values()),
             "header_materialization_issue_count": sum(len(issues) for issues in recorded_materialization_issues_by_packet.values()),
             "authorization_materialization_status_counts": dict(sorted(authorization_materialization_status_counts.items())),
             "semantic_protocol_status_counts": dict(sorted(semantic_protocol_status_counts.items())),
+            "payload_functional_coherence_status_counts": dict(sorted(payload_functional_coherence_status_counts.items())),
             "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
         },
     }
@@ -1078,12 +1268,16 @@ def run_validation(
     valid_output_path = validation_output_dir / "validated_modified_traffic.json"
 
     merged_json = read_json(input_path)
-    reference_by_packet_id, immutable_fields = build_reference_by_packet_id(reference_json_path)
+    original_by_packet_id, immutable_fields = build_original_by_packet_id(reference_json_path)
     header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
+    capabilities = resolve_modification_strategy(config)
+    validation_policy = resolve_post_llm_traffic_validation_policy(config)
     validation = validate_merged_traffic(
         merged_json=merged_json,
-        reference_by_packet_id=reference_by_packet_id,
+        original_by_packet_id=original_by_packet_id,
         header_policy=header_policy,
+        capabilities=capabilities,
+        validation_policy=validation_policy,
         immutable_fields=immutable_fields,
         required_fields=DEFAULT_REQUIRED_FIELDS,
     )
@@ -1102,6 +1296,8 @@ def run_validation(
                 "policy_id": header_policy["policy_id"],
                 "policy_path": header_policy.get("_policy_path"),
             },
+            "modification_strategy": capabilities.as_metadata(),
+            "post_llm_traffic_validation_policy": validation_policy.as_metadata(),
             "classification_mapping_note": {
                 "validation_errors_map_to": "Invalid Traffic",
                 "evaluation_categories": [
@@ -1155,6 +1351,7 @@ def run_validation(
             "invalid_traffic_group_count": validation["summary"]["invalid_traffic_group_count"],
             "llm_output_failure_group_count": validation["summary"]["llm_output_failure_group_count"],
             "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_failed_or_invalid_groups",
+            "post_llm_traffic_validation_policy": validation_policy.as_metadata(),
         },
         "traffic": validation["reconstruction_packets"],
     }
@@ -1224,6 +1421,7 @@ def main() -> None:
         print(f"Payload edits: {result['payload_edit_count']}")
         print(f"Authorization/materialization statuses: {result['authorization_materialization_status_counts']}")
         print(f"Semantic protocol statuses: {result['semantic_protocol_status_counts']}")
+        print(f"Payload functional coherence statuses: {result['payload_functional_coherence_status_counts']}")
         print(f"Errors: {result['error_count']}")
         print(f"Warnings: {result['warning_count']}")
         print(f"Validation report: {result['validation_report']}")
