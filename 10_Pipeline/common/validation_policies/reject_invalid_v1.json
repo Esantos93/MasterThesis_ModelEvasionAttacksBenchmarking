@@ -1,0 +1,8 @@
+{
+  "schema_version": "post_llm_traffic_validation_policy_v1",
+  "policy_id": "reject_invalid_v1",
+  "step19_invalid_group_action": "preserve_original_packets",
+  "step19_semantic_error_action": "reject_group",
+  "step20_reconstruction_error_action": "fail_run",
+  "step20_protocol_audit_error_action": "fail_run"
+}

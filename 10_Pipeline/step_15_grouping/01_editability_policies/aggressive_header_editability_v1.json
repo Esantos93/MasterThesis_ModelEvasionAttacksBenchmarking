@@ -1,6 +1,6 @@
 {
   "schema_version": "header_editability_policy_v1",
-  "policy_id": "expanded_header_editability_v1",
+  "policy_id": "aggressive_header_editability_v1",
   "description": "Extended/aggressive header-only policy for the parked Valid Traffic vs Invalid Traffic experiment candidate described in the Experiments Diary. It keeps payload bytes non-editable and exposes a deliberately broader IPv4/TCP header surface than the conservative Baseline, including experimental fragmentation and TCP control-flag fields, while keeping lengths, checksums, parser-selection fields, flow identity fields, TCP sequence/acknowledgement state, and TCP NS/ACK ownership under pipeline or immutable ownership.",
   "justification_document": "20_Notes/Experiments Diary.md",
   "default_classification": "immutable_field",

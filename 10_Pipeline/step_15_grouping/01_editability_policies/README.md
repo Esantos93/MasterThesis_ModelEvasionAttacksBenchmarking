@@ -5,11 +5,14 @@ decide which physical Ethernet/IPv4/TCP header fields may be exposed to the
 LLM.
 
 Step 14 still emits the complete `packet_json_v4` factual reference. Step 15
-loads one policy through:
+loads one named policy through:
 
 ```text
-pipeline.header_editability_policy_path
+pipeline.header_editability_policy
 ```
+
+`common/header_policy.py` is the only resolver used by the consuming steps. The
+config selects a policy identifier and never carries a filesystem path.
 
 The policy classifies structured header fields into:
 
@@ -31,17 +34,17 @@ So a field that is not matched by a rule is treated as immutable.
 
 | File | `policy_id` | Intended use | Editable header fields |
 | --- | --- | --- | --- |
-| `header_v1.json` | `conservative_header_editability_v1` | Conservative baseline/header-only policy used by the standard header-only configs. | 3 |
-| `header_expanded_v1.json` | `expanded_header_editability_v1` | Extended/aggressive header-modification policy for the parked Valid vs Invalid Traffic experiment candidate. | 17 |
+| `conservative_header_editability_v1.json` | `conservative_header_editability_v1` | Conservative baseline/header-only policy used by the standard header-only configs. | 3 |
+| `aggressive_header_editability_v1.json` | `aggressive_header_editability_v1` | Aggressive header-modification policy used by the corresponding final experiments. | 17 |
 
 Known active config references:
 
 | Config family | Policy |
 | --- | --- |
-| `config_LLM_baseline_Llama31_8B.json` and other baseline model configs | `header_v1.json` |
-| `config_LLM_expanded_header_editability.json` | `header_expanded_v1.json` historical/experimental expanded-header config; not part of the current Main Baseline matrix unless explicitly reopened. |
+| Baseline and Prompt Engineering header-only configs | `conservative_header_editability_v1` |
+| Aggressive header-only configs | `aggressive_header_editability_v1` |
 
-## `header_v1.json`
+## `conservative_header_editability_v1.json`
 
 Policy id:
 
@@ -85,18 +88,18 @@ checksums, parsing boundaries, or TCP state translation.
 | TCP flags/state | `tcp.flags`, `tcp.flags.ns`, `tcp.flags.cwr`, `tcp.flags.ece`, `tcp.flags.urg`, `tcp.flags.ack`, `tcp.flags.psh`, `tcp.flags.rst`, `tcp.flags.syn`, `tcp.flags.fin` |
 | TCP urgent data | `tcp.urgent_pointer` |
 
-## `header_expanded_v1.json`
+## `aggressive_header_editability_v1.json`
 
 Policy id:
 
 ```text
-expanded_header_editability_v1
+aggressive_header_editability_v1
 ```
 
 Purpose:
 
-Extended/aggressive header-only policy for the parked `Valid Traffic vs Invalid
-Traffic` experiment candidate described in `20_Notes/Experiments Diary.md`. It
+Aggressive header-only policy for the corresponding final experiments
+described in `20_Notes/Experiments Diary.md`. It
 deliberately exposes a larger IPv4/TCP header surface than the conservative
 Baseline to test whether broader header editability changes Snort evasion
 behavior and whether downstream validation rejects invalid traffic. Lengths,
@@ -127,7 +130,7 @@ state, TCP ACK, and TCP NS remain non-editable.
 
 ### Pipeline-Controlled Fields
 
-Same as `header_v1.json`:
+Same as `conservative_header_editability_v1.json`:
 
 | Field | Reason |
 | --- | --- |
@@ -166,5 +169,5 @@ When adding a new policy:
 3. Keep `default_classification = immutable_field` unless the methodology
    explicitly changes.
 4. Add the new file to the Policy Index above.
-5. Update the relevant experiment config's
-   `pipeline.header_editability_policy_path`.
+5. Register the file in `common/header_policy.py` and select its `policy_id`
+   through `pipeline.header_editability_policy`.
