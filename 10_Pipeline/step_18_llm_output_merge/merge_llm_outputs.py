@@ -25,13 +25,15 @@ from common.header_policy import (
     validate_uint_replacement,
 )
 from common.io_utils import write_json
+from common.modification_strategy import ModificationCapabilities, resolve_modification_strategy
+from common.payload_materialization import materialize_payload_edits
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
-MERGED_SCHEMA_VERSION = "patch_applied_traffic_v2"
-REPORT_SCHEMA_VERSION = "patch_application_report_v2"
+MERGED_SCHEMA_VERSION = "patch_applied_traffic_v3"
+REPORT_SCHEMA_VERSION = "patch_application_report_v3"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
 
 
@@ -86,6 +88,7 @@ def validate_config(config: dict[str, Any]) -> None:
     model_name = config["llm"]["model_name"]
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("llm.model_name must be a non-empty string.")
+    resolve_modification_strategy(config)
 
 
 #This function returns the single experiment label configured for this run.
@@ -218,14 +221,32 @@ def build_editable_region_lookup(prompt_unit: dict[str, Any]) -> dict[tuple[str,
 
 
 #This function returns the packet ids visible to one prompt unit for later LLM Output Failure accounting.
+def stable_unique_strings(values: list[Any]) -> list[str]:
+    return list(dict.fromkeys(str(value) for value in values))
+
+
+#This function returns the canonical affected packet ids for one prompt unit.
 def packet_ids_from_prompt_unit(prompt_unit: dict[str, Any] | None) -> list[str]:
     if not prompt_unit:
         return []
     traceability = prompt_unit.get("input_traceability", {})
     packet_ids = traceability.get("packet_ids", [])
+    editable_packet_ids = traceability.get("editable_packet_ids", [])
+    if packet_ids is None:
+        packet_ids = []
+    if editable_packet_ids is None:
+        editable_packet_ids = []
     if not isinstance(packet_ids, list):
         raise ValueError("prompt_unit_v1 input_traceability.packet_ids must be a list.")
-    return [str(packet_id) for packet_id in packet_ids]
+    if not isinstance(editable_packet_ids, list):
+        raise ValueError("prompt_unit_v1 input_traceability.editable_packet_ids must be a list.")
+    canonical_packet_ids = stable_unique_strings(editable_packet_ids or packet_ids)
+    if packet_ids and editable_packet_ids:
+        all_packet_ids = set(stable_unique_strings(packet_ids))
+        editable_set = set(canonical_packet_ids)
+        if not editable_set.issubset(all_packet_ids):
+            raise ValueError("prompt_unit_v1 editable_packet_ids must be contained in packet_ids when both are present.")
+    return canonical_packet_ids
 
 
 #This function validates one physical header patch and converts it to an edit record.
@@ -376,6 +397,7 @@ def build_payload_edit(
     if operation == "replace_region":
         absolute_start = region_start
         replaced_length = region_length
+        local_offset = 0
     elif operation == "replace_byte_range":
         local_offset = patch.get("offset_from_region_start_bytes")
         replaced_length = patch.get("length_bytes")
@@ -421,6 +443,9 @@ def build_payload_edit(
         "replacement_format": replacement_format,
         "replacement_hex": replacement_hex,
         "replacement_length_bytes": len(replacement_hex) // 2,
+        "authorized_region_start_offset_bytes": region_start,
+        "authorized_region_length_bytes": region_length,
+        "offset_from_region_start_bytes": local_offset,
         "patch_index": patch_index,
         "parsed_file": str(parsed_path),
         "prompt_unit_id": prompt_unit.get("prompt_unit_id"),
@@ -437,6 +462,7 @@ def build_patch_edit(
     prompt_unit: dict[str, Any],
     editable_lookup: dict[tuple[str, str], dict[str, Any]],
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     packet_index: dict[str, dict[str, Any]],
     parsed_path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -454,6 +480,14 @@ def build_patch_edit(
     if region is None:
         return None, {"reason": "patch_references_unknown_region", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
     if region.get("identity_type") == "physical_header_region" or patch.get("operation") == "replace_uint":
+        if not capabilities.allows_header_edits:
+            return None, {
+                "reason": "header_edits_not_allowed_by_modification_strategy",
+                "modification_strategy": capabilities.strategy,
+                "packet_id": packet_id_text,
+                "region_id": region_id,
+                "patch_index": patch_index,
+            }
         return build_header_edit(
             patch=patch,
             patch_index=patch_index,
@@ -463,6 +497,14 @@ def build_patch_edit(
             packet_index=packet_index,
             parsed_path=parsed_path,
         )
+    if not capabilities.allows_payload_edits:
+        return None, {
+            "reason": "payload_edits_not_allowed_by_modification_strategy",
+            "modification_strategy": capabilities.strategy,
+            "packet_id": packet_id_text,
+            "region_id": region_id,
+            "patch_index": patch_index,
+        }
     return build_payload_edit(
         patch=patch,
         patch_index=patch_index,
@@ -531,7 +573,7 @@ def apply_validated_edits(
     traffic_records: list[dict[str, Any]],
     edits: list[dict[str, Any]],
     heartbeat=None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> dict[str, Any]:
     if heartbeat:
         heartbeat(f"Preparing in-memory packet indexes for {len(traffic_records)} reference records and {len(edits)} candidate edits.", force=True)
     records_by_packet_id = {str(record["packet_id"]): copy.deepcopy(record) for record in traffic_records if isinstance(record, dict) and record.get("packet_id") is not None}
@@ -540,9 +582,13 @@ def apply_validated_edits(
     applied = []
     no_effect = []
     explicit_header_edits = []
+    explicit_payload_edits = []
+    payload_no_effect_edits = []
     derived_header_changes = []
     explicit_edit_relationships = []
+    payload_edit_relationships = []
     materialization_errors = []
+    payload_materialization_issues = []
     header_edits = [edit for edit in edits if edit.get("edit_kind") == "physical_header"]
     header_edits_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for edit in header_edits:
@@ -576,22 +622,39 @@ def apply_validated_edits(
         packet_edits = by_packet[packet_id]
         if heartbeat:
             heartbeat(f"Applied payload edits for {payload_packet_index}/{len(payload_packet_ids)} packets.")
-        record = output_by_packet_id[packet_id]
-        original_payload = str(record.get("payload_hex", "") or "").lower()
-        payload = original_payload
-        for edit in sorted(packet_edits, key=lambda item: item["absolute_start_offset_bytes"], reverse=True):
-            start_hex = edit["absolute_start_offset_bytes"] * 2
-            end_hex = start_hex + edit["replaced_length_bytes"] * 2
-            payload = payload[:start_hex] + edit["replacement_hex"] + payload[end_hex:]
-            applied.append(dict(edit))
-        old_payload_length = len(original_payload) // 2
-        new_payload_length = len(payload) // 2
-        delta = new_payload_length - old_payload_length
-        record["payload_hex"] = payload
-        record["payload_length_bytes"] = new_payload_length
-        if isinstance(record.get("packet_length_bytes"), int):
-            record["packet_length_bytes"] = record["packet_length_bytes"] + delta
-    return output_records, applied, no_effect, explicit_header_edits, derived_header_changes, explicit_edit_relationships, materialization_errors
+        try:
+            materialization = materialize_payload_edits(output_by_packet_id[packet_id], packet_edits)
+        except ValueError as error:
+            payload_materialization_issues.append(
+                {
+                    "severity": "error",
+                    "reason": "payload_materialization_failed",
+                    "packet_id": packet_id,
+                    "detail": str(error),
+                }
+            )
+            continue
+        output_by_packet_id[packet_id].clear()
+        output_by_packet_id[packet_id].update(materialization["materialized_packet"])
+        explicit_payload_edits.extend(materialization["explicit_edits"])
+        applied.extend(materialization["applied_patches"])
+        no_effect.extend(materialization["no_effect_edits"])
+        payload_no_effect_edits.extend(materialization["no_effect_edits"])
+        payload_edit_relationships.extend(materialization["explicit_edit_relationships"])
+        payload_materialization_issues.extend(materialization["materialization_issues"])
+    return {
+        "traffic": output_records,
+        "applied_patches": applied,
+        "no_effect_edits": no_effect,
+        "explicit_header_edits": explicit_header_edits,
+        "explicit_payload_edits": explicit_payload_edits,
+        "payload_no_effect_edits": payload_no_effect_edits,
+        "derived_header_changes": derived_header_changes,
+        "explicit_edit_relationships": explicit_edit_relationships,
+        "payload_edit_relationships": payload_edit_relationships,
+        "header_materialization_issues": materialization_errors,
+        "payload_materialization_issues": payload_materialization_issues,
+    }
 
 
 #This function validates and converts all patches from one accepted Step 17 parsed output.
@@ -602,6 +665,7 @@ def collect_edits_for_parsed_output(
     metadata: dict[str, Any],
     prompt_root: Path | None,
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     packet_index: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     prompt_unit, prompt_error = load_prompt_unit(metadata, prompt_root)
@@ -652,6 +716,7 @@ def collect_edits_for_parsed_output(
             prompt_unit=prompt_unit,
             editable_lookup=editable_lookup,
             header_policy=header_policy,
+            capabilities=capabilities,
             packet_index=packet_index,
             parsed_path=parsed_path,
         )
@@ -682,19 +747,35 @@ def collect_edits_for_parsed_output(
 
 
 #This function converts a failed Step 17 metadata record into the Step 18 LLM Output Failure report format.
-def summarize_llm_output_failure(metadata: dict[str, Any], prompt_root: Path | None, model_name: str) -> dict[str, Any]:
+def summarize_llm_output_failure(
+    metadata: dict[str, Any],
+    prompt_root: Path | None,
+    model_name: str,
+    *,
+    failure_reason: str | None = None,
+    parsed_file: str | None = None,
+) -> dict[str, Any]:
     prompt_unit, prompt_error = load_prompt_unit(metadata, prompt_root)
     validation_result = metadata.get("validation_result")
+    packet_ids = []
+    packet_id_resolution_status = "prompt_unit_not_loaded"
+    if prompt_unit is not None:
+        packet_ids = packet_ids_from_prompt_unit(prompt_unit)
+        packet_id_resolution_status = "resolved_from_prompt_unit"
+    elif prompt_error:
+        packet_id_resolution_status = prompt_error
     return {
         "model_name": model_name,
         "prompt_unit_id": metadata.get("prompt_unit_id"),
         "parent_group_id": metadata.get("parent_group_id"),
         "status": metadata.get("status"),
         "evaluation_status": "LLM Output Failure",
-        "failure_reason": metadata.get("failure_reason") or prompt_error,
+        "failure_reason": failure_reason or metadata.get("failure_reason") or prompt_error,
         "validation_result": validation_result,
-        "packet_ids": packet_ids_from_prompt_unit(prompt_unit),
+        "packet_ids": packet_ids,
+        "packet_id_resolution_status": packet_id_resolution_status,
         "output_paths": metadata.get("output_paths", {}),
+        "parsed_file": parsed_file,
         "prompt_file": metadata.get("prompt_file"),
         "metadata_file": metadata.get("_metadata_file"),
     }
@@ -706,6 +787,7 @@ def apply_model_patches(
     model_root: Path,
     prompt_root: Path | None,
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     reference_records: list[dict[str, Any]],
     heartbeat=None,
 ) -> dict[str, Any]:
@@ -741,16 +823,13 @@ def apply_model_patches(
             continue
         if not isinstance(parsed_output, dict):
             llm_output_failure_groups.append(
-                {
-                    "model_name": model_root.name,
-                    "prompt_unit_id": prompt_unit_id,
-                    "status": "failed",
-                    "evaluation_status": "LLM Output Failure",
-                    "failure_reason": "parsed_root_not_object",
-                    "parsed_file": str(parsed_path),
-                    "metadata_file": metadata.get("_metadata_file"),
-                    "packet_ids": [],
-                }
+                summarize_llm_output_failure(
+                    metadata,
+                    prompt_root,
+                    model_root.name,
+                    failure_reason="parsed_root_not_object",
+                    parsed_file=str(parsed_path),
+                )
             )
             continue
         group, edits, errors = collect_edits_for_parsed_output(
@@ -759,6 +838,7 @@ def apply_model_patches(
             metadata=metadata,
             prompt_root=prompt_root,
             header_policy=header_policy,
+            capabilities=capabilities,
             packet_index=packet_index,
         )
         if errors or group["status"] != "accepted":
@@ -777,63 +857,30 @@ def apply_model_patches(
             llm_output_failure_groups.append(summarize_llm_output_failure(metadata, prompt_root, model_root.name))
         else:
             llm_output_failure_groups.append(
-                {
-                    "model_name": model_root.name,
-                    "prompt_unit_id": prompt_unit_id,
-                    "parent_group_id": metadata.get("parent_group_id"),
-                    "status": metadata.get("status"),
-                    "evaluation_status": "LLM Output Failure",
-                    "failure_reason": "metadata_accepted_without_parsed_output",
-                    "metadata_file": metadata.get("_metadata_file"),
-                    "prompt_file": metadata.get("prompt_file"),
-                    "packet_ids": [],
-                }
+                summarize_llm_output_failure(
+                    metadata,
+                    prompt_root,
+                    model_root.name,
+                    failure_reason="metadata_accepted_without_parsed_output",
+                )
             )
 
     if heartbeat:
         heartbeat(f"Collected {len(candidate_edits)} candidate edits from accepted outputs.", force=True)
-    payload_candidate_edits = [edit for edit in candidate_edits if edit.get("edit_kind") == "canonical_payload"]
-    safe_payload_edits, conflicting_prompt_unit_ids, overlap_errors = partition_overlapping_edits(payload_candidate_edits)
-    patch_application_errors.extend(overlap_errors)
-    if conflicting_prompt_unit_ids:
-        retained_accepted_groups = []
-        for group in accepted_groups:
-            prompt_unit_id = str(group.get("prompt_unit_id"))
-            if prompt_unit_id not in conflicting_prompt_unit_ids:
-                retained_accepted_groups.append(group)
-                continue
-            group["status"] = "failed"
-            group["evaluation_status"] = "LLM Output Failure"
-            group["failure_reason"] = "overlapping_patches_detected"
-            group["applied_patch_count"] = 0
-            group["patch_errors"] = [
-                issue
-                for issue in overlap_errors
-                if prompt_unit_id in {
-                    str(issue.get("previous_prompt_unit_id")),
-                    str(issue.get("prompt_unit_id")),
-                }
-            ]
-            llm_output_failure_groups.append(group)
-        accepted_groups = retained_accepted_groups
-    candidate_edits = [
-        edit
-        for edit in candidate_edits
-        if edit.get("edit_kind") != "canonical_payload"
-        or edit in safe_payload_edits
-    ]
-
-    (
-        modified_records,
-        applied_patches,
-        no_effect_edits,
-        explicit_header_edits,
-        derived_header_changes,
-        explicit_edit_relationships,
-        materialization_errors,
-    ) = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits, heartbeat=heartbeat)
+    materialized = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits, heartbeat=heartbeat)
+    modified_records = materialized["traffic"]
+    applied_patches = materialized["applied_patches"]
+    no_effect_edits = materialized["no_effect_edits"]
+    explicit_header_edits = materialized["explicit_header_edits"]
+    explicit_payload_edits = materialized["explicit_payload_edits"]
+    payload_no_effect_edits = materialized["payload_no_effect_edits"]
+    derived_header_changes = materialized["derived_header_changes"]
+    explicit_edit_relationships = materialized["explicit_edit_relationships"]
+    payload_edit_relationships = materialized["payload_edit_relationships"]
+    materialization_errors = materialized["header_materialization_issues"]
+    payload_materialization_issues = materialized["payload_materialization_issues"]
     if heartbeat:
-        heartbeat("Building Step 18 V2 summary indexes.", force=True)
+        heartbeat("Building Step 18 V3 summary indexes.", force=True)
     modified_packet_ids = sorted({patch["packet_id"] for patch in applied_patches})
     applied_header_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "physical_header"]
     applied_payload_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "canonical_payload"]
@@ -876,13 +923,17 @@ def apply_model_patches(
         "llm_output_failure_groups": llm_output_failure_groups,
         "patch_application_errors": patch_application_errors,
         "explicit_header_edits": sorted(explicit_header_edits, key=lambda item: (item["packet_id"], item.get("field", ""), item["patch_index"], item.get("materialization_sequence_index", 0))),
+        "explicit_payload_edits": sorted(explicit_payload_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"], item.get("materialization_sequence_index", 0))),
         "applied_patches": sorted(applied_patches, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
         "effective_header_edits": sorted(applied_header_edits, key=lambda item: (item["packet_id"], item["field"], item["patch_index"])),
         "payload_edits": sorted(applied_payload_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
         "no_effect_edits": sorted(no_effect_edits, key=lambda item: (item["packet_id"], item.get("field", ""), item["patch_index"])),
+        "payload_no_effect_edits": sorted(payload_no_effect_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
         "derived_header_changes": sorted(derived_header_changes, key=lambda item: (item.get("packet_id", ""), item.get("derived_field", ""), item.get("patch_index", 0))),
         "explicit_edit_relationships": sorted(explicit_edit_relationships, key=lambda item: (item.get("packet_id", ""), item.get("field", ""), item.get("patch_index", 0), item.get("classification", ""))),
+        "payload_edit_relationships": sorted(payload_edit_relationships, key=lambda item: (item.get("packet_id", ""), item.get("region_id", ""), item.get("patch_index", 0), item.get("classification", ""))),
         "header_materialization_issues": sorted(materialization_errors, key=lambda item: (item.get("packet_id", ""), item.get("reason", ""))),
+        "payload_materialization_issues": sorted(payload_materialization_issues, key=lambda item: (item.get("packet_id", ""), item.get("reason", ""))),
         "modified_packet_ids": modified_packet_ids,
         "summary": {
             "reference_packet_count": len(reference_records),
@@ -896,7 +947,11 @@ def apply_model_patches(
             "derived_header_change_count": len(derived_header_changes),
             "explicit_edit_relationship_count": len(explicit_edit_relationships),
             "header_materialization_issue_count": len(materialization_errors),
+            "payload_materialization_issue_count": len(payload_materialization_issues),
             "payload_edit_count": len(applied_payload_edits),
+            "explicit_payload_edit_count": len(explicit_payload_edits),
+            "payload_no_effect_edit_count": len(payload_no_effect_edits),
+            "payload_edit_relationship_count": len(payload_edit_relationships),
             "no_effect_edit_count": len(no_effect_edits),
             "modified_packet_count": len(modified_packet_ids),
             "patch_application_error_count": len(patch_application_errors),
@@ -921,10 +976,12 @@ def merge_model_outputs(
     heartbeat(f"Loaded {len(reference_records)} Step 14 reference records.", force=True)
     heartbeat("Loading header editability policy.", force=True)
     header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
+    capabilities = resolve_modification_strategy(config)
     model_report = apply_model_patches(
         model_root=model_root,
         prompt_root=prompt_root,
         header_policy=header_policy,
+        capabilities=capabilities,
         reference_records=reference_records,
         heartbeat=heartbeat,
     )
@@ -951,6 +1008,7 @@ def merge_model_outputs(
                 "policy_id": header_policy["policy_id"],
                 "policy_path": header_policy.get("_policy_path"),
             },
+            "modification_strategy": capabilities.as_metadata(),
             "merge_policy": {
                 "input_contract": "patch_output_v1",
                 "apply_patches_to_step14_reference": True,
@@ -969,13 +1027,17 @@ def merge_model_outputs(
         "patch_application": {
             "schema_version": REPORT_SCHEMA_VERSION,
             "explicit_header_edits": model_report["explicit_header_edits"],
+            "explicit_payload_edits": model_report["explicit_payload_edits"],
             "applied_patches": model_report["applied_patches"],
             "effective_header_edits": model_report["effective_header_edits"],
             "payload_edits": model_report["payload_edits"],
             "no_effect_edits": model_report["no_effect_edits"],
+            "payload_no_effect_edits": model_report["payload_no_effect_edits"],
             "derived_header_changes": model_report["derived_header_changes"],
             "explicit_edit_relationships": model_report["explicit_edit_relationships"],
+            "payload_edit_relationships": model_report["payload_edit_relationships"],
             "header_materialization_issues": model_report["header_materialization_issues"],
+            "payload_materialization_issues": model_report["payload_materialization_issues"],
             "modified_packet_ids": model_report["modified_packet_ids"],
             "errors": model_report["patch_application_errors"],
         },

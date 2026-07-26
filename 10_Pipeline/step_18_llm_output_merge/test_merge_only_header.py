@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import unittest
+import json
+import tempfile
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -14,9 +16,15 @@ from merge_llm_outputs import (
     apply_validated_edits,
     build_editable_region_lookup,
     build_patch_edit,
+    packet_ids_from_prompt_unit,
     read_json,
+    run_merge,
 )
 from common.header_policy import set_header_value
+from common.modification_strategy import resolve_modification_strategy
+
+
+HEADER_ONLY_CAPABILITIES = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
 
 def packet_record() -> dict:
@@ -102,7 +110,13 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             patch_index=1,
             prompt_unit=prompt,
             editable_lookup=build_editable_region_lookup(prompt),
-            header_policy=read_json(PIPELINE_ROOT / "step_15_grouping" / "01_editability_policies" / "header_v1.json"),
+            header_policy=read_json(
+                PIPELINE_ROOT
+                / "step_15_grouping"
+                / "01_editability_policies"
+                / "conservative_header_editability_v1.json"
+            ),
+            capabilities=HEADER_ONLY_CAPABILITIES,
             packet_index={"packet_000001": packet_record()},
             parsed_path=Path("parsed.json"),
         )
@@ -202,10 +216,17 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             }
         )
         self.assertIsNone(error)
-        records, applied, no_effect, explicit, derived, relationships, materialization_issues = apply_validated_edits(
+        result = apply_validated_edits(
             traffic_records=[packet_record()],
             edits=[edit],
         )
+        records = result["traffic"]
+        applied = result["applied_patches"]
+        no_effect = result["no_effect_edits"]
+        explicit = result["explicit_header_edits"]
+        derived = result["derived_header_changes"]
+        relationships = result["explicit_edit_relationships"]
+        materialization_issues = result["header_materialization_issues"]
         self.assertEqual(1, records[0]["ttl"])
         self.assertEqual(1, records[0]["ipv4_header"]["ttl"])
         self.assertEqual(1, len(applied))
@@ -233,18 +254,17 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             "prompt_unit_id": "group_000001",
         }
 
-        (
-            records,
-            applied,
-            no_effect,
-            explicit,
-            derived,
-            relationships,
-            materialization_issues,
-        ) = apply_validated_edits(
+        result = apply_validated_edits(
             traffic_records=[packet_record()],
             edits=[explicit_edit],
         )
+        records = result["traffic"]
+        applied = result["applied_patches"]
+        no_effect = result["no_effect_edits"]
+        explicit = result["explicit_header_edits"]
+        derived = result["derived_header_changes"]
+        relationships = result["explicit_edit_relationships"]
+        materialization_issues = result["header_materialization_issues"]
 
         self.assertEqual(1, len(applied))
         self.assertEqual(1, len(explicit))
@@ -260,6 +280,95 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             1,
             records[0]["ipv4_header"]["fragment_offset_units"],
         )
+
+    def test_packet_ids_use_editable_packet_ids_when_packet_ids_absent(self) -> None:
+        prompt = prompt_unit()
+        prompt["input_traceability"].pop("packet_ids", None)
+        prompt["input_traceability"]["editable_packet_ids"] = ["packet_000001"]
+        self.assertEqual(["packet_000001"], packet_ids_from_prompt_unit(prompt))
+
+    def test_packet_ids_reject_mismatch_when_both_traceability_lists_exist(self) -> None:
+        prompt = prompt_unit()
+        prompt["input_traceability"]["packet_ids"] = ["packet_000002"]
+        prompt["input_traceability"]["editable_packet_ids"] = ["packet_000001"]
+        with self.assertRaises(ValueError):
+            packet_ids_from_prompt_unit(prompt)
+
+    def write_failure_fixture(self, temp_dir: Path, *, parsed_content=None, write_parsed: bool = True) -> tuple[Path, Path, Path, Path]:
+        config_path = temp_dir / "config.json"
+        reference_path = temp_dir / "selected_packet_records.json"
+        step17_root = temp_dir / "step17"
+        prompt_root = temp_dir / "prompts"
+        for path in [step17_root / "parsed", step17_root / "metadata", step17_root / "raw", step17_root / "failures", prompt_root]:
+            path.mkdir(parents=True, exist_ok=True)
+        config = {
+            "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
+            "llm": {"model_name": "fixture-model"},
+            "pipeline": {
+                "experiment_config_label": "fixture_v3",
+                "modification_strategy": "header_only_strategy_v1",
+                "header_editability_policy": "conservative_header_editability_v1",
+            },
+        }
+        reference = {
+            "metadata": {"schema_version": "packet_json_v4"},
+            "traffic": [packet_record()],
+        }
+        prompt = prompt_unit()
+        prompt["schema_version"] = "prompt_unit_v1"
+        prompt["input_traceability"]["packet_ids"] = []
+        prompt["input_traceability"]["editable_packet_ids"] = ["packet_000001"]
+        metadata = {
+            "prompt_unit_id": "group_000001",
+            "parent_group_id": "group_000001",
+            "status": "accepted",
+            "prompt_file": str(prompt_root / "group_000001.prompt.json"),
+        }
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        reference_path.write_text(json.dumps(reference), encoding="utf-8")
+        (prompt_root / "group_000001.prompt.json").write_text(json.dumps(prompt), encoding="utf-8")
+        (step17_root / "metadata" / "group_000001.metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        if write_parsed:
+            (step17_root / "parsed" / "group_000001.parsed.json").write_text(json.dumps(parsed_content), encoding="utf-8")
+        return config_path, reference_path, step17_root, prompt_root
+
+    def test_parsed_root_not_object_failure_keeps_packet_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config_path, reference_path, step17_root, prompt_root = self.write_failure_fixture(
+                temp_dir,
+                parsed_content=["not", "object"],
+            )
+            result = run_merge(
+                config_path=config_path,
+                input_root=step17_root,
+                prompt_root=prompt_root,
+                reference_json=reference_path,
+                output_dir=temp_dir / "08_merged_outputs",
+            )
+            report = read_json(result["merge_report"])
+            group = report["group_outcomes"]["llm_output_failure_groups"][0]
+            self.assertEqual(["packet_000001"], group["packet_ids"])
+            self.assertEqual("resolved_from_prompt_unit", group["packet_id_resolution_status"])
+
+    def test_metadata_accepted_without_parsed_failure_keeps_packet_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config_path, reference_path, step17_root, prompt_root = self.write_failure_fixture(
+                temp_dir,
+                write_parsed=False,
+            )
+            result = run_merge(
+                config_path=config_path,
+                input_root=step17_root,
+                prompt_root=prompt_root,
+                reference_json=reference_path,
+                output_dir=temp_dir / "08_merged_outputs",
+            )
+            report = read_json(result["merge_report"])
+            group = report["group_outcomes"]["llm_output_failure_groups"][0]
+            self.assertEqual(["packet_000001"], group["packet_ids"])
+            self.assertEqual("metadata_accepted_without_parsed_output", group["failure_reason"])
 
 
 if __name__ == "__main__":
