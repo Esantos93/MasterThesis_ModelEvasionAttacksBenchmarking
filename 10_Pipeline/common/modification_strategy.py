@@ -5,8 +5,8 @@ from typing import Any
 
 
 HEADER_ONLY_STRATEGY = "header_only_strategy_v1"
-PAYLOAD_ONLY_STRATEGY = "payload_only_strategy_v1"
-HYBRID_STRATEGY = "hybrid_physical_header_canonical_payload_strategy_v1"
+CANONICAL_PAYLOAD_ONLY_STRATEGY = "canonical_payload_only_strategy_v1"
+HYBRID_HEADER_CANONICAL_PAYLOAD_STRATEGY = "hybrid_header_canonical_payload_strategy_v1"
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,6 @@ class ModificationCapabilities:
     allows_payload_edits: bool
     requires_payload_preservation: bool
 
-    #This method returns a plain JSON-compatible record for output metadata.
     def as_metadata(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy,
@@ -33,14 +32,14 @@ SUPPORTED_MODIFICATION_STRATEGIES: dict[str, ModificationCapabilities] = {
         allows_payload_edits=False,
         requires_payload_preservation=True,
     ),
-    PAYLOAD_ONLY_STRATEGY: ModificationCapabilities(
-        strategy=PAYLOAD_ONLY_STRATEGY,
+    CANONICAL_PAYLOAD_ONLY_STRATEGY: ModificationCapabilities(
+        strategy=CANONICAL_PAYLOAD_ONLY_STRATEGY,
         allows_header_edits=False,
         allows_payload_edits=True,
         requires_payload_preservation=False,
     ),
-    HYBRID_STRATEGY: ModificationCapabilities(
-        strategy=HYBRID_STRATEGY,
+    HYBRID_HEADER_CANONICAL_PAYLOAD_STRATEGY: ModificationCapabilities(
+        strategy=HYBRID_HEADER_CANONICAL_PAYLOAD_STRATEGY,
         allows_header_edits=True,
         allows_payload_edits=True,
         requires_payload_preservation=False,
@@ -48,7 +47,6 @@ SUPPORTED_MODIFICATION_STRATEGIES: dict[str, ModificationCapabilities] = {
 }
 
 
-#This function resolves the configured modification strategy into canonical capabilities.
 def resolve_modification_strategy(config: dict[str, Any]) -> ModificationCapabilities:
     strategy = config.get("pipeline", {}).get("modification_strategy")
     if not isinstance(strategy, str) or not strategy.strip():

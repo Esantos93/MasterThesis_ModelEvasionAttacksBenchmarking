@@ -9,6 +9,7 @@ from common.ids_context import project_ids_context
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE = "baseline_input_profile_v1"
 DEFAULT_PROMPT_INSTRUCTIONS_PROFILE = "baseline_instructions_profile_v1"
+HEADER_ONLY_V3_BASELINE_COMPATIBLE_VISIBLE_SCHEMA_VERSION = "compact_modification_unit_v2"
 BASELINE_OBJECTIVE_INSTRUCTION = "You modify compact network traffic prompt units to reduce Snort 3 detection."
 BASELINE_NO_CHANGE_INSTRUCTION = "If no change is needed, return patches as an empty list."
 PROMPT_ENGINEERING_ROLE_INSTRUCTION = (
@@ -50,17 +51,29 @@ PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
             "editable",
             "payload_view",
             "payload_length_bytes",
+            "ownership",
+            "semantic_segmentation",
+            "physical_aliases",
+            "global_region_summary",
         ],
         "editable_region_fields": [
             "canonical_region_id",
             "region_id",
             "region_type",
+            "coordinate_space",
             "format",
             "start_offset_bytes",
             "end_offset_bytes",
             "length_bytes",
             "allowed_operations",
             "value",
+            "authorized_start_offset_bytes",
+            "authorized_end_offset_bytes",
+            "authorized_length_bytes",
+            "max_replacement_bytes",
+            "max_replacement_hex_chars",
+            "replacement_size_policy",
+            "replacement_size_limit",
         ],
     },
 }
@@ -90,9 +103,19 @@ PROMPT_INSTRUCTIONS_PROFILES: dict[str, list[str]] = {
             "for ipv4.ttl, replacement_uint must be at least 1. "
             "Do not include in header_edits unchanged headers."
         ),
-        "Payload edits target canonical TCP regions, identified by canonical_region_id.",
+        (
+            "Payload edits target canonical TCP regions by canonical_region_id. "
+            "physical_aliases and retransmissions are non-editable context, not additional targets."
+        ),
         "For every payload patch, operation must be copied exactly from that region's allowed_operations.",
-        "Each payload patch object modifies exactly one editable region. Use multiple patch objects to modify multiple payload regions.",
+        (
+            "Each payload patch object modifies exactly one editable target. Use separate patches for different targets "
+            "or disjoint byte ranges; payload patch byte ranges must not overlap."
+        ),
+        (
+            "Each payload replacement must respect max_replacement_bytes and, for hex, "
+            "max_replacement_hex_chars declared by its target."
+        ),
         "replace_region patches require the fields: canonical_region_id, region_id, region_type, operation, replacement_format, replacement.",
         (
             "replace_byte_range patches require the fields: canonical_region_id, region_id, "
@@ -134,6 +157,7 @@ PAYLOAD_INSTRUCTION_PREFIXES = (
     "Payload edits",
     "For every payload patch",
     "Each payload patch object",
+    "Each payload replacement",
     "replace_region patches",
     "replace_byte_range patches",
     "For replace_byte_range",
@@ -199,11 +223,14 @@ def build_projected_canonical_regions(
         raise ValueError("Prompt input structure field lists must be lists.")
 
     projected_regions: list[dict[str, Any]] = []
-    for packet in prompt_unit.get("packets", []):
+    canonical_payload_regions = prompt_unit.get("canonical_payload_regions", [])
+    if not isinstance(canonical_payload_regions, list):
+        raise ValueError("Canonical payload region container must be a list.")
+    for packet in canonical_payload_regions:
         if not isinstance(packet, dict):
             continue
         projected_packet = copy_selected_fields(packet, canonical_region_fields)
-        canonical_region_id = packet.get("canonical_region_id") or packet.get("packet_id")
+        canonical_region_id = packet.get("canonical_region_id")
         if canonical_region_id is not None:
             projected_packet.setdefault("canonical_region_id", canonical_region_id)
 
@@ -301,6 +328,15 @@ def build_compact_prompt_input(
     if not isinstance(top_level_fields, list):
         raise ValueError("Prompt input structure top_level_fields must be a list.")
     prompt_input = copy_selected_fields(prompt_unit, top_level_fields)
+    capabilities = prompt_unit.get("capabilities")
+    if (
+        structure.get("profile") == DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE
+        and prompt_unit.get("schema_version") == "compact_modification_unit_v3"
+        and isinstance(capabilities, dict)
+        and capabilities.get("allows_header_edits") is True
+        and capabilities.get("allows_payload_edits") is False
+    ):
+        prompt_input["schema_version"] = HEADER_ONLY_V3_BASELINE_COMPATIBLE_VISIBLE_SCHEMA_VERSION
     region_container_name = structure.get("region_container_name", "canonical_regions")
     if not isinstance(region_container_name, str) or not region_container_name:
         raise ValueError("Prompt input structure region_container_name must be a non-empty string.")
@@ -420,6 +456,12 @@ def build_compact_patch_prompt_parts(
     )
     has_editable_headers = bool(json_prompt_input.get("editable_headers"))
     has_editable_payload = bool(json_prompt_input.get("canonical_regions"))
+    target_presence = prompt_source_unit.get("editable_target_presence")
+    if isinstance(target_presence, dict):
+        if target_presence.get("editable_headers_present") is not has_editable_headers:
+            raise ValueError("editable_target_presence disagrees with projected editable headers.")
+        if target_presence.get("editable_payload_present") is not has_editable_payload:
+            raise ValueError("editable_target_presence disagrees with projected editable payload.")
     active_instruction_lines = select_prompt_instructions(
         instruction_lines=instruction_lines,
         has_editable_headers=has_editable_headers,

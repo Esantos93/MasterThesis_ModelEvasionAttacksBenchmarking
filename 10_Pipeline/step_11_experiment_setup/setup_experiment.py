@@ -17,6 +17,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.config import load_json_config, require_keys
 from common.header_policy import load_header_editability_policy
 from common.ids_context import validate_pre_snort_context_bundle
+from common.modification_strategy import resolve_modification_strategy
 from common.token_budget import load_token_budget_config
 from common.validation_policy import resolve_post_llm_traffic_validation_policy
 from common.io_utils import write_json
@@ -64,6 +65,8 @@ def validate_config_shape(config: dict[str, Any]) -> None:
             "experiment_config_label",
             "experiment_config_label_options",
             "grouping_policy",
+            "grouping_unit",
+            "modification_strategy",
             "header_editability_policy",
             "pre_llm_traffic_selection_policy",
             "post_llm_traffic_validation_policy",
@@ -86,6 +89,9 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     if grouping_policy not in SUPPORTED_GROUPING_POLICIES:
         supported = ", ".join(sorted(SUPPORTED_GROUPING_POLICIES))
         raise ValueError(f"pipeline.grouping_policy must be one of: {supported}.")
+    if config["pipeline"]["grouping_unit"] != "physical_packet":
+        raise ValueError("pipeline.grouping_unit must be 'physical_packet'.")
+    resolve_modification_strategy(config)
     traffic_selection_policy = config["pipeline"]["pre_llm_traffic_selection_policy"]
     if traffic_selection_policy not in SUPPORTED_STEP13_TRAFFIC_SELECTION_POLICIES:
         supported = ", ".join(sorted(SUPPORTED_STEP13_TRAFFIC_SELECTION_POLICIES))
@@ -214,6 +220,7 @@ def run_setup(
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config_shape(config)
+    modification_strategy = resolve_modification_strategy(config)
 
     experiment_root = build_experiment_root(config)
     created_dirs = create_experiment_dirs(experiment_root)
@@ -230,6 +237,7 @@ def run_setup(
         "setup_host_os": platform.platform(),
         "config_source": config["_config_path"],
         "experiment_root": str(experiment_root),
+        "modification_strategy": modification_strategy.as_metadata(),
         "created_directories": [str(path) for path in created_dirs],
         "input_checks": collect_input_checks(config) if check_inputs else [],
     }

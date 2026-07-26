@@ -9,9 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from common.ids_context import PRE_SNORT_CONTEXT_BUNDLE_SCHEMA_VERSION
+from common.modification_strategy import (
+    CANONICAL_PAYLOAD_ONLY_STRATEGY,
+    HEADER_ONLY_STRATEGY,
+    HYBRID_HEADER_CANONICAL_PAYLOAD_STRATEGY,
+)
 from common.paths import EXPERIMENT_SUBDIRS
 from common.test_ids_context import pre_bundle
-from step_11_experiment_setup.setup_experiment import parse_cli_args, run_setup
+from step_11_experiment_setup.setup_experiment import parse_cli_args, run_setup, validate_config_shape
 
 
 def base_config(output_root: Path, *, ids_aware: bool = False, instructions_only: bool = False) -> dict:
@@ -63,6 +68,7 @@ def base_config(output_root: Path, *, ids_aware: bool = False, instructions_only
             "grouping_policy": "flow_context_aware" if ids_aware else "fixed_packet_count",
             "grouping_unit": "physical_packet",
             "group_size_packets": 6,
+            "modification_strategy": HEADER_ONLY_STRATEGY,
             "header_editability_policy": "conservative_header_editability_v1",
             "pre_llm_traffic_selection_policy": "conservative_v1",
             "post_llm_traffic_validation_policy": "reject_invalid_v1",
@@ -99,6 +105,59 @@ class Step11ExperimentSetupTests(unittest.TestCase):
                 (experiment_root / "01_setup" / "experiment_metadata.json").read_text(encoding="utf-8")
             )
             self.assertNotIn("ids_context_source", persisted_metadata)
+            self.assertEqual(HEADER_ONLY_STRATEGY, persisted_metadata["modification_strategy"]["strategy"])
+            self.assertTrue(persisted_metadata["modification_strategy"]["allows_header_edits"])
+            self.assertFalse(persisted_metadata["modification_strategy"]["allows_payload_edits"])
+
+    def test_accepts_v3_modification_strategies_and_records_capabilities(self) -> None:
+        strategies = {
+            HEADER_ONLY_STRATEGY: (True, False),
+            CANONICAL_PAYLOAD_ONLY_STRATEGY: (False, True),
+            HYBRID_HEADER_CANONICAL_PAYLOAD_STRATEGY: (True, True),
+        }
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for index, (strategy, expected_capabilities) in enumerate(strategies.items(), start=1):
+                with self.subTest(strategy=strategy):
+                    config = base_config(root)
+                    config["experiment"]["experiment_id"] = f"step11_test_experiment_{index}"
+                    config["pipeline"]["modification_strategy"] = strategy
+                    config_path = write_json(root / f"config_{index}.json", config)
+
+                    metadata = run_setup(config_path, False)
+
+                    self.assertEqual(strategy, metadata["modification_strategy"]["strategy"])
+                    self.assertEqual(expected_capabilities[0], metadata["modification_strategy"]["allows_header_edits"])
+                    self.assertEqual(expected_capabilities[1], metadata["modification_strategy"]["allows_payload_edits"])
+
+    def test_rejects_unknown_modification_strategy(self) -> None:
+        config = base_config(Path("/tmp"))
+        config["pipeline"]["modification_strategy"] = "unsupported_strategy"
+
+        with self.assertRaisesRegex(ValueError, "Unsupported pipeline.modification_strategy"):
+            validate_config_shape(config)
+
+    def test_rejects_retired_modification_strategy_names(self) -> None:
+        retired_names = (
+            "payload_only_strategy_v1",
+            "hybrid_physical_header_canonical_payload_strategy_v1",
+        )
+
+        for retired_name in retired_names:
+            with self.subTest(retired_name=retired_name):
+                config = base_config(Path("/tmp"))
+                config["pipeline"]["modification_strategy"] = retired_name
+
+                with self.assertRaisesRegex(ValueError, "Unsupported pipeline.modification_strategy"):
+                    validate_config_shape(config)
+
+    def test_requires_physical_packet_grouping_unit(self) -> None:
+        config = base_config(Path("/tmp"))
+        config["pipeline"]["grouping_unit"] = "canonical_tcp_region"
+
+        with self.assertRaisesRegex(ValueError, "pipeline.grouping_unit must be 'physical_packet'"):
+            validate_config_shape(config)
 
     def test_prompt_engineering_config_requires_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

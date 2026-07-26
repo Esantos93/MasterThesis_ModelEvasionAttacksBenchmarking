@@ -152,7 +152,8 @@ def prompt_package_counts(prompt_package: dict[str, Any]) -> dict[str, int]:
     payload_windows = [
         region
         for region in editable_regions
-        if isinstance(region, dict) and region.get("region_type") == "payload_byte_range"
+        if isinstance(region, dict)
+        and region.get("region_type") in {"payload_byte_range", "canonical_payload_byte_range"}
     ]
     return {
         "packet_count": len(packet_ids),
@@ -206,6 +207,12 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         generation_response_metadata = metadata.get("llama_response_metadata")
     if not isinstance(generation_response_metadata, dict):
         generation_response_metadata = {}
+    capabilities = metadata.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+    target_presence = metadata.get("editable_target_presence")
+    if not isinstance(target_presence, dict):
+        target_presence = {}
 
     row = {
         "metadata_file": str(metadata_path),
@@ -218,6 +225,12 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "prompt_version": metadata.get("prompt_version"),
         "prompt_contract": metadata.get("prompt_contract"),
         "source_modification_unit_schema_version": metadata.get("source_modification_unit_schema_version"),
+        "modification_strategy": metadata.get("modification_strategy"),
+        "allows_header_edits": capabilities.get("allows_header_edits"),
+        "allows_payload_edits": capabilities.get("allows_payload_edits"),
+        "requires_payload_preservation": capabilities.get("requires_payload_preservation"),
+        "editable_headers_present": target_presence.get("editable_headers_present"),
+        "editable_payload_present": target_presence.get("editable_payload_present"),
         "status": metadata.get("status"),
         "failure_reason": metadata.get("failure_reason"),
         "validation_reason": validation_reason,
@@ -568,6 +581,12 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "prompt_version",
         "prompt_contract",
         "source_modification_unit_schema_version",
+        "modification_strategy",
+        "allows_header_edits",
+        "allows_payload_edits",
+        "requires_payload_preservation",
+        "editable_headers_present",
+        "editable_payload_present",
         "status",
         "failure_reason",
         "validation_reason",

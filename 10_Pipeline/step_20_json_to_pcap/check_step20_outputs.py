@@ -13,7 +13,8 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.naming import sanitize_name_component
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v1"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v4"
+EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION = "validated_modified_traffic_v4"
 DEFAULT_EXPERIMENT_ROOT = Path("/home/santos/Experiments/exp_cicids2017_baseline_004")
 DEFAULT_EXPERIMENT_CONFIG_LABEL = "baseline-004-headers-only-fixed-size-6"
 DEFAULT_EXPECTED_PACKET_COUNT = 99831
@@ -137,6 +138,7 @@ def main() -> None:
     report = read_json(report_path)
     metadata = report.get("metadata", {})
     summary = report.get("summary", {})
+    source_validation_contract = report.get("source_validation_contract", {})
     tcp_summary = report.get("tcp_reconstruction_summary", {})
     protocol_summary = nested_get(report, ["network_protocol_validation", "summary"], {})
     issue_counts = protocol_summary.get("issue_counts_by_reason", {}) if isinstance(protocol_summary, dict) else {}
@@ -145,6 +147,8 @@ def main() -> None:
     print(format_json(metadata))
     print("\nSummary:")
     print(format_json(summary))
+    print("\nSource validation contract:")
+    print(format_json(source_validation_contract))
     print("\nTCP reconstruction summary:")
     print(format_json(tcp_summary))
     print("\nNetwork protocol validation summary:")
@@ -153,7 +157,19 @@ def main() -> None:
     print(format_json(issue_counts))
 
     add_equal_check(failures, "metadata.schema_version", metadata.get("schema_version"), REPORT_SCHEMA_VERSION)
+    add_equal_check(
+        failures,
+        "metadata.source_validation_schema_version",
+        metadata.get("source_validation_schema_version"),
+        EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION,
+    )
     add_equal_check(failures, "metadata.status", metadata.get("status"), "completed")
+    add_equal_check(
+        failures,
+        "source_validation_contract.validated_traffic_schema_version",
+        source_validation_contract.get("validated_traffic_schema_version") if isinstance(source_validation_contract, dict) else None,
+        EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION,
+    )
     add_equal_check(
         failures,
         "metadata.experiment_config_label",

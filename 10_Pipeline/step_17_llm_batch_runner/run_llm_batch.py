@@ -18,6 +18,11 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
+from common.modification_strategy import (
+    ModificationCapabilities,
+    SUPPORTED_MODIFICATION_STRATEGIES,
+    resolve_modification_strategy,
+)
 from common.token_budget import TOKEN_BUDGET_POLICY, load_token_budget_config
 
 
@@ -28,11 +33,11 @@ DEFAULT_CLOUD_ROOT = Path("/home/ubuntu/thesis_Santos")
 MODEL_OUTPUT_SUBDIRS = ["raw", "parsed", "metadata", "failures"]
 
 #These are the Step 16/17 schema names for the compact patch-based contract.
-PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
-PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
+PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v2"
+PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v2"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
-ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
+ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v3"
 NO_USEFUL_HEADER_EDIT_ABSTENTION = "no_useful_header_edit"
 FIELD_ALIASES = {
     "region_type": ["region_type", "type"],
@@ -67,15 +72,45 @@ def default_cloud_paths(config: dict[str, Any], cloud_root: str | Path) -> dict[
     experiment_id = config["experiment"]["experiment_id"]
     root = Path(cloud_root).expanduser()
     return {
-        "prompt_manifest": root / "02_OutputFiles" / experiment_id / "06_prompts" / "prompt_units_manifest_v1.json",
+        "prompt_manifest": root / "02_OutputFiles" / experiment_id / "06_prompts" / "prompt_units_manifest_v2.json",
         "prompt_dir": root / "02_OutputFiles" / experiment_id / "06_prompts",
         "output_root": root / "02_OutputFiles" / experiment_id / "07_llm_outputs",
         "model_dir": root / "03_Models",
     }
 
 
+#This function resolves and validates embedded capability metadata against the shared registry.
+def validate_embedded_capabilities(
+    *,
+    strategy: Any,
+    capabilities: Any,
+    artifact_path: Path,
+    expected_capabilities: ModificationCapabilities | None = None,
+) -> ModificationCapabilities:
+    if not isinstance(strategy, str):
+        raise ValueError(f"Missing modification_strategy in {artifact_path}.")
+    resolved = SUPPORTED_MODIFICATION_STRATEGIES.get(strategy)
+    if resolved is None:
+        raise ValueError(f"Unsupported modification_strategy={strategy!r} in {artifact_path}.")
+    if capabilities != resolved.as_metadata():
+        raise ValueError(
+            f"Capabilities do not match common.modification_strategy in {artifact_path}: "
+            f"expected {resolved.as_metadata()!r}, found {capabilities!r}."
+        )
+    if expected_capabilities is not None and resolved != expected_capabilities:
+        raise ValueError(
+            f"Prompt strategy {resolved.strategy!r} does not match the active config strategy "
+            f"{expected_capabilities.strategy!r}: {artifact_path}"
+        )
+    return resolved
+
+
 #This function validates the basic shape of a Step 16 prompt manifest.
-def validate_prompt_manifest(prompt_manifest: Any, manifest_path: Path) -> dict[str, Any]:
+def validate_prompt_manifest(
+    prompt_manifest: Any,
+    manifest_path: Path,
+    expected_capabilities: ModificationCapabilities | None = None,
+) -> dict[str, Any]:
     if not isinstance(prompt_manifest, dict):
         raise ValueError(f"Prompt manifest root must be an object: {manifest_path}")
     metadata = prompt_manifest.get("metadata")
@@ -90,6 +125,18 @@ def validate_prompt_manifest(prompt_manifest: Any, manifest_path: Path) -> dict[
         raise ValueError(
             f"Prompt manifest must use token_budget_policy={TOKEN_BUDGET_POLICY}: {manifest_path}"
         )
+    validate_embedded_capabilities(
+        strategy=metadata.get("modification_strategy"),
+        capabilities=metadata.get("capabilities"),
+        artifact_path=manifest_path,
+        expected_capabilities=expected_capabilities,
+    )
+    if metadata.get("source_compact_modification_units_manifest_schema_version") != (
+        "compact_modification_units_manifest_v3"
+    ):
+        raise ValueError(f"Prompt manifest must trace compact_modification_units_manifest_v3: {manifest_path}")
+    if metadata.get("source_compact_view_schema_version") != ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
+        raise ValueError(f"Prompt manifest must trace compact_modification_unit_v3: {manifest_path}")
     prompt_units = prompt_manifest.get("prompt_units")
     if not isinstance(prompt_units, list):
         raise ValueError(f"Prompt manifest must contain a prompt_units list: {manifest_path}")
@@ -113,6 +160,16 @@ def validate_prompt_package(prompt_package: Any, prompt_path: Path) -> dict[str,
             "Step 17 accepts only prompt units generated from "
             f"source_modification_unit_schema_version={ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION}: {prompt_path}"
         )
+    source_modification_unit_id = prompt_package.get("source_modification_unit_id")
+    if not isinstance(source_modification_unit_id, str) or not source_modification_unit_id:
+        raise ValueError(f"Prompt unit must contain source_modification_unit_id: {prompt_path}")
+    if source_modification_unit_id != prompt_package.get("prompt_unit_id"):
+        raise ValueError(f"Prompt unit id must match source_modification_unit_id: {prompt_path}")
+    capabilities = validate_embedded_capabilities(
+        strategy=prompt_package.get("modification_strategy"),
+        capabilities=prompt_package.get("capabilities"),
+        artifact_path=prompt_path,
+    )
     token_plan = prompt_package.get("token_plan")
     if not isinstance(token_plan, dict) or token_plan.get("policy") != TOKEN_BUDGET_POLICY:
         raise ValueError(
@@ -134,6 +191,58 @@ def validate_prompt_package(prompt_package: Any, prompt_path: Path) -> dict[str,
         raise ValueError(f"Prompt unit must contain input_traceability object: {prompt_path}")
     if not isinstance(traceability.get("editable_regions"), list):
         raise ValueError(f"Prompt unit input_traceability must contain editable_regions list: {prompt_path}")
+    if traceability.get("source_modification_unit_schema_version") != ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
+        raise ValueError(f"Prompt traceability must declare compact_modification_unit_v3: {prompt_path}")
+    if traceability.get("source_modification_unit_id") != source_modification_unit_id:
+        raise ValueError(f"Prompt traceability source modification unit id does not match: {prompt_path}")
+    if traceability.get("modification_strategy") != capabilities.strategy:
+        raise ValueError(f"Prompt traceability strategy does not match the prompt package: {prompt_path}")
+    if traceability.get("capabilities") != capabilities.as_metadata():
+        raise ValueError(f"Prompt traceability capabilities do not match the prompt package: {prompt_path}")
+
+    target_presence = prompt_package.get("editable_target_presence")
+    if not isinstance(target_presence, dict):
+        raise ValueError(f"Prompt unit must contain editable_target_presence: {prompt_path}")
+    if traceability.get("editable_target_presence") != target_presence:
+        raise ValueError(f"Prompt traceability target presence does not match the prompt package: {prompt_path}")
+    has_headers = any(
+        isinstance(region, dict) and region.get("identity_type") == "physical_header_region"
+        for region in traceability["editable_regions"]
+    )
+    has_payload = any(
+        isinstance(region, dict) and region.get("identity_type") == "canonical_payload_region"
+        for region in traceability["editable_regions"]
+    )
+    actual_presence = {
+        "editable_headers_present": has_headers,
+        "editable_payload_present": has_payload,
+    }
+    if target_presence != actual_presence:
+        raise ValueError(f"Prompt editable_target_presence does not match editable_regions: {prompt_path}")
+    if not has_headers and not has_payload:
+        raise ValueError(f"Prompt unit must authorize at least one editable target: {prompt_path}")
+    if has_headers and not capabilities.allows_header_edits:
+        raise ValueError(f"Prompt exposes header targets forbidden by its capabilities: {prompt_path}")
+    if has_payload and not capabilities.allows_payload_edits:
+        raise ValueError(f"Prompt exposes payload targets forbidden by its capabilities: {prompt_path}")
+
+    expected_output_format = prompt_package.get("expected_output_format")
+    if not isinstance(expected_output_format, dict):
+        raise ValueError(f"Prompt unit must contain expected_output_format: {prompt_path}")
+    required_keys = expected_output_format.get("required_top_level_keys")
+    if not isinstance(required_keys, list):
+        raise ValueError(f"Prompt expected_output_format requires a required_top_level_keys list: {prompt_path}")
+    forbidden_keys = expected_output_format.get("forbidden_top_level_keys")
+    if not isinstance(forbidden_keys, list):
+        raise ValueError(f"Prompt expected_output_format requires a forbidden_top_level_keys list: {prompt_path}")
+    if ("header_edits" in required_keys) is not has_headers:
+        raise ValueError(f"Prompt header_edits skeleton branch does not match target presence: {prompt_path}")
+    if ("patches" in required_keys) is not has_payload:
+        raise ValueError(f"Prompt patches skeleton branch does not match target presence: {prompt_path}")
+    if ("header_edits" in forbidden_keys) is not (not has_headers):
+        raise ValueError(f"Prompt header_edits forbidden branch does not match target presence: {prompt_path}")
+    if ("patches" in forbidden_keys) is not (not has_payload):
+        raise ValueError(f"Prompt patches forbidden branch does not match target presence: {prompt_path}")
     return prompt_package
 
 
@@ -164,8 +273,13 @@ def collect_prompt_paths(
     prompt_manifest_path: Path,
     prompt_dir: Path,
     limit_prompts_s17: int | None,
+    expected_capabilities: ModificationCapabilities,
 ) -> list[Path]:
-    prompt_manifest = validate_prompt_manifest(read_json(prompt_manifest_path), prompt_manifest_path)
+    prompt_manifest = validate_prompt_manifest(
+        read_json(prompt_manifest_path),
+        prompt_manifest_path,
+        expected_capabilities,
+    )
     prompt_entries = prompt_manifest["prompt_units"]
     selected_entries = prompt_entries[:limit_prompts_s17] if limit_prompts_s17 is not None else prompt_entries
 
@@ -179,7 +293,11 @@ def collect_prompt_paths(
 
 #This function resolves the prompt files selected for this run.
 #A direct prompt file is useful for a one-group smoke test, while the manifest is the normal batch mode.
-def resolve_selected_prompt_paths(args: argparse.Namespace, paths: dict[str, Path]) -> list[Path]:
+def resolve_selected_prompt_paths(
+    args: argparse.Namespace,
+    paths: dict[str, Path],
+    expected_capabilities: ModificationCapabilities,
+) -> list[Path]:
     if args.prompt_file and args.prompt_manifest:
         raise ValueError("Use either --prompt-file or --prompt-manifest, not both.")
     if args.prompt_file and args.limit_prompts_s17 is not None:
@@ -189,6 +307,13 @@ def resolve_selected_prompt_paths(args: argparse.Namespace, paths: dict[str, Pat
         prompt_path = Path(args.prompt_file).expanduser()
         if not prompt_path.exists():
             raise FileNotFoundError(f"Prompt file does not exist: {prompt_path}")
+        prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
+        validate_embedded_capabilities(
+            strategy=prompt_package.get("modification_strategy"),
+            capabilities=prompt_package.get("capabilities"),
+            artifact_path=prompt_path,
+            expected_capabilities=expected_capabilities,
+        )
         return [prompt_path]
 
     prompt_manifest_path = Path(args.prompt_manifest).expanduser() if args.prompt_manifest else paths["prompt_manifest"]
@@ -197,6 +322,7 @@ def resolve_selected_prompt_paths(args: argparse.Namespace, paths: dict[str, Pat
         prompt_manifest_path=prompt_manifest_path,
         prompt_dir=prompt_dir,
         limit_prompts_s17=args.limit_prompts_s17,
+        expected_capabilities=expected_capabilities,
     )
 
 
@@ -292,15 +418,6 @@ def measure_input_tokens(llm: Any, messages: list[dict[str, Any]]) -> int:
     except TypeError:
         tokens = llm.tokenize(estimation_text.encode("utf-8"))
     return len(tokens)
-
-
-#This function counts editable regions declared by a Step 16 prompt unit.
-def get_editable_region_count(prompt_package: dict[str, Any]) -> int:
-    traceability = prompt_package.get("input_traceability", {})
-    editable_regions = traceability.get("editable_regions", [])
-    if isinstance(editable_regions, list):
-        return sum(1 for editable_region in editable_regions if isinstance(editable_region, dict))
-    return 0
 
 
 #This function applies the shared Step 15/16 token plan to one runtime prompt without replanning or clipping.
@@ -653,6 +770,53 @@ def validate_replacement_format(
     return None
 
 
+#This function measures and validates one payload replacement against its V3 target limits.
+def validate_payload_replacement_limits(
+    *,
+    patch: dict[str, Any],
+    region: dict[str, Any],
+    patch_index: int,
+) -> dict[str, Any] | None:
+    replacement = patch["replacement"]
+    replacement_format = patch["replacement_format"]
+    replacement_bytes = (
+        len(replacement.strip()) // 2
+        if replacement_format == "hex"
+        else len(replacement.encode("utf-8"))
+    )
+    max_replacement_bytes = region.get("max_replacement_bytes")
+    max_replacement_hex_chars = region.get("max_replacement_hex_chars")
+    if isinstance(max_replacement_bytes, bool) or not isinstance(max_replacement_bytes, int):
+        return {
+            "accepted": False,
+            "reason": "editable_region_missing_max_replacement_bytes",
+            "patch_index": patch_index,
+        }
+    if isinstance(max_replacement_hex_chars, bool) or not isinstance(max_replacement_hex_chars, int):
+        return {
+            "accepted": False,
+            "reason": "editable_region_missing_max_replacement_hex_chars",
+            "patch_index": patch_index,
+        }
+    if replacement_bytes > max_replacement_bytes:
+        return {
+            "accepted": False,
+            "reason": "replacement_exceeds_max_replacement_bytes",
+            "patch_index": patch_index,
+            "replacement_bytes": replacement_bytes,
+            "max_replacement_bytes": max_replacement_bytes,
+        }
+    if replacement_format == "hex" and len(replacement.strip()) > max_replacement_hex_chars:
+        return {
+            "accepted": False,
+            "reason": "replacement_exceeds_max_replacement_hex_chars",
+            "patch_index": patch_index,
+            "replacement_hex_chars": len(replacement.strip()),
+            "max_replacement_hex_chars": max_replacement_hex_chars,
+        }
+    return None
+
+
 #This function validates integer header replacements against field constraints.
 def validate_uint_replacement(
     *,
@@ -984,6 +1148,24 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
             "actual_prompt_unit_id": parsed_output.get("prompt_unit_id"),
         }
 
+    target_presence = prompt_package["editable_target_presence"]
+    has_editable_headers = target_presence["editable_headers_present"]
+    has_editable_payload = target_presence["editable_payload_present"]
+    if has_editable_headers:
+        if "header_edits" not in parsed_output:
+            return {"accepted": False, "reason": "required_header_edits_missing"}
+        if not isinstance(parsed_output.get("header_edits"), list):
+            return {"accepted": False, "reason": "header_edits_not_list"}
+    elif "header_edits" in parsed_output:
+        return {"accepted": False, "reason": "header_edits_not_authorized_for_prompt"}
+    if has_editable_payload:
+        if "patches" not in parsed_output:
+            return {"accepted": False, "reason": "required_patches_missing"}
+        if not isinstance(parsed_output.get("patches"), list):
+            return {"accepted": False, "reason": "patches_not_list"}
+    elif "patches" in parsed_output:
+        return {"accepted": False, "reason": "payload_patches_not_authorized_for_prompt"}
+
     compact_header_edit_error, output_normalization = expand_compact_header_edits(parsed_output, prompt_package)
     if compact_header_edit_error:
         if output_normalization is not None:
@@ -995,7 +1177,7 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
         return {"accepted": False, "reason": "patches_not_list"}
 
     editable_lookup = build_editable_region_lookup(prompt_package)
-    editable_packet_ids = set(str(packet_id) for packet_id in prompt_package["input_traceability"].get("editable_packet_ids", []))
+    payload_intervals_by_canonical_region: dict[str, list[tuple[int, int, int]]] = {}
     for patch_index, patch in enumerate(patches, start=1):
         if not isinstance(patch, dict):
             return {"accepted": False, "reason": "patch_not_object", "patch_index": patch_index}
@@ -1004,33 +1186,48 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
         if not isinstance(region_id, str):
             return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
 
-        explicit_packet_id = patch.get("packet_id")
-        raw_packet_id = explicit_packet_id or patch.get("canonical_region_id")
+        operation = get_field_with_aliases(patch, "operation")
         region = None
-        if raw_packet_id is None:
-            inferred_header_region = find_unique_header_region_by_region_id(editable_lookup, region_id)
-            if inferred_header_region is None:
-                return {"accepted": False, "reason": "patch_missing_packet_or_canonical_region", "patch_index": patch_index}
-            packet_id_text, region = inferred_header_region
-            patch["packet_id"] = packet_id_text
-        else:
-            packet_id_text = str(raw_packet_id)
-            if explicit_packet_id is None and packet_id_text not in editable_packet_ids:
+        if operation == "replace_uint":
+            raw_packet_id = patch.get("packet_id")
+            if raw_packet_id is None:
                 inferred_header_region = find_unique_header_region_by_region_id(editable_lookup, region_id)
-                if inferred_header_region is not None:
-                    packet_id_text, region = inferred_header_region
-                    patch["packet_id"] = packet_id_text
-                    patch.pop("canonical_region_id", None)
-        if packet_id_text not in editable_packet_ids:
-            return {
-                "accepted": False,
-                "reason": "patch_references_non_editable_packet",
-                "patch_index": patch_index,
-                "packet_id": packet_id_text,
-            }
+                if inferred_header_region is None:
+                    return {
+                        "accepted": False,
+                        "reason": "header_patch_missing_packet_id",
+                        "patch_index": patch_index,
+                    }
+                packet_id_text, region = inferred_header_region
+                patch["packet_id"] = packet_id_text
+                patch.pop("canonical_region_id", None)
+            else:
+                packet_id_text = str(raw_packet_id)
+                region = editable_lookup.get((packet_id_text, region_id))
+        else:
+            raw_canonical_region_id = patch.get("canonical_region_id")
+            if not isinstance(raw_canonical_region_id, str) or not raw_canonical_region_id:
+                return {
+                    "accepted": False,
+                    "reason": "patch_missing_canonical_region_id",
+                    "patch_index": patch_index,
+                }
+            packet_id = patch.get("packet_id")
+            if packet_id is not None and str(packet_id) != raw_canonical_region_id:
+                return {
+                    "accepted": False,
+                    "reason": "packet_id_canonical_region_id_mismatch",
+                    "patch_index": patch_index,
+                    "packet_id": str(packet_id),
+                    "canonical_region_id": raw_canonical_region_id,
+                }
+            packet_id_text = raw_canonical_region_id
+            region = editable_lookup.get((raw_canonical_region_id, region_id))
 
-        if region is None:
-            region = editable_lookup.get((packet_id_text, region_id))
+        if region is None and operation == "replace_uint":
+            inferred_header_region = find_unique_header_region_by_region_id(editable_lookup, region_id)
+            if inferred_header_region is not None and inferred_header_region[0] == packet_id_text:
+                region = inferred_header_region[1]
         if region is None:
             return {
                 "accepted": False,
@@ -1041,8 +1238,20 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
             }
         region_identity_type = region.get("identity_type", "canonical_payload_region")
         if region_identity_type == "physical_header_region":
+            if not has_editable_headers:
+                return {
+                    "accepted": False,
+                    "reason": "header_patch_not_authorized_for_prompt",
+                    "patch_index": patch_index,
+                }
             packet_id_text, identity_error = normalize_header_patch_target_identity(patch)
         else:
+            if not has_editable_payload:
+                return {
+                    "accepted": False,
+                    "reason": "payload_patch_not_authorized_for_prompt",
+                    "patch_index": patch_index,
+                }
             packet_id_text, identity_error = normalize_payload_patch_target_identity(patch)
         if identity_error:
             identity_error["patch_index"] = patch_index
@@ -1051,7 +1260,11 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
             return {"accepted": False, "reason": "patch_missing_packet_or_region", "patch_index": patch_index}
 
         region_canonical_region_id = region.get("canonical_region_id")
-        if region_identity_type != "physical_header_region" and region_canonical_region_id is not None and str(patch.get("canonical_region_id")) != str(region_canonical_region_id):
+        if (
+            region_identity_type != "physical_header_region"
+            and region_canonical_region_id is not None
+            and str(patch.get("canonical_region_id")) != str(region_canonical_region_id)
+        ):
             return {
                 "accepted": False,
                 "reason": "patch_canonical_region_id_mismatch",
@@ -1062,7 +1275,6 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "actual_canonical_region_id": str(patch.get("canonical_region_id")),
             }
 
-        operation = get_field_with_aliases(patch, "operation")
         allowed_operations = region.get("allowed_operations") or ["replace_region"]
         if not isinstance(allowed_operations, list):
             return {
@@ -1107,6 +1319,34 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
         replacement_error = validate_replacement_format(patch=patch, region=region, patch_index=patch_index)
         if replacement_error:
             return replacement_error
+        replacement_limit_error = validate_payload_replacement_limits(
+            patch=patch,
+            region=region,
+            patch_index=patch_index,
+        )
+        if replacement_limit_error:
+            return replacement_limit_error
+
+        authorized_start = region.get("authorized_start_offset_bytes")
+        authorized_end = region.get("authorized_end_offset_bytes")
+        authorized_length = region.get("authorized_length_bytes")
+        if (
+            isinstance(authorized_start, bool)
+            or not isinstance(authorized_start, int)
+            or isinstance(authorized_end, bool)
+            or not isinstance(authorized_end, int)
+            or isinstance(authorized_length, bool)
+            or not isinstance(authorized_length, int)
+            or authorized_start < 0
+            or authorized_end < authorized_start
+            or authorized_end - authorized_start != authorized_length
+        ):
+            return {
+                "accepted": False,
+                "reason": "editable_region_invalid_authorized_range",
+                "patch_index": patch_index,
+                "region_id": region_id,
+            }
 
         if operation == "replace_byte_range":
             offset = patch.get("offset_from_region_start_bytes")
@@ -1123,23 +1363,20 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                     "reason": "invalid_replace_byte_range_length",
                     "patch_index": patch_index,
                 }
-            region_length = region.get("length_bytes")
-            if not isinstance(region_length, int) or region_length < 0:
-                return {
-                    "accepted": False,
-                    "reason": "editable_region_missing_length_bytes",
-                    "patch_index": patch_index,
-                    "region_id": region_id,
-                }
-            if offset + length_bytes > region_length:
+            if offset + length_bytes > authorized_length:
                 return {
                     "accepted": False,
                     "reason": "replace_byte_range_exceeds_region",
                     "patch_index": patch_index,
                     "offset_from_region_start_bytes": offset,
                     "length_bytes": length_bytes,
-                    "region_length_bytes": region_length,
+                    "region_length_bytes": authorized_length,
                 }
+            patch_start = authorized_start + offset
+            patch_end = patch_start + length_bytes
+        elif operation == "replace_region":
+            patch_start = authorized_start
+            patch_end = authorized_end
         elif operation != "replace_region":
             return {
                 "accepted": False,
@@ -1147,6 +1384,20 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
                 "patch_index": patch_index,
                 "operation": operation,
             }
+        canonical_region_key = str(region["canonical_region_id"])
+        prior_intervals = payload_intervals_by_canonical_region.setdefault(canonical_region_key, [])
+        for prior_start, prior_end, prior_patch_index in prior_intervals:
+            if patch_start < prior_end and prior_start < patch_end:
+                return {
+                    "accepted": False,
+                    "reason": "overlapping_payload_patches",
+                    "patch_index": patch_index,
+                    "overlaps_patch_index": prior_patch_index,
+                    "canonical_region_id": canonical_region_key,
+                    "patch_range": [patch_start, patch_end],
+                    "prior_patch_range": [prior_start, prior_end],
+                }
+        prior_intervals.append((patch_start, patch_end, patch_index))
 
     expected_output_format = prompt_package.get("expected_output_format", {})
     recognized_abstention_reasons = (
@@ -1212,6 +1463,9 @@ def build_run_metadata(
         "prompt_unit_id": prompt_package.get("prompt_unit_id"),
         "prompt_version": prompt_package.get("prompt_version"),
         "prompt_contract": prompt_package.get("prompt_contract"),
+        "modification_strategy": prompt_package.get("modification_strategy"),
+        "capabilities": deepcopy(prompt_package.get("capabilities")),
+        "editable_target_presence": deepcopy(prompt_package.get("editable_target_presence")),
         "prompt_file": str(prompt_path),
         "source_modification_unit_file": prompt_package.get("source_modification_unit_file"),
         "source_modification_unit_id": (
@@ -1370,51 +1624,6 @@ def run_single_prompt(
     generation_response_metadata = None
     token_plan = None
     output_paths: dict[str, str] = {}
-
-    traceability = prompt_package["input_traceability"]
-    editable_region_count = get_editable_region_count(prompt_package)
-
-    if editable_region_count == 0:
-        parsed_output = {
-            "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
-            "parent_group_id": prompt_package.get("parent_group_id"),
-            "prompt_unit_id": prompt_package.get("prompt_unit_id"),
-            "patches": [],
-        }
-        failure_reason = "no_editable_regions_not_supported"
-        validation_result = {"accepted": False, "reason": failure_reason, "patch_count": 0}
-        token_plan = deepcopy(prompt_package["token_plan"])
-        token_plan.update(
-            {
-                "real_input_tokens": 0,
-                "input_estimation_error_tokens": -int(token_plan["estimated_input_tokens"]),
-                "input_estimation_error_ratio": 0.0,
-                "runtime_max_model_len": int(generation_params["runtime_max_model_len"]),
-                "overflow_tokens": 0,
-                "fits_runtime_max_model_len": True,
-            }
-        )
-        write_json(parsed_path, parsed_output)
-        output_paths["parsed"] = str(parsed_path)
-        output_paths["metadata"] = str(metadata_path)
-        metadata = build_run_metadata(
-            status="failed",
-            failure_reason=failure_reason,
-            prompt_package=prompt_package,
-            prompt_path=prompt_path,
-            model_path=model_path,
-            model_name=model_name,
-            generation_params=generation_params,
-            started_at_utc=started_at_utc,
-            finished_at_utc=started_at_utc,
-            runtime_seconds=0.0,
-            output_paths=output_paths,
-            validation_result=validation_result,
-            token_plan=token_plan,
-            generation_response_metadata=None,
-        )
-        write_json(metadata_path, metadata)
-        return metadata
 
     try:
         prompt_generation_params, token_plan = build_prompt_generation_params(
@@ -1777,7 +1986,6 @@ def run_model_batch(
 
     accepted_count = 0
     failed_count = 0
-    unsupported_no_editable_count = 0
     total_prompts = len(prompt_paths)
     model_start = time.perf_counter()
     pending_batch: list[dict[str, Any]] = []
@@ -1787,12 +1995,8 @@ def run_model_batch(
     def record_metadata(metadata: dict[str, Any]) -> None:
         nonlocal accepted_count
         nonlocal failed_count
-        nonlocal unsupported_no_editable_count
         if metadata["status"] == "accepted":
             accepted_count += 1
-        elif metadata.get("failure_reason") == "no_editable_regions_not_supported":
-            unsupported_no_editable_count += 1
-            failed_count += 1
         else:
             failed_count += 1
 
@@ -1821,7 +2025,7 @@ def run_model_batch(
             f"{model_name}: generation batch {generation_batch_index} finished "
             f"(items={len(metadata_rows)}, last_batch={time.perf_counter() - batch_started:.1f}s, "
             f"processed={prompt_index}/{total_prompts}, accepted={accepted_count}, "
-            f"failed={failed_count}, unsupported_no_editable={unsupported_no_editable_count})"
+            f"failed={failed_count})"
         )
 
     for prompt_index, prompt_path in enumerate(prompt_paths, start=1):
@@ -1841,53 +2045,38 @@ def run_model_batch(
             record_metadata(metadata)
         else:
             prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
-            editable_region_count = get_editable_region_count(prompt_package)
-            if editable_region_count == 0:
-                metadata = run_single_prompt(
-                    llm=llm,
+            prompt_generation_params, token_plan = build_prompt_generation_params(
+                llm=llm,
+                prompt_package=prompt_package,
+                base_generation_params=generation_params,
+            )
+            started_at_utc = datetime.now(timezone.utc).isoformat()
+            if int(token_plan["overflow_tokens"]) > 0:
+                metadata = write_input_context_overflow_metadata(
+                    prompt_package=prompt_package,
                     prompt_path=prompt_path,
                     model_path=model_path,
                     model_name=model_name,
                     output_dirs=output_dirs,
                     generation_params=generation_params,
-                    heartbeat_seconds=heartbeat_seconds,
-                    prompt_index=prompt_index,
-                    total_prompts=total_prompts,
+                    token_plan=token_plan,
+                    started_at_utc=started_at_utc,
+                    runtime_seconds=time.perf_counter() - prompt_started,
                 )
                 record_metadata(metadata)
             else:
-                prompt_generation_params, token_plan = build_prompt_generation_params(
-                    llm=llm,
-                    prompt_package=prompt_package,
-                    base_generation_params=generation_params,
+                pending_batch.append(
+                    {
+                        "prompt_path": prompt_path,
+                        "prompt_package": prompt_package,
+                        "prompt_generation_params": prompt_generation_params,
+                        "token_plan": token_plan,
+                        "started_at_utc": started_at_utc,
+                        "start_time": time.perf_counter(),
+                    }
                 )
-                started_at_utc = datetime.now(timezone.utc).isoformat()
-                if int(token_plan["overflow_tokens"]) > 0:
-                    metadata = write_input_context_overflow_metadata(
-                        prompt_package=prompt_package,
-                        prompt_path=prompt_path,
-                        model_path=model_path,
-                        model_name=model_name,
-                        output_dirs=output_dirs,
-                        generation_params=generation_params,
-                        token_plan=token_plan,
-                        started_at_utc=started_at_utc,
-                        runtime_seconds=time.perf_counter() - prompt_started,
-                    )
-                    record_metadata(metadata)
-                else:
-                    pending_batch.append(
-                        {
-                            "prompt_path": prompt_path,
-                            "prompt_package": prompt_package,
-                            "prompt_generation_params": prompt_generation_params,
-                            "token_plan": token_plan,
-                            "started_at_utc": started_at_utc,
-                            "start_time": time.perf_counter(),
-                        }
-                    )
-                    if len(pending_batch) >= llm_batch_size:
-                        flush_pending_batch(prompt_index)
+                if len(pending_batch) >= llm_batch_size:
+                    flush_pending_batch(prompt_index)
 
         should_print = (
             prompt_index == 1
@@ -1901,7 +2090,6 @@ def run_model_batch(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
                 f"{model_name}: {prompt_index}/{total_prompts} prompts processed "
                 f"(accepted={accepted_count}, failed={failed_count}, "
-                f"unsupported_no_editable={unsupported_no_editable_count}, "
                 f"last={last_runtime:.1f}s, elapsed={elapsed:.1f}s)"
             )
 
@@ -1914,7 +2102,6 @@ def run_model_batch(
         "prompt_count": total_prompts,
         "accepted_count": accepted_count,
         "failed_count": failed_count,
-        "unsupported_no_editable_count": unsupported_no_editable_count,
         "llm_batch_size": llm_batch_size,
         "runtime_seconds": time.perf_counter() - model_start,
     }
@@ -1925,6 +2112,7 @@ def run_model_batch(
 def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
     config = load_json_config(args.config)
     validate_config(config)
+    capabilities = resolve_modification_strategy(config)
 
     if args.limit_prompts_s17 is not None and args.limit_prompts_s17 <= 0:
         raise ValueError("--limit-prompts-s17 must be a positive integer when provided.")
@@ -1939,7 +2127,15 @@ def run_llm_batch(args: argparse.Namespace) -> dict[str, Any]:
     output_root = Path(args.output_root).expanduser() if args.output_root else paths["output_root"]
     model_dir = Path(args.model_dir).expanduser() if args.model_dir else paths["model_dir"]
 
-    prompt_paths = resolve_selected_prompt_paths(args, paths)
+    prompt_paths = resolve_selected_prompt_paths(args, paths, capabilities)
+    for prompt_path in prompt_paths:
+        prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
+        validate_embedded_capabilities(
+            strategy=prompt_package.get("modification_strategy"),
+            capabilities=prompt_package.get("capabilities"),
+            artifact_path=prompt_path,
+            expected_capabilities=capabilities,
+        )
     model_paths = collect_model_paths(
         model_dir=model_dir,
         explicit_model_paths=args.model_path,
@@ -1997,7 +2193,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LLM models over Step 16 compact patch prompt units.")
     parser.add_argument("--config", required=True, help="Path to the experiment JSON config.")
     parser.add_argument("--prompt-file", help="Path to one Step 16 prompt_unit.prompt.json file.")
-    parser.add_argument("--prompt-manifest", help="Path to Step 16 prompt_units_manifest_v1.json.")
+    parser.add_argument("--prompt-manifest", help="Path to Step 16 prompt_units_manifest_v2.json.")
     parser.add_argument("--prompt-dir", help="Directory containing Step 16 prompt_unit.prompt.json files.")
     parser.add_argument("--output-root", help="Directory where Step 17 model outputs will be written.")
     parser.add_argument("--cloud-root", default=str(DEFAULT_CLOUD_ROOT), help="RISE cloud root for default paths.")

@@ -30,7 +30,7 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
                 "traffic": [merged_record],
                 "group_outcomes": group_outcomes or {},
                 "patch_application": {
-                    "schema_version": "patch_application_report_v3",
+                    "schema_version": "patch_application_report_v4",
                     "explicit_header_edits": [],
                     "explicit_payload_edits": [],
                     "applied_patches": [],
@@ -80,7 +80,7 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
                 merged_json={
                     "traffic": [dict(reference)],
                     "group_outcomes": {},
-                    "patch_application": {"schema_version": "patch_application_report_v3"},
+                    "patch_application": {"schema_version": "patch_application_report_v4"},
                 },
                 original_by_packet_id={"packet_004": reference},
                 header_policy=HEADER_POLICY,

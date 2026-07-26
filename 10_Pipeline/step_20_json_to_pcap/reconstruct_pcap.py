@@ -19,15 +19,41 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.config import load_json_config, require_keys
 from common.header_policy import editable_header_fields_from_policy, header_field_value, is_editable_header_field, load_header_editability_policy
 from common.io_utils import write_json
+from common.modification_strategy import ModificationCapabilities, resolve_modification_strategy
 from common.terminal_logging import default_step_log_path, terminal_log
 from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v1"
-DEFAULT_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v1"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v4"
+EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v4"
+STEP18_MERGED_SCHEMA_VERSION = "patch_applied_traffic_v4"
+PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v4"
+STEP19_FULL_POST_RECONSTRUCTION_POLICY = "full_packet_universe_with_original_noop_for_failed_or_invalid_groups"
 ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = 60
 TCP_SEQUENCE_MODULUS = 1 << 32
 TCP_SEQUENCE_MASK = TCP_SEQUENCE_MODULUS - 1
+STEP19_V4_REQUIRED_METADATA_FIELDS = [
+    "experiment_id",
+    "experiment_config_label",
+    "source_merged_json",
+    "validation_report",
+    "accepted_packet_count",
+    "reconstruction_packet_count",
+    "rejected_packet_count",
+    "accepted_group_count",
+    "invalid_traffic_group_count",
+    "llm_output_failure_group_count",
+    "post_reconstruction_policy",
+    "post_llm_traffic_validation_policy",
+]
+STEP19_V4_COUNT_METADATA_FIELDS = [
+    "accepted_packet_count",
+    "reconstruction_packet_count",
+    "rejected_packet_count",
+    "accepted_group_count",
+    "invalid_traffic_group_count",
+    "llm_output_failure_group_count",
+]
 
 
 # This exception carries a machine-readable reconstruction failure reason.
@@ -76,12 +102,258 @@ def validate_config(config: dict[str, Any]) -> None:
     experiment_config_label = config["pipeline"]["experiment_config_label"]
     if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
         raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
+    resolve_modification_strategy(config)
     resolve_post_llm_traffic_validation_policy(config)
 
 
 # This function returns the single pipeline.experiment_config_label configured for this run.
 def experiment_config_label_from_config(config: dict[str, Any]) -> str:
     return config["pipeline"]["experiment_config_label"]
+
+
+# This function resolves a path stored in Step 19 metadata and handles relocated experiment roots.
+# Absolute metadata paths are preferred, but the active input location is used as a deterministic fallback when artifacts were moved together.
+def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_json_path: Path) -> Path:
+    value = metadata.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Step 19 V4 metadata field {field!r} must be a non-empty path string: {input_json_path}")
+    recorded_path = Path(value).expanduser()
+    if not recorded_path.is_absolute():
+        recorded_path = input_json_path.parent / recorded_path
+    if recorded_path.exists():
+        return recorded_path
+
+    if field == "validation_report":
+        relocated_path = input_json_path.parent / "validation_report.json"
+    elif field == "source_merged_json":
+        label = input_json_path.parent.name
+        experiment_root = input_json_path.parent.parent.parent
+        relocated_path = experiment_root / "08_merged_outputs" / label / "merged_modified_traffic.json"
+    else:
+        relocated_path = recorded_path
+    if relocated_path.exists():
+        return relocated_path
+    return recorded_path
+
+
+# This function enforces the Step 19 V4 artifact contract consumed by Step 20.
+# Step 20 must not silently accept legacy validated traffic schemas.
+def validate_step19_v4_input(
+    validated_json: Any,
+    input_json_path: Path,
+    capabilities: ModificationCapabilities,
+    validation_policy: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if not isinstance(validated_json, dict):
+        raise ValueError(f"Validated traffic JSON root must be an object: {input_json_path}")
+    metadata = validated_json.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Validated traffic JSON must contain metadata object: {input_json_path}")
+    schema_version = metadata.get("schema_version")
+    if schema_version != EXPECTED_INPUT_SCHEMA_VERSION:
+        raise ValueError(
+            "Step 20 V4 requires Step 19 validated traffic schema "
+            f"{EXPECTED_INPUT_SCHEMA_VERSION!r}; found {schema_version!r}: {input_json_path}"
+        )
+    traffic = validated_json.get("traffic")
+    if not isinstance(traffic, list):
+        raise ValueError(f"Validated traffic JSON must contain a top-level traffic list: {input_json_path}")
+
+    missing_fields = [
+        field
+        for field in STEP19_V4_REQUIRED_METADATA_FIELDS
+        if field not in metadata
+    ]
+    if missing_fields:
+        raise ValueError(
+            "Step 19 V4 validated traffic metadata is missing required fields "
+            f"{missing_fields}: {input_json_path}"
+        )
+    for field in STEP19_V4_COUNT_METADATA_FIELDS:
+        value = metadata.get(field)
+        if not is_int_like(value) or int(value) < 0:
+            raise ValueError(
+                f"Step 19 V4 metadata field {field!r} must be a non-negative integer; "
+                f"found {value!r}: {input_json_path}"
+            )
+    reconstruction_packet_count = int(metadata["reconstruction_packet_count"])
+    if reconstruction_packet_count != len(traffic):
+        raise ValueError(
+            "Step 19 V4 reconstruction_packet_count must equal the emitted traffic list length; "
+            f"metadata={reconstruction_packet_count}, traffic={len(traffic)}: {input_json_path}"
+        )
+    if metadata.get("post_reconstruction_policy") != STEP19_FULL_POST_RECONSTRUCTION_POLICY:
+        raise ValueError(
+            "Step 20 V4 requires Step 19 full POST reconstruction policy "
+            f"{STEP19_FULL_POST_RECONSTRUCTION_POLICY!r}; "
+            f"found {metadata.get('post_reconstruction_policy')!r}: {input_json_path}"
+        )
+    policy_metadata = metadata.get("post_llm_traffic_validation_policy")
+    if not isinstance(policy_metadata, dict):
+        raise ValueError(
+            f"Step 19 V4 metadata.post_llm_traffic_validation_policy must be an object: {input_json_path}"
+        )
+    if policy_metadata.get("policy_id") != validation_policy.policy_id:
+        raise ValueError(
+            "Step 19 V4 validation policy metadata does not match the active Step 20 config; "
+            f"metadata={policy_metadata.get('policy_id')!r}, config={validation_policy.policy_id!r}: {input_json_path}"
+        )
+    if capabilities.allows_payload_edits:
+        for field in ["source_merged_json", "validation_report"]:
+            if not isinstance(metadata.get(field), str) or not metadata[field].strip():
+                raise ValueError(
+                    f"Step 20 V4 payload-capable reconstruction requires metadata.{field}: {input_json_path}"
+                )
+    return metadata, traffic
+
+
+# This helper checks the V4 payload projection records that Step 19 already validated.
+# Step 20 summarizes this evidence for auditability; it does not apply these records as patches.
+def summarize_payload_projection_evidence(
+    projections: list[Any],
+    source_merged_json_path: Path,
+) -> dict[str, Any]:
+    required_projection_fields = [
+        "packet_id",
+        "physical_representation_id",
+        "canonical_region_id",
+        "payload_start_offset_bytes",
+        "replaced_length_bytes",
+        "replacement_length_bytes",
+        "payload_length_delta_bytes",
+        "original_segment_hex",
+        "replacement_hex",
+        "requires_pipeline_recalculation",
+    ]
+    projected_packet_ids = set()
+    recalculation_fields: Counter[str] = Counter()
+    net_delta = 0
+    growth = 0
+    shrinkage = 0
+    length_delta_projection_count = 0
+    for index, projection in enumerate(projections, start=1):
+        if not isinstance(projection, dict):
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} is not an object: {source_merged_json_path}"
+            )
+        missing_fields = [field for field in required_projection_fields if field not in projection]
+        if missing_fields:
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} is missing fields "
+                f"{missing_fields}: {source_merged_json_path}"
+            )
+        replaced_length = projection.get("replaced_length_bytes")
+        replacement_length = projection.get("replacement_length_bytes")
+        payload_delta = projection.get("payload_length_delta_bytes")
+        if not is_int_like(replaced_length) or not is_int_like(replacement_length) or not is_int_like(payload_delta):
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} has non-integer length metadata: {source_merged_json_path}"
+            )
+        replaced_length = int(replaced_length)
+        replacement_length = int(replacement_length)
+        payload_delta = int(payload_delta)
+        if payload_delta != replacement_length - replaced_length:
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} has inconsistent length delta metadata: {source_merged_json_path}"
+            )
+        original_segment_hex = projection.get("original_segment_hex")
+        replacement_hex = projection.get("replacement_hex")
+        if not isinstance(original_segment_hex, str) or not isinstance(replacement_hex, str):
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} has non-string payload hex evidence: {source_merged_json_path}"
+            )
+        try:
+            binascii.unhexlify(original_segment_hex)
+            binascii.unhexlify(replacement_hex)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} contains invalid hex evidence: {error}"
+            ) from error
+        recalculation = projection.get("requires_pipeline_recalculation")
+        if not isinstance(recalculation, list):
+            raise ValueError(
+                f"Step 18/19 V4 payload projection record {index} has invalid requires_pipeline_recalculation: {source_merged_json_path}"
+            )
+        for field in recalculation:
+            recalculation_fields[str(field)] += 1
+        projected_packet_ids.add(str(projection.get("packet_id")))
+        net_delta += payload_delta
+        if payload_delta > 0:
+            growth += payload_delta
+        elif payload_delta < 0:
+            shrinkage += abs(payload_delta)
+        length_delta_projection_count += int(payload_delta != 0)
+    return {
+        "projection_change_count": len(projections),
+        "projected_packet_count": len(projected_packet_ids),
+        "length_delta_projection_count": length_delta_projection_count,
+        "payload_growth_bytes": growth,
+        "payload_shrinkage_bytes": shrinkage,
+        "net_payload_delta_bytes": net_delta,
+        "requires_pipeline_recalculation_counts": dict(sorted(recalculation_fields.items())),
+    }
+
+
+# This function loads and summarizes the Step 18/19 V4 source evidence when payload-capable reconstruction needs it.
+def step19_v4_source_contract_summary(
+    *,
+    metadata: dict[str, Any],
+    capabilities: ModificationCapabilities,
+    input_json_path: Path,
+) -> dict[str, Any]:
+    validation_report_path = resolve_step19_metadata_path(metadata, "validation_report", input_json_path)
+    summary = {
+        "schema_version": "step19_v4_source_contract_summary_v1",
+        "validated_traffic_schema_version": metadata.get("schema_version"),
+        "full_post_reconstruction_policy": metadata.get("post_reconstruction_policy"),
+        "validation_report": str(validation_report_path),
+        "payload_projection_evidence_required": capabilities.allows_payload_edits,
+    }
+    if not capabilities.allows_payload_edits:
+        summary["payload_projection_evidence_status"] = "not_required_by_modification_strategy"
+        return summary
+
+    source_merged_json_path = resolve_step19_metadata_path(metadata, "source_merged_json", input_json_path)
+    if not source_merged_json_path.exists():
+        raise ValueError(
+            "Step 20 V4 payload-capable reconstruction requires the Step 18 merged JSON referenced by "
+            f"Step 19 metadata.source_merged_json; missing: {source_merged_json_path}"
+        )
+    source_merged_json = read_json(source_merged_json_path)
+    if not isinstance(source_merged_json, dict):
+        raise ValueError(f"Step 18 merged JSON root must be an object: {source_merged_json_path}")
+    merged_metadata = source_merged_json.get("metadata")
+    if not isinstance(merged_metadata, dict) or merged_metadata.get("schema_version") != STEP18_MERGED_SCHEMA_VERSION:
+        raise ValueError(
+            f"Step 20 V4 requires source_merged_json metadata.schema_version {STEP18_MERGED_SCHEMA_VERSION!r}; "
+            f"found {None if not isinstance(merged_metadata, dict) else merged_metadata.get('schema_version')!r}: {source_merged_json_path}"
+        )
+    patch_application = source_merged_json.get("patch_application")
+    if not isinstance(patch_application, dict):
+        raise ValueError(f"Step 18 merged JSON must contain patch_application object: {source_merged_json_path}")
+    if patch_application.get("schema_version") != PATCH_APPLICATION_SCHEMA_VERSION:
+        raise ValueError(
+            f"Step 20 V4 requires patch_application schema {PATCH_APPLICATION_SCHEMA_VERSION!r}; "
+            f"found {patch_application.get('schema_version')!r}: {source_merged_json_path}"
+        )
+    projections = patch_application.get("derived_payload_projection_changes", [])
+    if not isinstance(projections, list):
+        raise ValueError(f"patch_application.derived_payload_projection_changes must be a list: {source_merged_json_path}")
+    explicit_payload_edits = patch_application.get("explicit_payload_edits", [])
+    payload_edits = patch_application.get("payload_edits", [])
+    if not isinstance(explicit_payload_edits, list) or not isinstance(payload_edits, list):
+        raise ValueError(f"patch_application payload edit collections must be lists: {source_merged_json_path}")
+
+    return {
+        **summary,
+        "payload_projection_evidence_status": "loaded_from_step18_patch_application_report_v4",
+        "source_merged_json": str(source_merged_json_path),
+        "source_merged_schema_version": merged_metadata.get("schema_version"),
+        "patch_application_schema_version": patch_application.get("schema_version"),
+        "explicit_payload_edit_count": len(explicit_payload_edits),
+        "payload_edit_count": len(payload_edits),
+        **summarize_payload_projection_evidence(projections, source_merged_json_path),
+    }
 
 
 # This function imports Scapy only when PCAP reconstruction actually runs.
@@ -739,10 +1011,8 @@ def prepare_tcp_sequence_translation(
 
 
 # This function enforces strategy-specific reconstruction constraints before packet materialization.
-def enforce_active_reconstruction_contract(config: dict[str, Any], translation_plan: dict[str, Any]) -> None:
-    pipeline = config.get("pipeline", {})
-    modification_strategy = pipeline.get("modification_strategy")
-    if modification_strategy != "header_only_strategy_v1":
+def enforce_active_reconstruction_contract(capabilities: ModificationCapabilities, translation_plan: dict[str, Any]) -> None:
+    if not capabilities.requires_payload_preservation:
         return
 
     summary = translation_plan["summary"]
@@ -753,12 +1023,14 @@ def enforce_active_reconstruction_contract(config: dict[str, Any], translation_p
         "tcp_payload_growth_bytes": summary.get("tcp_payload_growth_bytes", 0),
         "tcp_payload_shrinkage_bytes": summary.get("tcp_payload_shrinkage_bytes", 0),
         "tcp_net_payload_delta_bytes": summary.get("tcp_net_payload_delta_bytes", 0),
+        "adjusted_tcp_sequence_packet_count": summary.get("adjusted_tcp_sequence_packet_count", 0),
+        "adjusted_tcp_acknowledgement_packet_count": summary.get("adjusted_tcp_acknowledgement_packet_count", 0),
     }
     if any(payload_counters.values()):
         raise TcpReconstructionError(
             "header_only_payload_change_detected",
             "The active strategy is header-only, but Step 20 detected payload changes before reconstruction.",
-            modification_strategy=modification_strategy,
+            modification_strategy=capabilities.strategy,
             **payload_counters,
         )
 
@@ -887,6 +1159,7 @@ def rebuild_from_reference_packet(
     tcp_translation: dict[str, Any] | None,
     scapy: dict[str, Any],
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     packet_issues: list[dict[str, Any]],
 ) -> Any:
     packet = reference_packet.copy()
@@ -943,12 +1216,13 @@ def rebuild_from_reference_packet(
     if payload:
         transport.add_payload(Raw(load=payload))
 
-    apply_editable_header_fields_to_packet(
-        packet=packet,
-        record=record,
-        header_policy=header_policy,
-        scapy=scapy,
-    )
+    if capabilities.allows_header_edits:
+        apply_editable_header_fields_to_packet(
+            packet=packet,
+            record=record,
+            header_policy=header_policy,
+            scapy=scapy,
+        )
 
     if hasattr(transport, "chksum"):
         transport.chksum = None
@@ -989,6 +1263,7 @@ def reconstruct_one_packet(
     reference_packet: Any,
     tcp_translation: dict[str, Any] | None,
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
 ) -> dict[str, Any]:
     packet_issues: list[dict[str, Any]] = []
     if not isinstance(record, dict):
@@ -1014,6 +1289,7 @@ def reconstruct_one_packet(
         tcp_translation=tcp_translation,
         scapy=scapy,
         header_policy=header_policy,
+        capabilities=capabilities,
         packet_issues=packet_issues,
     )
 
@@ -1287,6 +1563,7 @@ def audit_reconstructed_pcap(
     reference_context: dict[str, Any],
     translation_plan: dict[str, Any],
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     scapy: dict[str, Any],
 ) -> dict[str, Any]:
     issues_by_record_index: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -1402,7 +1679,7 @@ def audit_reconstructed_pcap(
             }
             for field in ("src", "dst", "id", "flags", "frag", "ttl", "tos"):
                 if getattr(output_ip, field) != getattr(reference_ip, field):
-                    if is_editable_header_field(header_policy, ipv4_policy_fields.get(field, "")):
+                    if capabilities.allows_header_edits and is_editable_header_field(header_policy, ipv4_policy_fields.get(field, "")):
                         continue
                     record_issue(record_index, "ipv4_immutable_field_changed", "An immutable IPv4 field differs from Step 13.", field=field)
             if scapy["TCP"] not in reference_packet:
@@ -1432,7 +1709,7 @@ def audit_reconstructed_pcap(
             for field in ("sport", "dport", "flags", "window", "urgptr"):
                 if getattr(output_tcp, field) != getattr(reference_tcp, field):
                     tcp_flags_authorized = field == "flags" and any(
-                        is_editable_header_field(header_policy, flag_field)
+                        capabilities.allows_header_edits and is_editable_header_field(header_policy, flag_field)
                         for flag_field in [
                             "tcp.flags.ns",
                             "tcp.flags.cwr",
@@ -1445,7 +1722,9 @@ def audit_reconstructed_pcap(
                             "tcp.flags.fin",
                         ]
                     )
-                    if tcp_flags_authorized or is_editable_header_field(header_policy, tcp_policy_fields.get(field, "")):
+                    if tcp_flags_authorized or (
+                        capabilities.allows_header_edits and is_editable_header_field(header_policy, tcp_policy_fields.get(field, ""))
+                    ):
                         continue
                     record_issue(record_index, "tcp_immutable_field_changed", "An immutable TCP field differs from Step 13.", field=field)
             translation = prepared["tcp_translation"]
@@ -1494,6 +1773,11 @@ def audit_reconstructed_pcap(
 
     validation_error_count = sum(issue_counts.values())
     connection_state_inventory = tcp_connection_state_inventory(traffic, reference_context)
+    strategy_preservation_error_count = (
+        issue_counts["ipv4_immutable_field_changed"]
+        + issue_counts["tcp_immutable_field_changed"]
+        + issue_counts["tcp_options_changed_unexpectedly"]
+    )
     return {
         "status": "valid" if validation_error_count == 0 else "invalid",
         "contract": {
@@ -1504,12 +1788,26 @@ def audit_reconstructed_pcap(
             "ipv4_fragmentation_expected": False,
             "tcp_urg_expected": False,
             "application_protocol_validation": "Not performed in Step 20; reserved for Step 20B.",
+            "modification_strategy": capabilities.as_metadata(),
+            "pipeline_controlled_reconstruction_fields": [
+                "ipv4.total_length",
+                "ipv4.header_checksum",
+                "tcp.checksum",
+                "tcp.sequence_number",
+                "tcp.acknowledgement_number",
+                "tcp.sack_boundaries",
+                "ethernet.minimum_frame_padding",
+            ],
         },
         "summary": {
             "validated_frame_count": output_packet_count,
             "network_protocol_validation_error_count": validation_error_count,
             "independently_validated_ipv4_checksum_count": output_packet_count - issue_counts["ipv4_checksum_invalid"],
             "independently_validated_tcp_checksum_count": output_packet_count - issue_counts["tcp_checksum_invalid"],
+            "payload_projection_mismatch_count": issue_counts["tcp_payload_mismatch"],
+            "tcp_seq_ack_consistency_error_count": issue_counts["tcp_sequence_translation_mismatch"] + issue_counts["tcp_ack_translation_mismatch"],
+            "tcp_retransmission_consistency_error_count": issue_counts["new_tcp_reassembly_overlap_conflict"],
+            "strategy_specific_preservation_error_count": strategy_preservation_error_count,
             "preexisting_tcp_reassembly_overlap_conflict_count": len(original_conflicts),
             "post_tcp_reassembly_overlap_conflict_count": len(reconstructed_conflicts),
             "introduced_tcp_reassembly_overlap_conflict_count": len(introduced_conflicts),
@@ -1594,12 +1892,15 @@ def reconstruct_validated_traffic(
     if not input_json_path.exists():
         raise FileNotFoundError(f"Step 19 validated traffic JSON does not exist: {input_json_path}")
 
-    validated_json = read_json(input_json_path)
-    metadata = validated_json.get("metadata", {}) if isinstance(validated_json, dict) else {}
-    traffic = validated_json.get("traffic") if isinstance(validated_json, dict) else None
-    if not isinstance(traffic, list):
-        raise ValueError(f"Validated traffic JSON must contain a top-level traffic list: {input_json_path}")
+    capabilities = resolve_modification_strategy(config)
     validation_policy = resolve_post_llm_traffic_validation_policy(config)
+    validated_json = read_json(input_json_path)
+    metadata, traffic = validate_step19_v4_input(validated_json, input_json_path, capabilities, validation_policy)
+    source_validation_contract = step19_v4_source_contract_summary(
+        metadata=metadata,
+        capabilities=capabilities,
+        input_json_path=input_json_path,
+    )
 
     required_indices = set()
     for record in traffic:
@@ -1625,7 +1926,7 @@ def reconstruct_validated_traffic(
             traffic=traffic,
             reference_context=reference_context,
         )
-        enforce_active_reconstruction_contract(config, translation_plan)
+        enforce_active_reconstruction_contract(capabilities, translation_plan)
     except Exception as error:
         error_detail = (
             error.detail
@@ -1692,7 +1993,10 @@ def reconstruct_validated_traffic(
                     "input_json": str(input_json_path),
                     "reference_pcap": str(reference_pcap_path),
                     "output_pcap": str(output_pcap_path),
+                    "source_validation_schema_version": metadata.get("schema_version"),
+                    "modification_strategy": capabilities.as_metadata(),
                 },
+                "source_validation_contract": source_validation_contract,
                 "summary": failure_summary,
                 "tcp_reconstruction_summary": tcp_failure_summary,
                 "tcp_direction_results": [],
@@ -1718,6 +2022,7 @@ def reconstruct_validated_traffic(
             reference_context["packets_by_index"][reduced_packet_index],
             prepared["tcp_translation"],
             header_policy,
+            capabilities,
         )
         packet_results.append(reconstruction["result"])
         if reconstruction["packet"] is not None:
@@ -1731,6 +2036,7 @@ def reconstruct_validated_traffic(
             reference_context=reference_context,
             translation_plan=translation_plan,
             header_policy=header_policy,
+            capabilities=capabilities,
             scapy=scapy,
         )
         for record_index_text, validation_issues in network_protocol_validation[
@@ -1798,13 +2104,17 @@ def reconstruct_validated_traffic(
             "experiment_config_label": experiment_config_label,
             "input_json": str(input_json_path),
             "reference_pcap": str(reference_pcap_path),
-            "source_validation_schema_version": metadata.get("schema_version", DEFAULT_INPUT_SCHEMA_VERSION),
+            "source_validation_schema_version": metadata.get("schema_version"),
+            "modification_strategy": capabilities.as_metadata(),
             "output_pcap": str(output_pcap_path),
             "reconstruction_policy": {
                 "source_of_reconstructible_post_traffic": "Step 19 validated_modified_traffic.json",
                 "immutable_header_source": "Use each reduced_packet_index to copy the corresponding Step 13 selected PCAP frame.",
                 "llm_output_failure_groups_reconstructed": False,
                 "invalid_traffic_groups_reconstructed": False,
+                "header_edit_materialization_enabled": capabilities.allows_header_edits,
+                "payload_edit_materialization_enabled": capabilities.allows_payload_edits,
+                "payload_preservation_required": capabilities.requires_payload_preservation,
                 "timestamp_policy": "preserve timestamp_epoch_pcap when numeric",
                 "checksum_policy": "Scapy recalculates checksums from rebuilt layers; Step 20 then independently verifies serialized IPv4 and TCP checksums.",
                 "length_policy": "Replace the transport payload in the Step 13 frame template, then let Scapy recalculate affected lengths.",
@@ -1836,6 +2146,7 @@ def reconstruct_validated_traffic(
             **translation_plan["summary"],
         },
         "source_validation_metadata": metadata,
+        "source_validation_contract": source_validation_contract,
         "tcp_reconstruction_summary": translation_plan["summary"],
         "tcp_direction_results": translation_plan["direction_results"],
         "tcp_reconstruction_errors": [],

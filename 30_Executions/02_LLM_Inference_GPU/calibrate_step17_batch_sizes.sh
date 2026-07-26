@@ -2,9 +2,9 @@
 set -Eeuo pipefail
 
 CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
-EXPERIMENT_ID="${EXPERIMENT_ID:-exp_cicids2017_thursday_baseline_003}"
-GROUPING_LABEL="${GROUPING_LABEL:-fixed_packet_count_size_006}"
-CONFIG_PATH="${CONFIG_PATH:-${CLOUD_ROOT}/04_Steps/setups/config_LLM_baseline_003.json}"
+EXPERIMENT_ID="${EXPERIMENT_ID:-}"
+GROUPING_LABEL="${GROUPING_LABEL:-}"
+CONFIG_PATH="${CONFIG_PATH:-}"
 MODEL_PATH="${MODEL_PATH:-${CLOUD_ROOT}/03_Models/Llama-3.1-8B-Instruct}"
 PROMPT_DIR="${PROMPT_DIR:-}"
 CALIBRATION_LABEL="${CALIBRATION_LABEL:-baseline003_fixed006_hybrid_wide_1500}"
@@ -20,6 +20,11 @@ RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN:-12288}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
 current_monitor_pid=""
+
+if [[ -z "${EXPERIMENT_ID}" || -z "${GROUPING_LABEL}" || -z "${CONFIG_PATH}" ]]; then
+  echo "EXPERIMENT_ID, GROUPING_LABEL and CONFIG_PATH are required for V3 batch calibration."
+  exit 2
+fi
 
 cleanup_monitor() {
   if [[ -n "${current_monitor_pid}" ]]; then
@@ -39,7 +44,7 @@ for required_path in \
   "${COMPARATOR}" \
   "${SAMPLE_BUILDER}" \
   "${CONFIG_PATH}" \
-  "${PROMPT_DIR}/prompt_units_manifest_v1.json" \
+  "${PROMPT_DIR}/prompt_units_manifest_v2.json" \
   "${MODEL_PATH}"; do
   if [[ ! -e "${required_path}" ]]; then
     echo "Required path not found: ${required_path}"
@@ -50,7 +55,7 @@ done
 mkdir -p "${CALIBRATION_ROOT}"
 sample_manifest="${CALIBRATION_ROOT}/prompt_units_manifest_sample_${LIMIT_PROMPTS_S17}.json"
 python3 "${SAMPLE_BUILDER}" \
-  --input-manifest "${PROMPT_DIR}/prompt_units_manifest_v1.json" \
+  --input-manifest "${PROMPT_DIR}/prompt_units_manifest_v2.json" \
   --output-manifest "${sample_manifest}" \
   --sample-size "${LIMIT_PROMPTS_S17}" \
   --sample-method "${SAMPLE_METHOD}"

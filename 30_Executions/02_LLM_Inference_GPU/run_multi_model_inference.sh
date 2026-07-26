@@ -225,8 +225,8 @@ preflight_model() {
       echo "Missing existing Step 16 prompt directory for ${model_key}: ${prompt_dir}"
       return 1
     }
-    [[ -f "${prompt_dir}/prompt_units_manifest_v1.json" ]] || {
-      echo "Missing prompt manifest for ${model_key}: ${prompt_dir}/prompt_units_manifest_v1.json"
+    [[ -f "${prompt_dir}/prompt_units_manifest_v2.json" ]] || {
+      echo "Missing prompt manifest for ${model_key}: ${prompt_dir}/prompt_units_manifest_v2.json"
       return 1
     }
   fi

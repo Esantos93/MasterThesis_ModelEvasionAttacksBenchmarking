@@ -16,25 +16,21 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.config import load_json_config, require_keys
 from common.io_utils import write_json
 from common import prompt_projection
+from common.modification_strategy import (
+    ModificationCapabilities,
+    resolve_modification_strategy,
+)
 from common.token_budget import TOKEN_BUDGET_POLICY, load_token_budget_config
 
 
 #These are the schema names used by the active Step 15 -> Step 16 -> Step 17 contracts.
-PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
-PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v1"
-SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2 = "compact_modification_unit_v2"
-SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2 = "compact_modification_units_manifest_v2"
+PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v2"
+PROMPT_UNITS_MANIFEST_SCHEMA_VERSION = "prompt_units_manifest_v2"
+SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v3"
+SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v3"
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 
-SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS = {
-    SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2,
-}
-SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS = {
-    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2,
-}
-SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION = {
-    SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2: "compact_modification_units_manifest_v2.json",
-}
+SOURCE_MANIFEST_FILENAME = "compact_modification_units_manifest_v3.json"
 
 #This is the active compact patch policy name.
 COMPACT_PATCH_PROMPT_VERSION = "compact_patch_prompting_v2"
@@ -82,71 +78,134 @@ def load_prompt_instructions_profile(config: dict[str, Any]) -> tuple[str, list[
     return prompt_projection.load_prompt_instructions_profile_from_config(config)
 
 
+#This function validates strategy metadata against the shared modification-strategy registry.
+def validate_capabilities_metadata(
+    *,
+    strategy: Any,
+    capabilities: Any,
+    expected_capabilities: ModificationCapabilities,
+    artifact_path: Path,
+) -> None:
+    if strategy != expected_capabilities.strategy:
+        raise ValueError(
+            f"Modification strategy mismatch in {artifact_path}: "
+            f"expected {expected_capabilities.strategy!r}, found {strategy!r}."
+        )
+    if capabilities != expected_capabilities.as_metadata():
+        raise ValueError(
+            f"Capabilities mismatch in {artifact_path}: expected "
+            f"{expected_capabilities.as_metadata()!r}, found {capabilities!r}."
+        )
+
+
+#This function derives the concrete editable branches present in one V3 Compact Unit.
+def derive_editable_target_presence(modification_unit: dict[str, Any]) -> dict[str, bool]:
+    editable_headers_present = any(
+        isinstance(region, dict) and region.get("editable")
+        for packet in modification_unit.get("physical_packets", [])
+        if isinstance(packet, dict)
+        for region in packet.get("header_field_classifications", [])
+    )
+    editable_payload_present = any(
+        isinstance(region, dict) and region.get("editable")
+        for canonical_region in modification_unit.get("canonical_payload_regions", [])
+        if isinstance(canonical_region, dict)
+        for region in canonical_region.get("editable_regions", [])
+    )
+    return {
+        "editable_headers_present": editable_headers_present,
+        "editable_payload_present": editable_payload_present,
+    }
+
+
 #This function validates the basic shape of the Step 15 compact modification-units manifest.
-def validate_modification_units_manifest(manifest: Any, manifest_path: Path) -> dict[str, Any]:
+def validate_modification_units_manifest(
+    manifest: Any,
+    manifest_path: Path,
+    expected_capabilities: ModificationCapabilities,
+) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise ValueError(f"Compact modification-units manifest root must be an object: {manifest_path}")
     metadata = manifest.get("metadata")
     if not isinstance(metadata, dict):
         raise ValueError(f"Compact modification-units manifest must contain a metadata object: {manifest_path}")
     schema_version = metadata.get("schema_version")
-    if schema_version not in SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS:
+    if schema_version != SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION:
         raise ValueError(
-            "Step 16 compact patch prompting requires one of "
-            f"{sorted(SUPPORTED_SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSIONS)} from Step 15. "
+            "Step 16 compact patch prompting requires "
+            f"{SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION!r} from Step 15. "
             f"Found schema_version={schema_version!r} in {manifest_path}."
         )
-    if schema_version == SOURCE_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION_V2:
-        strategy = metadata.get("strategy") or metadata.get("modification_strategy")
-        if strategy != "header_only_strategy_v1":
-            raise ValueError(
-                "Step 16 supports compact_modification_units_manifest_v2 only for "
-                f"header_only_strategy_v1. Found strategy={strategy!r} in {manifest_path}."
-            )
-        if metadata.get("token_budget_policy") != TOKEN_BUDGET_POLICY:
-            raise ValueError(
-                f"Step 16 requires metadata.token_budget_policy={TOKEN_BUDGET_POLICY!r} for "
-                f"compact_modification_units_manifest_v2. Found {metadata.get('token_budget_policy')!r} "
-                f"in {manifest_path}."
-            )
+    validate_capabilities_metadata(
+        strategy=metadata.get("strategy") or metadata.get("modification_strategy"),
+        capabilities=metadata.get("capabilities"),
+        expected_capabilities=expected_capabilities,
+        artifact_path=manifest_path,
+    )
+    if metadata.get("compact_view_schema_version") != SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Step 16 requires metadata.compact_view_schema_version="
+            f"{SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION!r}: {manifest_path}"
+        )
+    if metadata.get("token_budget_policy") != TOKEN_BUDGET_POLICY:
+        raise ValueError(
+            f"Step 16 requires metadata.token_budget_policy={TOKEN_BUDGET_POLICY!r}. "
+            f"Found {metadata.get('token_budget_policy')!r} in {manifest_path}."
+        )
     modification_units = manifest.get("compact_modification_units")
     if not isinstance(modification_units, list):
         raise ValueError(f"Manifest must contain a compact_modification_units list: {manifest_path}")
     return manifest
 
 
-#This function validates the basic shape of one Step 15 compact modification unit.
-#It intentionally only checks the fields Step 16 needs for prompt construction.
-def validate_modification_unit(modification_unit: Any, modification_unit_path: Path) -> dict[str, Any]:
+#This function validates one V3 Compact Unit and its strategy-specific editable surface.
+def validate_modification_unit(
+    modification_unit: Any,
+    modification_unit_path: Path,
+    expected_capabilities: ModificationCapabilities,
+) -> dict[str, Any]:
     if not isinstance(modification_unit, dict):
         raise ValueError(f"Modification unit root must be an object: {modification_unit_path}")
     schema_version = modification_unit.get("schema_version")
-    if schema_version not in SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS:
+    if schema_version != SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION:
         raise ValueError(
-            "Modification unit must use one of "
-            f"{sorted(SUPPORTED_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSIONS)}: {modification_unit_path}. "
-            f"Found schema_version={schema_version!r}."
+            f"Modification unit must use {SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION!r}: "
+            f"{modification_unit_path}. Found schema_version={schema_version!r}."
         )
-    if schema_version == SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION_V2:
-        strategy = modification_unit.get("strategy") or modification_unit.get("modification_strategy")
-        if strategy != "header_only_strategy_v1":
-            raise ValueError(
-                "Step 16 supports compact_modification_unit_v2 only for "
-                f"header_only_strategy_v1. Found strategy={strategy!r}: {modification_unit_path}."
-            )
-    packets = modification_unit.get("packets")
-    if packets is not None and not isinstance(packets, list):
-        raise ValueError(f"Modification unit packets must be a list when present: {modification_unit_path}")
-    if not isinstance(modification_unit.get("physical_packets"), list):
-        raise ValueError(f"Modification unit must contain a physical_packets list: {modification_unit_path}")
+    validate_capabilities_metadata(
+        strategy=modification_unit.get("strategy") or modification_unit.get("modification_strategy"),
+        capabilities=modification_unit.get("capabilities"),
+        expected_capabilities=expected_capabilities,
+        artifact_path=modification_unit_path,
+    )
+    physical_packets = modification_unit.get("physical_packets", [])
+    canonical_payload_regions = modification_unit.get("canonical_payload_regions", [])
+    if not isinstance(physical_packets, list):
+        raise ValueError(f"Modification unit physical_packets must be a list: {modification_unit_path}")
+    if not isinstance(canonical_payload_regions, list):
+        raise ValueError(
+            f"Modification unit canonical_payload_regions must be a list: {modification_unit_path}"
+        )
     if not isinstance(modification_unit.get("parent_group_id"), str):
         raise ValueError(f"Modification unit must contain parent_group_id: {modification_unit_path}")
     if not isinstance(modification_unit.get("modification_unit_id"), str):
         raise ValueError(f"Modification unit must contain modification_unit_id: {modification_unit_path}")
+    actual_presence = derive_editable_target_presence(modification_unit)
+    if modification_unit.get("editable_target_presence") != actual_presence:
+        raise ValueError(
+            f"editable_target_presence does not match the V3 targets in {modification_unit_path}: "
+            f"expected {actual_presence!r}, found {modification_unit.get('editable_target_presence')!r}."
+        )
+    if not any(actual_presence.values()):
+        raise ValueError(f"V3 modification unit has no editable targets: {modification_unit_path}")
+    if actual_presence["editable_headers_present"] and not expected_capabilities.allows_header_edits:
+        raise ValueError(f"V3 unit exposes header targets forbidden by its capabilities: {modification_unit_path}")
+    if actual_presence["editable_payload_present"] and not expected_capabilities.allows_payload_edits:
+        raise ValueError(f"V3 unit exposes payload targets forbidden by its capabilities: {modification_unit_path}")
     return modification_unit
 
 
-#This function selects the active Step 15 V2 manifest to consume.
+#This function selects the active Step 15 V3 manifest to consume.
 def resolve_source_manifest_path(input_group_dir: Path, source_manifest: str | Path | None) -> Path:
     if source_manifest is not None:
         manifest_path = Path(source_manifest).expanduser()
@@ -156,21 +215,13 @@ def resolve_source_manifest_path(input_group_dir: Path, source_manifest: str | P
             raise FileNotFoundError(f"Explicit Step 15 source manifest does not exist: {manifest_path}")
         return manifest_path
 
-    existing_paths = [
-        input_group_dir / filename
-        for filename in SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION.values()
-        if (input_group_dir / filename).exists()
-    ]
-    if not existing_paths:
-        expected = ", ".join(SOURCE_MANIFEST_FILENAMES_BY_SCHEMA_VERSION.values())
-        raise FileNotFoundError(f"No supported Step 15 source manifest found in {input_group_dir}. Expected one of: {expected}")
-    if len(existing_paths) > 1:
-        joined = ", ".join(str(path) for path in existing_paths)
-        raise ValueError(
-            "Multiple supported Step 15 source manifests found. Use --source-manifest to select one explicitly: "
-            f"{joined}"
+    manifest_path = input_group_dir / SOURCE_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"No active Step 15 V3 source manifest found in {input_group_dir}. "
+            f"Expected: {SOURCE_MANIFEST_FILENAME}"
         )
-    return existing_paths[0]
+    return manifest_path
 
 
 #This function selects modification units either by prefix limit or by explicit modification_unit_id values.
@@ -239,44 +290,56 @@ def resolve_modification_unit_file_path(modification_unit_entry: dict[str, Any],
 
 #This function builds the index of regions that the LLM is allowed to patch.
 def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
-    packets_by_id: dict[str, dict[str, Any]] = {}
     physical_packets_by_id: dict[str, dict[str, Any]] = {}
     regions: list[dict[str, Any]] = []
     region_keys: set[tuple[str, str]] = set()
+    canonical_region_ids: list[str] = []
+    editable_canonical_region_ids: list[str] = []
 
-    for packet in prompt_unit.get("packets", []):
-        if not isinstance(packet, dict):
-            raise ValueError("Every compact packet must be an object.")
-        packet_id = packet.get("packet_id")
-        if packet_id is None:
-            raise ValueError("Every compact packet must contain packet_id.")
-        packet_id_text = str(packet_id)
-        packets_by_id[packet_id_text] = packet
-
-        if not packet.get("editable"):
-            continue
-
-        editable_regions = packet.get("editable_regions", [])
+    for canonical_region in prompt_unit.get("canonical_payload_regions", []):
+        if not isinstance(canonical_region, dict):
+            raise ValueError("Every canonical_payload_regions entry must be an object.")
+        canonical_region_id = canonical_region.get("canonical_region_id")
+        if not isinstance(canonical_region_id, str) or not canonical_region_id:
+            raise ValueError("Every canonical payload region must contain canonical_region_id.")
+        canonical_region_ids.append(canonical_region_id)
+        ownership = canonical_region.get("ownership")
+        if not isinstance(ownership, dict):
+            raise ValueError(f"Canonical payload region {canonical_region_id!r} lacks ownership metadata.")
+        physical_aliases = canonical_region.get("physical_aliases")
+        if not isinstance(physical_aliases, list) or not physical_aliases:
+            raise ValueError(f"Canonical payload region {canonical_region_id!r} lacks physical_aliases.")
+        editable_regions = canonical_region.get("editable_regions", [])
         if not isinstance(editable_regions, list):
-            raise ValueError(f"editable_regions must be a list for packet_id={packet_id_text}")
+            raise ValueError(f"editable_regions must be a list for canonical_region_id={canonical_region_id}")
         for region in editable_regions:
-            if not isinstance(region, dict):
-                raise ValueError(f"Editable region must be an object for packet_id={packet_id_text}")
+            if not isinstance(region, dict) or not region.get("editable"):
+                continue
             region_id = region.get("region_id")
             region_type = region.get("region_type")
             if not isinstance(region_id, str) or not region_id:
-                raise ValueError(f"Editable region is missing region_id for packet_id={packet_id_text}")
+                raise ValueError(
+                    f"Editable region is missing region_id for canonical_region_id={canonical_region_id}"
+                )
             if not isinstance(region_type, str) or not region_type:
-                raise ValueError(f"Editable region is missing region_type for packet_id={packet_id_text}, region_id={region_id}")
-            key = (packet_id_text, region_id)
+                raise ValueError(
+                    f"Editable region is missing region_type for canonical_region_id="
+                    f"{canonical_region_id}, region_id={region_id}"
+                )
+            if region.get("canonical_region_id") != canonical_region_id:
+                raise ValueError(
+                    f"Payload target {region_id!r} does not match its canonical_region_id "
+                    f"{canonical_region_id!r}."
+                )
+            key = (canonical_region_id, region_id)
             if key in region_keys:
                 raise ValueError(f"Duplicate editable region {key!r} in prompt unit {prompt_unit['prompt_unit_id']}")
             region_keys.add(key)
-            canonical_region_id = region.get("canonical_region_id") or packet.get("canonical_region_id") or packet_id_text
+            editable_canonical_region_ids.append(canonical_region_id)
             regions.append(
                 {
                     "identity_type": "canonical_payload_region",
-                    "packet_id": packet_id_text,
+                    "packet_id": canonical_region_id,
                     "canonical_region_id": canonical_region_id,
                     "region_id": region_id,
                     "region_type": region_type,
@@ -286,12 +349,16 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
                     "length_bytes": region.get("length_bytes"),
                     "allowed_operations": region.get("allowed_operations", []),
                     "coordinate_space": region.get("coordinate_space"),
-                    "tcp_connection_id": region.get("tcp_connection_id") or packet.get("tcp_connection_id"),
-                    "tcp_stream_id": region.get("tcp_stream_id") or packet.get("tcp_stream_id"),
-                    "canonical_stream_start": region.get("canonical_stream_start"),
-                    "canonical_stream_end": region.get("canonical_stream_end"),
-                    "source_packet_ids": packet.get("source_packet_ids", []),
-                    "representative_packet_id": packet.get("representative_packet_id"),
+                    "authorized_start_offset_bytes": region.get("authorized_start_offset_bytes"),
+                    "authorized_end_offset_bytes": region.get("authorized_end_offset_bytes"),
+                    "authorized_length_bytes": region.get("authorized_length_bytes"),
+                    "max_replacement_bytes": region.get("max_replacement_bytes"),
+                    "max_replacement_hex_chars": region.get("max_replacement_hex_chars"),
+                    "replacement_size_policy": region.get("replacement_size_policy"),
+                    "replacement_size_limit": region.get("replacement_size_limit"),
+                    "ownership": deepcopy(ownership),
+                    "semantic_segmentation": deepcopy(canonical_region.get("semantic_segmentation")),
+                    "physical_aliases": deepcopy(physical_aliases),
                 }
             )
 
@@ -344,204 +411,19 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
             for region in packet.get("header_field_classifications", [])
         )
     ]
-    payload_editable_packet_ids = [str(packet_id) for packet_id in prompt_unit.get("editable_packet_ids", [])]
-    if not payload_editable_packet_ids:
-        payload_editable_packet_ids = [
-            str(packet_id)
-            for packet_id, packet in sorted(packets_by_id.items())
-            if packet.get("editable")
-        ]
     return {
-        "packet_ids": sorted(packets_by_id),
+        "packet_ids": sorted(physical_packets_by_id),
         "physical_packet_ids": sorted(physical_packets_by_id),
-        "editable_packet_ids": sorted(set(payload_editable_packet_ids + header_editable_packet_ids)),
-        "editable_payload_packet_ids": payload_editable_packet_ids,
+        "editable_packet_ids": header_editable_packet_ids,
         "editable_header_packet_ids": header_editable_packet_ids,
-        "context_packet_ids": [str(packet_id) for packet_id in prompt_unit.get("context_packet_ids", [])],
-        "canonical_region_ids": [str(region_id) for region_id in prompt_unit.get("canonical_region_ids", [])],
-        "editable_canonical_region_ids": [
-            str(region_id) for region_id in prompt_unit.get("editable_canonical_region_ids", [])
-        ],
+        "context_packet_ids": [],
+        "canonical_region_ids": sorted(set(canonical_region_ids)),
+        "editable_canonical_region_ids": sorted(set(editable_canonical_region_ids)),
         "context_canonical_region_ids": [
             str(region_id) for region_id in prompt_unit.get("context_canonical_region_ids", [])
         ],
         "regions": regions,
     }
-
-
-#This function copies selected keys from a source dictionary into a smaller dictionary.
-def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict[str, Any]:
-    copied: dict[str, Any] = {}
-    for field_name in field_names:
-        if not isinstance(field_name, str):
-            raise ValueError("Prompt input structure field names must be strings.")
-        if field_name in source:
-            copied[field_name] = source[field_name]
-    return copied
-
-
-#This function builds the model-visible canonical payload region records.
-def build_projected_canonical_regions(
-    *,
-    prompt_unit: dict[str, Any],
-    structure: dict[str, Any],
-) -> list[dict[str, Any]]:
-    canonical_region_fields = structure.get("canonical_region_fields", [])
-    editable_region_fields = structure.get("editable_region_fields", [])
-    if not isinstance(canonical_region_fields, list) or not isinstance(editable_region_fields, list):
-        raise ValueError("Prompt input structure field lists must be lists.")
-
-    projected_regions: list[dict[str, Any]] = []
-    for packet in prompt_unit.get("packets", []):
-        if not isinstance(packet, dict):
-            continue
-        projected_packet = copy_selected_fields(packet, canonical_region_fields)
-        canonical_region_id = packet.get("canonical_region_id") or packet.get("packet_id")
-        if canonical_region_id is not None:
-            projected_packet.setdefault("canonical_region_id", canonical_region_id)
-
-        editable_regions = packet.get("editable_regions", [])
-        if isinstance(editable_regions, list):
-            projected_editable_regions = []
-            for region in editable_regions:
-                if not isinstance(region, dict):
-                    continue
-                projected_region = copy_selected_fields(region, editable_region_fields)
-                projected_region.setdefault("canonical_region_id", canonical_region_id)
-                projected_editable_regions.append(projected_region)
-            projected_packet["editable_regions"] = projected_editable_regions
-
-        projected_regions.append(projected_packet)
-    return projected_regions
-
-
-#This function builds the verbose physical packet projection used by legacy/richer prompt profiles.
-def build_projected_physical_packets(
-    *,
-    prompt_unit: dict[str, Any],
-    structure: dict[str, Any],
-) -> list[dict[str, Any]]:
-    physical_packet_fields = structure.get("physical_packet_fields", [])
-    header_region_fields = structure.get("header_region_fields", [])
-    if not isinstance(physical_packet_fields, list) or not isinstance(header_region_fields, list):
-        raise ValueError("Prompt input structure physical/header field lists must be lists.")
-
-    projected_packets: list[dict[str, Any]] = []
-    for physical_packet in prompt_unit.get("physical_packets", []):
-        if not isinstance(physical_packet, dict):
-            continue
-        physical_packet_id = physical_packet.get("packet_id")
-        header_regions = physical_packet.get("header_field_classifications", [])
-        if not isinstance(header_regions, list):
-            continue
-        projected_header_regions = []
-        for header_region in header_regions:
-            if not isinstance(header_region, dict) or not header_region.get("editable"):
-                continue
-            projected_region = copy_selected_fields(header_region, header_region_fields)
-            if physical_packet_id is not None:
-                projected_region.setdefault("packet_id", physical_packet_id)
-            if "header_region_id" in projected_region:
-                projected_region.setdefault("region_id", projected_region["header_region_id"])
-            projected_region.setdefault("region_type", "header_field")
-            projected_region.setdefault("replacement_format", "uint")
-            projected_header_regions.append(projected_region)
-        if not projected_header_regions:
-            continue
-        projected_packet = copy_selected_fields(physical_packet, physical_packet_fields)
-        projected_packet["editable_header_regions"] = projected_header_regions
-        projected_packets.append(projected_packet)
-    return projected_packets
-
-
-#This function builds the compact editable-header table shown to the model.
-def build_projected_editable_header_table(
-    *,
-    prompt_unit: dict[str, Any],
-    columns: list[str],
-) -> list[list[Any]]:
-    rows: list[list[Any]] = []
-    for physical_packet in prompt_unit.get("physical_packets", []):
-        if not isinstance(physical_packet, dict):
-            continue
-        physical_packet_id = physical_packet.get("packet_id")
-        header_regions = physical_packet.get("header_field_classifications", [])
-        if not isinstance(header_regions, list):
-            continue
-        for header_region in header_regions:
-            if not isinstance(header_region, dict) or not header_region.get("editable"):
-                continue
-            constraints = header_region.get("constraints", {})
-            if not isinstance(constraints, dict):
-                constraints = {}
-            region_id = header_region.get("header_region_id") or header_region.get("region_id")
-            row_values = {
-                "packet_id": physical_packet_id,
-                "region_id": region_id,
-                "field": header_region.get("field"),
-                "current_value": header_region.get("current_value"),
-                "min": constraints.get("min"),
-                "max": constraints.get("max"),
-            }
-            rows.append([row_values.get(column) for column in columns])
-    return rows
-
-
-#This function builds the compact object embedded in the patch-based prompt.
-def build_compact_prompt_input(
-    *,
-    prompt_unit: dict[str, Any],
-    structure: dict[str, Any],
-) -> dict[str, Any]:
-    top_level_fields = structure.get("top_level_fields", [])
-    if not isinstance(top_level_fields, list):
-        raise ValueError("Prompt input structure top_level_fields must be a list.")
-    prompt_input = copy_selected_fields(prompt_unit, top_level_fields)
-    region_container_name = structure.get("region_container_name", "canonical_regions")
-    if not isinstance(region_container_name, str) or not region_container_name:
-        raise ValueError("Prompt input structure region_container_name must be a non-empty string.")
-    projected_canonical_regions = build_projected_canonical_regions(
-        prompt_unit=prompt_unit,
-        structure=structure,
-    )
-    header_table_name = structure.get("editable_header_table_name")
-    header_columns_name = structure.get("editable_header_columns_name", "editable_headers_columns")
-    header_columns = structure.get("editable_header_columns", [])
-    if header_table_name is not None:
-        if not isinstance(header_table_name, str) or not header_table_name:
-            raise ValueError("Prompt input structure editable_header_table_name must be a non-empty string.")
-        if not isinstance(header_columns_name, str) or not header_columns_name:
-            raise ValueError("Prompt input structure editable_header_columns_name must be a non-empty string.")
-        if not isinstance(header_columns, list) or not all(isinstance(column, str) for column in header_columns):
-            raise ValueError("Prompt input structure editable_header_columns must be a list of strings.")
-        editable_header_rows = build_projected_editable_header_table(
-            prompt_unit=prompt_unit,
-            columns=header_columns,
-        )
-        if editable_header_rows:
-            has_editable_canonical_region = any(
-                isinstance(region, dict) and region.get("editable")
-                for region in projected_canonical_regions
-            )
-            if not has_editable_canonical_region:
-                projected_canonical_regions = []
-                prompt_input.pop("canonical_region_ids", None)
-                prompt_input.pop("context_canonical_region_ids", None)
-                prompt_input.pop("editable_canonical_region_ids", None)
-            prompt_input[header_columns_name] = header_columns
-            prompt_input[header_table_name] = editable_header_rows
-    else:
-        physical_packet_container_name = structure.get("physical_packet_container_name", "physical_packets")
-        if not isinstance(physical_packet_container_name, str) or not physical_packet_container_name:
-            raise ValueError("Prompt input structure physical_packet_container_name must be a non-empty string.")
-        projected_physical_packets = build_projected_physical_packets(
-            prompt_unit=prompt_unit,
-            structure=structure,
-        )
-        if projected_physical_packets:
-            prompt_input[physical_packet_container_name] = projected_physical_packets
-    prompt_input[region_container_name] = projected_canonical_regions
-    return prompt_input
 
 
 #This function converts the Step 15 source identity into the Step 16 prompt identity.
@@ -570,6 +452,8 @@ def build_compact_patch_messages(
         "prompt_input_json_data_profile_definition": prompt_input_structure,
         "prompt_instructions_profile": prompt_instructions_profile,
         "region_container_name": prompt_input_structure.get("region_container_name", "canonical_regions"),
+        "has_editable_headers": prompt_parts["has_editable_headers"],
+        "has_editable_payload": prompt_parts["has_editable_payload"],
         "abstention_reason": prompt_parts.get("abstention_reason"),
     }
     return [{"role": "user", "content": prompt_parts["content"]}], prompt_template_metadata
@@ -588,8 +472,8 @@ def estimate_prompt_unit_input_tokens(config: dict[str, Any], prompt_unit: dict[
     )
 
 
-#This function validates the Step 15 V2 token plan against the exact prompt text built by Step 16.
-def validate_v2_token_plan(
+#This function validates the Step 15 V3 token plan against the exact prompt text built by Step 16.
+def validate_v3_token_plan(
     *,
     prompt_unit: dict[str, Any],
     token_estimation: dict[str, Any],
@@ -597,11 +481,11 @@ def validate_v2_token_plan(
 ) -> dict[str, Any]:
     token_plan = prompt_unit.get("token_plan")
     if not isinstance(token_plan, dict):
-        raise ValueError(f"Step 16 requires token_plan for compact_modification_unit_v2: {modification_unit_path}")
+        raise ValueError(f"Step 16 requires token_plan for compact_modification_unit_v3: {modification_unit_path}")
     if token_plan.get("policy") != TOKEN_BUDGET_POLICY:
         raise ValueError(
             f"Step 16 requires token_plan.policy={TOKEN_BUDGET_POLICY!r} for "
-            f"compact_modification_unit_v2. Found {token_plan.get('policy')!r}: {modification_unit_path}"
+            f"compact_modification_unit_v3. Found {token_plan.get('policy')!r}: {modification_unit_path}"
         )
 
     required_integer_fields = [
@@ -649,7 +533,7 @@ def validate_v2_token_plan(
             f"{modification_unit_path}"
         )
     if int(token_plan["overflow_tokens"]) != 0:
-        raise ValueError(f"token_plan.overflow_tokens must be zero for a routable V2 prompt: {modification_unit_path}")
+        raise ValueError(f"token_plan.overflow_tokens must be zero for a routable V3 prompt: {modification_unit_path}")
     if int(token_plan["runtime_max_model_len"]) <= 0 or int(token_plan["prompt_target_context"]) <= 0:
         raise ValueError(f"token_plan context limits must be positive: {modification_unit_path}")
     return deepcopy(token_plan)
@@ -678,6 +562,7 @@ def build_prompt_unit(
     modification_unit_entry: dict[str, Any],
     modification_unit_path: Path,
     prompt_unit: dict[str, Any],
+    expected_capabilities: ModificationCapabilities,
 ) -> dict[str, Any]:
     editable_region_index = build_editable_region_index(prompt_unit)
     has_editable_headers = any(
@@ -693,8 +578,18 @@ def build_prompt_unit(
         prompt_version=prompt_version,
         prompt_unit=prompt_unit,
     )
+    if prompt_template_metadata["has_editable_headers"] is not has_editable_headers:
+        raise ValueError(f"Header branch selection disagrees with input traceability: {modification_unit_path}")
+    if prompt_template_metadata["has_editable_payload"] is not has_editable_payload:
+        raise ValueError(f"Payload branch selection disagrees with input traceability: {modification_unit_path}")
+    target_presence = {
+        "editable_headers_present": has_editable_headers,
+        "editable_payload_present": has_editable_payload,
+    }
+    if prompt_unit.get("editable_target_presence") != target_presence:
+        raise ValueError(f"Step 16 target presence mismatch: {modification_unit_path}")
     token_estimation = estimate_prompt_unit_input_tokens(config, prompt_unit)
-    token_plan = validate_v2_token_plan(
+    token_plan = validate_v3_token_plan(
         prompt_unit=prompt_unit,
         token_estimation=token_estimation,
         modification_unit_path=modification_unit_path,
@@ -707,6 +602,16 @@ def build_prompt_unit(
         required_top_level_keys.append("header_edits")
     abstention_reason = prompt_template_metadata.get("abstention_reason")
     optional_top_level_keys = ["abstention"] if abstention_reason else []
+    forbidden_top_level_keys = []
+    if not has_editable_payload:
+        forbidden_top_level_keys.append("patches")
+    if not has_editable_headers:
+        forbidden_top_level_keys.append("header_edits")
+    supported_operations = []
+    if has_editable_payload:
+        supported_operations.extend(["replace_region", "replace_byte_range"])
+    if has_editable_headers:
+        supported_operations.append("replace_uint")
 
     return {
         "schema_version": PROMPT_UNIT_SCHEMA_VERSION,
@@ -716,6 +621,10 @@ def build_prompt_unit(
         "group_id": prompt_unit["prompt_unit_id"],
         "prompt_version": prompt_version,
         "prompt_contract": prompt_contract,
+        "modification_strategy": expected_capabilities.strategy,
+        "capabilities": expected_capabilities.as_metadata(),
+        "editable_target_presence": target_presence,
+        "source_modification_unit_id": prompt_unit["modification_unit_id"],
         "source_modification_unit_file": str(modification_unit_path),
         "source_modification_unit_schema_version": prompt_unit.get("schema_version"),
         "source_packet_json": prompt_unit.get("source_packet_json"),
@@ -726,14 +635,15 @@ def build_prompt_unit(
             "root_type": "object",
             "required_top_level_keys": required_top_level_keys,
             "optional_top_level_keys": optional_top_level_keys,
+            "forbidden_top_level_keys": forbidden_top_level_keys,
             "recognized_abstention_reasons": [abstention_reason] if abstention_reason else [],
-            "patches_type": "list",
+            "patches_type": "list" if has_editable_payload else None,
             "header_edits_type": (
                 "list of [packet_id, field, replacement_uint] entries for compact header updates"
                 if has_editable_headers
                 else None
             ),
-            "supported_operations": ["replace_region", "replace_byte_range", "replace_uint"],
+            "supported_operations": supported_operations,
             "replace_byte_range_required_keys": [
                 "canonical_region_id",
                 "region_id",
@@ -766,6 +676,11 @@ def build_prompt_unit(
         "input_traceability": {
             "parent_group_id": prompt_unit["parent_group_id"],
             "prompt_unit_id": prompt_unit["prompt_unit_id"],
+            "source_modification_unit_id": prompt_unit["modification_unit_id"],
+            "source_modification_unit_schema_version": SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION,
+            "modification_strategy": expected_capabilities.strategy,
+            "capabilities": expected_capabilities.as_metadata(),
+            "editable_target_presence": target_presence,
             "packet_ids": editable_region_index["packet_ids"],
             "editable_packet_ids": editable_region_index["editable_packet_ids"],
             "context_packet_ids": editable_region_index["context_packet_ids"],
@@ -798,12 +713,14 @@ def clear_previous_output_files(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for path in output_dir.glob("*.prompt.json"):
         path.unlink()
-    manifest_path = output_dir / "prompt_manifest.json"
-    if manifest_path.exists():
-        manifest_path.unlink()
-    manifest_path = output_dir / "prompt_units_manifest_v1.json"
-    if manifest_path.exists():
-        manifest_path.unlink()
+    for manifest_name in (
+        "prompt_manifest.json",
+        "prompt_units_manifest_v1.json",
+        "prompt_units_manifest_v2.json",
+    ):
+        manifest_path = output_dir / manifest_name
+        if manifest_path.exists():
+            manifest_path.unlink()
 
 
 #This function builds the top-level prompt-units manifest artifact.
@@ -818,6 +735,7 @@ def build_prompt_units_manifest(
     source_manifest: dict[str, Any],
     prompt_summaries: list[dict[str, Any]],
     total_source_modification_units: int,
+    capabilities: ModificationCapabilities,
 ) -> dict[str, Any]:
     source_metadata = source_manifest.get("metadata", {})
     llm_config = config.get("llm", {})
@@ -838,6 +756,8 @@ def build_prompt_units_manifest(
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "prompt_version": prompt_version,
+            "modification_strategy": capabilities.strategy,
+            "capabilities": capabilities.as_metadata(),
             "prompt_input_json_data_profile": llm_config.get(
                 "prompt_input_json_data_profile",
                 prompt_projection.DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE,
@@ -888,6 +808,7 @@ def run_prompt_builder(
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
+    capabilities = resolve_modification_strategy(config)
 
     if limit_prompts_s16 is not None and limit_prompts_s16 <= 0:
         raise ValueError("--limit-prompts-s16 must be a positive integer when provided.")
@@ -905,7 +826,11 @@ def run_prompt_builder(
     output_prompt_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
     manifest_path = resolve_source_manifest_path(input_group_dir, source_manifest)
 
-    modification_units_manifest = validate_modification_units_manifest(read_json(manifest_path), manifest_path)
+    modification_units_manifest = validate_modification_units_manifest(
+        read_json(manifest_path),
+        manifest_path,
+        capabilities,
+    )
     modification_unit_entries = modification_units_manifest["compact_modification_units"]
     selected_entries = select_modification_unit_entries(
         modification_unit_entries,
@@ -919,7 +844,11 @@ def run_prompt_builder(
         if not isinstance(modification_unit_entry, dict):
             raise ValueError("Every modification unit manifest entry must be an object.")
         modification_unit_path = resolve_modification_unit_file_path(modification_unit_entry, input_group_dir)
-        modification_unit = validate_modification_unit(read_json(modification_unit_path), modification_unit_path)
+        modification_unit = validate_modification_unit(
+            read_json(modification_unit_path),
+            modification_unit_path,
+            capabilities,
+        )
         prompt_source_unit = prepare_prompt_source_unit(modification_unit)
         prompt_unit = build_prompt_unit(
             config=config,
@@ -927,6 +856,7 @@ def run_prompt_builder(
             modification_unit_entry=modification_unit_entry,
             modification_unit_path=modification_unit_path,
             prompt_unit=prompt_source_unit,
+            expected_capabilities=capabilities,
         )
         prompt_path = output_prompt_dir / f"{prompt_unit['prompt_unit_id']}.prompt.json"
         write_json(prompt_path, prompt_unit)
@@ -936,9 +866,16 @@ def run_prompt_builder(
                 "prompt_unit_id": prompt_unit["prompt_unit_id"],
                 "group_id": prompt_unit["group_id"],
                 "prompt_file": prompt_path.name,
+                "source_modification_unit_id": prompt_unit["source_modification_unit_id"],
                 "source_modification_unit_file": str(modification_unit_path),
                 "prompt_version": prompt_version,
                 "prompt_contract": prompt_unit["prompt_contract"],
+                "modification_strategy": prompt_unit["modification_strategy"],
+                "capabilities": prompt_unit["capabilities"],
+                "editable_target_presence": prompt_unit["editable_target_presence"],
+                "source_modification_unit_schema_version": prompt_unit[
+                    "source_modification_unit_schema_version"
+                ],
                 "prompt_input_json_data_profile": prompt_unit["prompt_template"]["prompt_input_json_data_profile"],
                 "prompt_instructions_profile": prompt_unit["prompt_template"]["prompt_instructions_profile"],
                 "editable_region_count": len(prompt_unit["input_traceability"]["editable_regions"]),
@@ -957,8 +894,9 @@ def run_prompt_builder(
         source_manifest=modification_units_manifest,
         prompt_summaries=prompt_summaries,
         total_source_modification_units=len(modification_unit_entries),
+        capabilities=capabilities,
     )
-    prompt_manifest_path = output_prompt_dir / "prompt_units_manifest_v1.json"
+    prompt_manifest_path = output_prompt_dir / "prompt_units_manifest_v2.json"
     write_json(prompt_manifest_path, prompt_manifest)
 
     return {
@@ -990,7 +928,7 @@ def parse_cli_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-manifest",
-        help="Explicit active Step 15 compact_modification_units_manifest_v2 manifest to consume.",
+        help="Explicit active Step 15 compact_modification_units_manifest_v3 manifest to consume.",
     )
     parser.add_argument(
         "--cloud-root",

@@ -26,8 +26,8 @@ if [[ ! -d "${prompt_run_dir}" ]]; then
   echo "Step 16 prompt directory not found: ${prompt_run_dir}"
   exit 1
 fi
-if [[ ! -f "${prompt_run_dir}/prompt_units_manifest_v1.json" ]]; then
-  echo "Step 16 prompt manifest not found: ${prompt_run_dir}/prompt_units_manifest_v1.json"
+if [[ ! -f "${prompt_run_dir}/prompt_units_manifest_v2.json" ]]; then
+  echo "Step 16 prompt manifest not found: ${prompt_run_dir}/prompt_units_manifest_v2.json"
   exit 1
 fi
 

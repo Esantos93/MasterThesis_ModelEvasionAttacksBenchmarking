@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
-import string
 import sys
 import time
 import traceback
@@ -24,6 +24,10 @@ from common.header_policy import (
     nested_header_value,
 )
 from common.io_utils import write_json
+from common.modification_strategy import (
+    ModificationCapabilities,
+    resolve_modification_strategy,
+)
 from common.prompt_projection import (
     load_prompt_input_json_data_structure_from_config,
     load_prompt_instructions_profile_from_config,
@@ -35,14 +39,23 @@ from common.token_budget import (
     load_token_budget_config,
 )
 from step_15_grouping.ids_context_mapping import IdsContextMapping, load_ids_context_mapping
+from step_15_grouping.payload_v3 import (
+    PAYLOAD_OWNERSHIP_POLICY,
+    PAYLOAD_SEGMENTATION_POLICY,
+    balanced_contiguous_ranges,
+    build_payload_entry,
+    build_semantic_partitions,
+    payload_bytes,
+    payload_entry_interval,
+    validate_canonical_payload_coverage,
+)
 
 
 #These are the only Step 15 artifact schema names produced by the active code.
-HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v2"
-HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v2"
+MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v3"
+MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION = "compact_modification_units_manifest_v3"
 HEADERS_FULL_CLASSIFICATION_MANIFEST_SCHEMA_VERSION = "headers_full_classification_manifest_v1"
 HEADERS_FULL_CLASSIFICATION_RECORD_SCHEMA_VERSION = "headers_full_classification_record_v1"
-HEADER_ONLY_MODIFICATION_STRATEGY = "header_only_strategy_v1"
 SOURCE_PACKET_JSON_SCHEMA_VERSION = "packet_json_v4"
 GROUPING_UNIT = "physical_packet"
 PARENT_GROUP_INDEX_REPRESENTATION = "deduplicated_parent_group_index_v1"
@@ -55,35 +68,16 @@ SUPPORTED_GROUPING_POLICIES = ["fixed_packet_count", "flow_context_aware"]
 #Experiment-level budget values that affect the LLM contract must come from the active config.
 DEFAULT_TOKEN_BUDGET_CONFIG = {
     "prompt_target_context": 4096,
-    "small_payload_min_bytes": 64,
-    "small_payload_max_bytes": 512,
-    "small_full_token_budget_fraction": 0.05,
     "payload_window_left_context_bytes": 128,
-    "payload_window_editable_center_bytes": 512,
     "payload_window_right_context_bytes": 128,
 }
 ACTIVE_EDITABLE_HEADER_FIELDS: list[str] = []
-
-HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
-TEXT_PRINTABLE = set(string.printable)
 
 
 #This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
-
-
-#This function estimates the size of a JSON object when stored in compact form.
-def compact_json_size_bytes(data: Any) -> int:
-    encoded = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return len(encoded)
-
-
-#This function estimates tokens with the deterministic heuristic used by Step 15 planning.
-def estimate_json_tokens(data: Any, chars_per_token_estimate: float) -> int:
-    size_chars = compact_json_size_bytes(data)
-    return max(1, int(size_chars / chars_per_token_estimate) + 1)
 
 
 #This function counts the editable physical-header regions carried by a compact modification unit.
@@ -122,12 +116,7 @@ def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
     require_keys(config["pipeline"], ["grouping_policy", "grouping_unit"], "pipeline")
-    modification_strategy = str(config["pipeline"].get("modification_strategy", "")).strip()
-    if modification_strategy != HEADER_ONLY_MODIFICATION_STRATEGY:
-        raise ValueError(
-            f"Step 15 requires pipeline.modification_strategy={HEADER_ONLY_MODIFICATION_STRATEGY!r}. "
-            "No other modification strategy is executable in active Step 15."
-        )
+    resolve_modification_strategy(config)
     grouping_unit = str(config["pipeline"]["grouping_unit"]).strip()
     if grouping_unit != GROUPING_UNIT:
         raise ValueError(f"Step 15 requires pipeline.grouping_unit={GROUPING_UNIT!r}.")
@@ -357,7 +346,7 @@ def write_header_classification_artifacts(
     }
 
 
-#Future V3 primitive: resolve packet aliases for canonical TCP regions without emitting a Step 15 unit.
+#This function resolves the physical aliases and canonical payload facts used by V3 units.
 def build_canonical_region_records(packet_json: dict[str, Any]) -> list[dict[str, Any]]:
     packets_by_id = {str(packet["packet_id"]): packet for packet in packet_json["traffic"]}
     representations_by_region: dict[str, list[dict[str, Any]]] = {}
@@ -407,11 +396,43 @@ def build_canonical_region_records(packet_json: dict[str, Any]) -> list[dict[str
         if len(payload_hex) // 2 != declared_length:
             raise ValueError(f"Canonical region {region_id!r} length does not match payload_hex.")
 
+        physical_aliases = []
+        for alias_packet in alias_packets:
+            alias_packet_id = str(alias_packet["packet_id"])
+            alias_representations = sorted(
+                (
+                    {
+                        "physical_representation_id": str(item["physical_representation_id"]),
+                        "stream_start": int(item["stream_start"]),
+                        "stream_end": int(item["stream_end"]),
+                        "packet_payload_offset_start_bytes": int(item["packet_payload_offset_start_bytes"]),
+                        "packet_payload_offset_end_bytes": int(item["packet_payload_offset_end_bytes"]),
+                    }
+                    for item in representations
+                    if str(item["packet_id"]) == alias_packet_id
+                ),
+                key=lambda item: (
+                    item["stream_start"],
+                    item["stream_end"],
+                    item["physical_representation_id"],
+                ),
+            )
+            physical_aliases.append(
+                {
+                    "packet_id": alias_packet_id,
+                    "reduced_packet_index": int(alias_packet["reduced_packet_index"]),
+                    "tcp_connection_id": alias_packet.get("tcp_connection_id"),
+                    "tcp_stream_id": alias_packet.get("tcp_stream_id"),
+                    "representations": alias_representations,
+                }
+            )
+
         canonical_records.append(
             {
                 **region,
                 "payload_length_bytes": declared_length,
                 "source_packet_ids": [str(packet["packet_id"]) for packet in alias_packets],
+                "physical_aliases": physical_aliases,
                 "physical_representation_ids": sorted(resolved_alias_ids),
                 "physical_representation_set_ids": unique_strings(region.get("physical_representations", [])),
                 "first_reduced_packet_index": min(int(packet["reduced_packet_index"]) for packet in alias_packets),
@@ -471,6 +492,18 @@ def token_plan_fits(prompt_unit: dict[str, Any]) -> bool:
 
 def ids_context_enabled(token_config: dict[str, Any]) -> bool:
     return token_config["prompt_input_structure"].get("ids_context_field_name") == "ids_context"
+
+
+def uses_header_only_v2_visible_projection(
+    capabilities: ModificationCapabilities,
+    token_config: dict[str, Any],
+) -> bool:
+    return (
+        capabilities.allows_header_edits
+        and not capabilities.allows_payload_edits
+        and token_config["prompt_input_structure"].get("profile")
+        == "baseline_input_profile_v1"
+    )
 
 
 #This function implements the baseline parent grouping policy over physical packets.
@@ -624,7 +657,7 @@ def build_packet_parent_group_lookup(parent_groups: list[dict[str, Any]]) -> dic
     return lookup
 
 
-#Future V3 primitive: assign canonical payload ownership from physical aliases without selecting an artifact schema.
+#This function assigns each canonical payload region to the Parent Group of its first physical alias.
 def assign_canonical_records_to_owner_groups(
     *,
     canonical_records: list[dict[str, Any]],
@@ -712,334 +745,6 @@ def parent_group_size_statistics(parent_groups: list[dict[str, Any]]) -> dict[st
     }
 
 
-#This function converts canonical payload hex to bytes and reports the owning region on failure.
-def payload_hex_to_bytes(record: dict[str, Any]) -> bytes:
-    payload_hex = str(record.get("payload_hex", "") or "")
-    try:
-        return bytes.fromhex(payload_hex)
-    except ValueError as exc:
-        region_id = record.get("canonical_region_id", "<unknown>")
-        raise ValueError(f"Invalid payload_hex for canonical region {region_id}: {exc}") from exc
-
-
-#This function computes a deterministic text-readability report for payload bytes.
-def text_readability_report(payload: bytes) -> dict[str, Any]:
-    if not payload:
-        return {
-            "is_text": False,
-            "printable_ratio": 0.0,
-            "replacement_ratio": 0.0,
-            "control_ratio": 0.0,
-            "decoded_text": "",
-        }
-    decoded = payload.decode("utf-8", errors="replace")
-    replacement_count = decoded.count("\ufffd")
-    printable_count = sum(1 for char in decoded if char in TEXT_PRINTABLE)
-    control_count = sum(1 for char in decoded if ord(char) < 32 and char not in "\r\n\t")
-    char_count = max(1, len(decoded))
-    printable_ratio = printable_count / char_count
-    replacement_ratio = replacement_count / char_count
-    control_ratio = control_count / char_count
-    return {
-        "is_text": printable_ratio >= 0.75 and replacement_ratio <= 0.05 and control_ratio <= 0.05,
-        "printable_ratio": round(printable_ratio, 4),
-        "replacement_ratio": round(replacement_ratio, 4),
-        "control_ratio": round(control_ratio, 4),
-        "decoded_text": decoded,
-    }
-
-
-#This function identifies simple HTTP payloads from text and packet port hints.
-def looks_like_http(text: str, packet: dict[str, Any]) -> bool:
-    first_line = text.splitlines()[0] if text.splitlines() else ""
-    first_token = first_line.split(" ", 1)[0].upper() if first_line else ""
-    if first_token in HTTP_METHODS or first_line.startswith("HTTP/"):
-        return True
-    ports = {packet.get("src_port"), packet.get("dst_port")}
-    return bool({80, 8080, 8000, 8888}.intersection(ports)) and "\r\n" in text
-
-
-#This function builds basic parsed HTTP fields while preserving the raw sections as editable regions.
-def build_http_payload_view(packet: dict[str, Any], payload: bytes, text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    header_end = text.find("\r\n\r\n")
-    separator_len = 4
-    if header_end < 0:
-        header_end = text.find("\n\n")
-        separator_len = 2
-    header_text = text if header_end < 0 else text[:header_end]
-    body_text = "" if header_end < 0 else text[header_end + separator_len :]
-    lines = header_text.splitlines()
-    start_line = lines[0] if lines else ""
-    headers = {}
-    for line in lines[1:]:
-        if ":" in line:
-            name, value = line.split(":", 1)
-            headers[name.strip()] = value.strip()
-
-    view = {
-        "mode": "parsed_http",
-        "representation": "text",
-        "payload_length_bytes": len(payload),
-        "http_parsed_fields": {
-            "start_line": start_line,
-            "headers": headers,
-            "body_preview": body_text[:256],
-            "body_length_chars": len(body_text),
-        },
-    }
-    regions = []
-    if start_line:
-        regions.append(
-            build_region(
-                packet=packet,
-                region_id="http_start_line",
-                region_type="http_start_line",
-                offset=0,
-                length=len(start_line.encode("utf-8")),
-                replacement_format="text",
-                value=start_line,
-            )
-        )
-    if body_text:
-        body_offset = len(text[: header_end + separator_len].encode("utf-8")) if header_end >= 0 else 0
-        regions.append(
-            build_region(
-                packet=packet,
-                region_id="http_body",
-                region_type="http_body",
-                offset=body_offset,
-                length=len(body_text.encode("utf-8")),
-                replacement_format="text",
-                value=body_text[:512],
-            )
-        )
-    return view, regions
-
-
-#This function chooses the patch operations allowed for each editable region type.
-def allowed_operations_for_region(region_type: str) -> list[str]:
-    if region_type == "payload_byte_range":
-        return ["replace_byte_range"]
-    return ["replace_region"]
-
-
-#This function creates a stable editable region object for one packet payload area.
-def build_region(
-    *,
-    packet: dict[str, Any],
-    region_id: str,
-    region_type: str,
-    offset: int,
-    length: int,
-    replacement_format: str,
-    value: str,
-) -> dict[str, Any]:
-    canonical_region_id = str(packet.get("canonical_region_id"))
-    region_stream_start = int(packet.get("stream_start") or 0) + offset
-    region = {
-        "canonical_region_id": canonical_region_id,
-        "packet_id": canonical_region_id,
-        "region_id": region_id,
-        "region_type": region_type,
-        "coordinate_space": "canonical_tcp_region",
-        "tcp_connection_id": packet.get("tcp_connection_id"),
-        "tcp_stream_id": packet.get("tcp_stream_id"),
-        "canonical_stream_start": region_stream_start,
-        "canonical_stream_end": region_stream_start + length,
-        "start_offset_bytes": offset,
-        "end_offset_bytes": offset + length,
-        "length_bytes": length,
-        "format": replacement_format,
-        "allowed_operations": allowed_operations_for_region(region_type),
-        "editable": True,
-        "value": value,
-    }
-    return region
-
-
-#This function builds summary text for payloads that are too large to include fully in the compact view.
-def payload_summary(mode: str, payload: bytes, text: str, readability: dict[str, Any]) -> dict[str, Any]:
-    summary = {
-        "mode": mode,
-        "payload_length_bytes": len(payload),
-        "printable_ratio": readability["printable_ratio"],
-        "replacement_ratio": readability["replacement_ratio"],
-        "control_ratio": readability["control_ratio"],
-    }
-    if mode == "large_text_summary":
-        summary["representation"] = "text"
-        summary["text_prefix"] = text[:160]
-        summary["text_suffix"] = text[-160:] if len(text) > 160 else text
-    else:
-        summary["representation"] = "hex"
-        payload_hex = payload.hex()
-        summary["hex_prefix"] = payload_hex[:160]
-        summary["hex_suffix"] = payload_hex[-160:] if len(payload_hex) > 160 else payload_hex
-    return summary
-
-
-#This function decides whether a full payload can be included as a small editable region.
-def payload_fits_small_full(
-    candidate_view: dict[str, Any],
-    payload_length: int,
-    token_config: dict[str, Any],
-    prompt_target_context: int,
-) -> bool:
-    min_bytes = int(token_config["small_payload_min_bytes"])
-    max_bytes = int(token_config["small_payload_max_bytes"])
-    small_payload_limit = max(min_bytes, min(payload_length, max_bytes))
-    small_full_token_limit = max(
-        1,
-        int(prompt_target_context * float(token_config["small_full_token_budget_fraction"])),
-    )
-    estimated_tokens = estimate_json_tokens(candidate_view, float(token_config["chars_per_token_estimate"]))
-    return payload_length <= small_payload_limit and estimated_tokens <= small_full_token_limit
-
-
-#This function builds one byte window over a large payload, with context bytes around the editable center.
-def build_payload_window(
-    packet: dict[str, Any],
-    payload: bytes,
-    readability: dict[str, Any],
-    window_index: int,
-    center_start: int,
-    center_end: int,
-    left_context: int,
-    right_context: int,
-) -> dict[str, Any]:
-    canonical_region_id = str(packet.get("canonical_region_id"))
-    is_text = bool(readability["is_text"])
-    window_start = max(0, center_start - left_context)
-    window_end = min(len(payload), center_end + right_context)
-    left_context_bytes = payload[window_start:center_start]
-    center_bytes = payload[center_start:center_end]
-    right_context_bytes = payload[center_end:window_end]
-    if is_text:
-        left_context_value = left_context_bytes.decode("utf-8", errors="replace")
-        center_value = center_bytes.decode("utf-8", errors="replace")
-        right_context_value = right_context_bytes.decode("utf-8", errors="replace")
-        replacement_format = "text"
-    else:
-        left_context_value = left_context_bytes.hex()
-        center_value = center_bytes.hex()
-        right_context_value = right_context_bytes.hex()
-        replacement_format = "hex"
-    region_id = f"payload_window_{window_index:04d}_center"
-    return {
-        "canonical_region_id": canonical_region_id,
-        "window_id": f"{canonical_region_id}_window_{window_index:04d}",
-        "window_index": window_index,
-        "payload_view": {
-            "mode": "payload_window",
-            "representation": replacement_format,
-            "payload_length_bytes": len(payload),
-            "window_offset": window_start,
-            "window_length": window_end - window_start,
-            "center_offset": center_start,
-            "center_length": center_end - center_start,
-            "left_context_bytes": center_start - window_start,
-            "right_context_bytes": window_end - center_end,
-            "left_context_value": left_context_value,
-            "editable_center_value_in_region": True,
-            "right_context_value": right_context_value,
-        },
-        "editable_region": build_region(
-            packet=packet,
-            region_id=region_id,
-            region_type="payload_byte_range",
-            offset=center_start,
-            length=center_end - center_start,
-            replacement_format=replacement_format,
-            value=center_value,
-        ),
-    }
-
-
-#This function creates fixed-size byte windows that cover every byte of a large payload exactly once in the editable center.
-def build_payload_windows(packet: dict[str, Any], payload: bytes, readability: dict[str, Any], token_config: dict[str, Any]) -> list[dict[str, Any]]:
-    left_context = int(token_config["payload_window_left_context_bytes"])
-    center_size = int(token_config["payload_window_editable_center_bytes"])
-    right_context = int(token_config["payload_window_right_context_bytes"])
-    windows = []
-    for window_index, center_start in enumerate(range(0, len(payload), center_size), start=1):
-        center_end = min(center_start + center_size, len(payload))
-        windows.append(
-            build_payload_window(
-                packet=packet,
-                payload=payload,
-                readability=readability,
-                window_index=window_index,
-                center_start=center_start,
-                center_end=center_end,
-                left_context=left_context,
-                right_context=right_context,
-            )
-        )
-    return windows
-
-
-#Future V3 primitive: create payload views and editable regions without wrapping them in an active artifact schema.
-def build_payload_plan(packet: dict[str, Any], token_config: dict[str, Any], prompt_target_context: int) -> dict[str, Any]:
-    payload = payload_hex_to_bytes(packet)
-    payload_length = len(payload)
-    if payload_length == 0:
-        return {
-            "payload_view": {"mode": "empty", "payload_length_bytes": 0},
-            "editable_regions": [],
-            "payload_windows": [],
-        }
-
-    readability = text_readability_report(payload)
-    is_text = bool(readability["is_text"])
-    text = readability["decoded_text"]
-    if is_text and looks_like_http(text, packet):
-        view, regions = build_http_payload_view(packet, payload, text)
-        return {"payload_view": view, "editable_regions": regions, "payload_windows": []}
-
-    if is_text:
-        candidate_view = {
-            "mode": "small_full",
-            "representation": "text",
-            "payload_length_bytes": payload_length,
-            "value": text,
-        }
-        replacement_format = "text"
-        value = text
-    else:
-        candidate_view = {
-            "mode": "small_full",
-            "representation": "hex",
-            "payload_length_bytes": payload_length,
-            "value": payload.hex(),
-        }
-        replacement_format = "hex"
-        value = payload.hex()
-
-    if payload_fits_small_full(candidate_view, payload_length, token_config, prompt_target_context):
-        return {
-            "payload_view": candidate_view,
-            "editable_regions": [
-                build_region(
-                    packet=packet,
-                    region_id="payload_full",
-                    region_type="payload_full",
-                    offset=0,
-                    length=payload_length,
-                    replacement_format=replacement_format,
-                    value=value,
-                )
-            ],
-            "payload_windows": [],
-        }
-
-    summary_mode = "large_text_summary" if is_text else "large_unstructured_summary"
-    return {
-        "payload_view": payload_summary(summary_mode, payload, text, readability),
-        "editable_regions": [],
-        "payload_windows": build_payload_windows(packet, payload, readability, token_config),
-    }
-
-
 #This function builds common group metadata shared by all prompt units from the same parent group.
 def build_group_metadata(
     parent_group_id: str,
@@ -1070,7 +775,6 @@ def build_group_metadata(
         "unit_type": unit_type,
         "grouping_policy": grouping_policy,
         "grouping_unit": GROUPING_UNIT,
-        "group_size_packets": group_size_packets,
         "physical_packet_count": len(physical_packets),
         "first_reduced_packet_index": (
             min(int(packet["reduced_packet_index"]) for packet in physical_packets) if physical_packets else None
@@ -1083,6 +787,8 @@ def build_group_metadata(
         "tcp_connection_count": len(connections),
         "tcp_stream_count": len(streams),
     }
+    if group_size_packets is not None:
+        metadata["group_size_packets"] = group_size_packets
     return metadata
 
 
@@ -1102,7 +808,6 @@ def build_parent_group_index(
             "unit_type": str(parent_group["unit_type"]),
             "grouping_policy": grouping_policy,
             "grouping_unit": GROUPING_UNIT,
-            "group_size_packets": group_size_packets,
             "physical_packet_count": len(physical_packets),
             "physical_packet_ids": [str(packet["packet_id"]) for packet in physical_packets],
             "first_reduced_packet_index": (
@@ -1116,6 +821,8 @@ def build_parent_group_index(
                 else None
             ),
         }
+        if group_size_packets is not None:
+            entry["group_size_packets"] = group_size_packets
         parent_flow_summary = parent_group.get("parent_flow_summary")
         if parent_flow_summary is not None:
             if not isinstance(parent_flow_summary, dict):
@@ -1128,11 +835,30 @@ def build_parent_group_index(
     return entries
 
 
-#This function finalizes counts and the active token plan for one V2 header-only unit.
-def finalize_header_only_unit(unit: dict[str, Any], token_config: dict[str, Any]) -> None:
+def compact_without_none(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: compact_without_none(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [compact_without_none(item) for item in value]
+    return value
+
+
+def finalize_v3_unit(unit: dict[str, Any], token_config: dict[str, Any]) -> None:
     header_count = editable_header_region_count(unit)
-    unit["editable_header_region_count"] = header_count
-    unit["editable_region_count"] = header_count
+    payload_count = sum(
+        len(entry.get("editable_regions", []))
+        for entry in unit.get("canonical_payload_regions", [])
+        if isinstance(entry, dict)
+    )
+    if header_count:
+        unit["editable_header_region_count"] = header_count
+    if payload_count:
+        unit["editable_payload_region_count"] = payload_count
+    unit["editable_region_count"] = header_count + payload_count
     token_plan = build_compact_patch_token_plan(
         prompt_unit=unit,
         prompt_input_structure=token_config["prompt_input_structure"],
@@ -1144,22 +870,11 @@ def finalize_header_only_unit(unit: dict[str, Any], token_config: dict[str, Any]
         payload_replacement_size_policy=token_config["payload_replacement_size_policy"],
     )
     unit["token_plan"] = token_plan
-    unit["token_planning_validation_status"] = "validated_header_only_planning_path"
+    unit["token_planning_validation_status"] = "validated_v3_planning_path"
     unit["estimated_input_tokens"] = int(token_plan["estimated_input_tokens"])
 
 
-#This function records the exceptional case where one indivisible physical packet cannot fit.
-def mark_over_budget_header_unit(unit: dict[str, Any]) -> None:
-    unit["context_truncation"] = {
-        "applied": True,
-        "reason": "indivisible_physical_packet_exceeds_prompt_target_context",
-        "policy": TOKEN_BUDGET_POLICY,
-        "source_modification_unit_id": unit["modification_unit_id"],
-    }
-
-
-#This function builds the only active Step 15 source-unit contract.
-def build_header_only_unit(
+def build_v3_unit(
     *,
     experiment_id: str,
     source_packet_json: Path,
@@ -1167,149 +882,458 @@ def build_header_only_unit(
     group_metadata: dict[str, Any],
     modification_unit_id: str,
     unit_type: str,
+    capabilities: ModificationCapabilities,
     physical_packets: list[dict[str, Any]],
+    canonical_payload_regions: list[dict[str, Any]],
+    ids_context_packets: list[dict[str, Any]],
     token_config: dict[str, Any],
     ids_context_mapping: IdsContextMapping | None = None,
     fragment_flow_context: dict[str, Any] | None = None,
     fragment_compact_unit_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    unit = {
-        "schema_version": HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION,
+    capability_metadata = capabilities.as_metadata()
+    unit: dict[str, Any] = {
+        "schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
         "experiment_id": experiment_id,
         "parent_group_id": group_metadata["parent_group_id"],
         "modification_unit_id": modification_unit_id,
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
-        "strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
-        "modification_strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
-        "header_only": True,
-        "editable_payload_regions_enabled": False,
-        "editable_header_regions_enabled": True,
-        "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
-        "group_metadata": group_metadata,
+        "strategy": capabilities.strategy,
+        "modification_strategy": capabilities.strategy,
+        "capabilities": capability_metadata,
+        "header_only": capabilities.allows_header_edits and not capabilities.allows_payload_edits,
+        "editable_header_regions_enabled": capabilities.allows_header_edits,
+        "editable_payload_regions_enabled": capabilities.allows_payload_edits,
+        "group_metadata": compact_without_none(group_metadata),
         "token_budget": {
             "prompt_target_context": int(token_config["prompt_target_context"]),
             "chars_per_token_estimate": float(token_config["chars_per_token_estimate"]),
             "active_policy": TOKEN_BUDGET_POLICY,
         },
-        "physical_packets": physical_packets,
-        "context_truncation": None,
+    }
+    if capabilities.allows_header_edits:
+        unit["expected_editable_header_fields"] = ACTIVE_EDITABLE_HEADER_FIELDS
+    if uses_header_only_v2_visible_projection(capabilities, token_config):
+        unit["model_visible_projection"] = {
+            "profile": "baseline_input_profile_v1",
+            "policy": "header_only_v3_to_v2_byte_compatible_projection_v1",
+            "visible_schema_version": "compact_modification_unit_v2",
+            "source_schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
+        }
+    if physical_packets:
+        unit["physical_packets"] = physical_packets
+    if canonical_payload_regions:
+        unit["canonical_payload_regions"] = canonical_payload_regions
+        canonical_region_ids = unique_strings(
+            [entry["canonical_region_id"] for entry in canonical_payload_regions]
+        )
+        unit["canonical_region_ids"] = canonical_region_ids
+        unit["editable_canonical_region_ids"] = canonical_region_ids
+        unit["payload_authorization"] = {
+            "ownership_policy": PAYLOAD_OWNERSHIP_POLICY,
+            "segmentation_policy": PAYLOAD_SEGMENTATION_POLICY,
+            "replacement_size_policy": token_config["payload_replacement_size_policy"],
+        }
+    unit["editable_target_presence"] = {
+        "editable_headers_present": editable_header_region_count(unit) > 0,
+        "editable_payload_present": bool(canonical_payload_regions),
     }
     if fragment_flow_context is not None:
         unit["fragment_flow_context"] = fragment_flow_context
     if fragment_compact_unit_context is not None:
         unit["fragment_compact_unit_context"] = fragment_compact_unit_context
     if ids_context_mapping is not None:
-        unit["ids_context"] = ids_context_mapping.materialize(physical_packets)
-    finalize_header_only_unit(unit, token_config)
-    return unit
+        unit["ids_context"] = ids_context_mapping.materialize(ids_context_packets)
+    unit = compact_without_none(unit)
+    finalize_v3_unit(unit, token_config)
+    return compact_without_none(unit)
 
 
-#This function creates one header-only modification unit from one physical parent group.
-def build_header_only_prompt_units_for_group(
+def atom_source_packets(atom: dict[str, Any]) -> list[dict[str, Any]]:
+    source_packets = atom.get("source_packets", [])
+    if not isinstance(source_packets, list):
+        raise ValueError("V3 modification atom source_packets must be a list.")
+    return [packet for packet in source_packets if isinstance(packet, dict)]
+
+
+def atom_order_key(atom: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(atom["order_key"])
+
+
+def unit_type_for_atoms(atoms: list[dict[str, Any]], grouping_policy: str, fragmented: bool) -> str:
+    has_headers = any(atom["kind"] == "physical_header" for atom in atoms)
+    has_payload = any(atom["kind"] == "canonical_payload" for atom in atoms)
+    if has_headers and not has_payload:
+        if grouping_policy == "fixed_packet_count":
+            return "header_only_physical_packet_group"
+        return (
+            "header_only_flow_context_aware_group_fragment"
+            if fragmented
+            else "header_only_flow_context_aware_group"
+        )
+    surface = "hybrid" if has_headers and has_payload else "header_only" if has_headers else "payload_only"
+    grouping = "flow_context_aware" if grouping_policy == "flow_context_aware" else "fixed_packet_count"
+    suffix = "_fragment" if fragmented else ""
+    return f"{surface}_{grouping}_compact_unit{suffix}"
+
+
+def build_v3_modification_units_for_group(
     *,
     experiment_id: str,
     source_packet_json: Path,
     source_packet_json_schema_version: str,
-    parent_group_id: str,
-    group_index: int,
     grouping_policy: str,
     group_size_packets: int | None,
     parent_group: dict[str, Any],
     header_field_definitions: dict[str, Any],
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     token_config: dict[str, Any],
+    packets_by_id: dict[str, dict[str, Any]],
     ids_context_mapping: IdsContextMapping | None = None,
 ) -> list[dict[str, Any]]:
+    parent_group_id = str(parent_group["parent_group_id"])
     group_metadata = build_group_metadata(
         parent_group_id,
-        group_index,
+        int(parent_group["group_index"]),
         grouping_policy,
         group_size_packets,
-        "header_only_physical_packet_group",
+        "v3_physical_parent_group",
         parent_group,
     )
-    compact_physical_packets = [
-        build_compact_physical_packet(
+    parent_packets = list(parent_group.get("physical_packets", []))
+    parent_packet_ids = {str(packet["packet_id"]) for packet in parent_packets}
+    compact_packets_by_id = {
+        str(packet["packet_id"]): build_compact_physical_packet(
             packet=packet,
             header_field_definitions=header_field_definitions,
             header_policy=header_policy,
         )
-        for packet in parent_group.get("physical_packets", [])
-    ]
-    if grouping_policy != "flow_context_aware":
-        return [
-            build_header_only_unit(
-                experiment_id=experiment_id,
-                source_packet_json=source_packet_json,
-                source_packet_json_schema_version=source_packet_json_schema_version,
-                group_metadata=group_metadata,
-                modification_unit_id=parent_group_id,
-                unit_type="header_only_physical_packet_group",
-                physical_packets=compact_physical_packets,
-                token_config=token_config,
-                ids_context_mapping=ids_context_mapping,
-            )
-        ]
-
-    parent_flow_summary = parent_group.get("parent_flow_summary")
-    if not isinstance(parent_flow_summary, dict):
-        raise ValueError(f"Flow parent group {parent_group_id!r} lacks parent_flow_summary.")
-
-    flow_packet_positions = {
+        for packet in parent_packets
+    }
+    flow_positions = {
         str(packet["packet_id"]): position
-        for position, packet in enumerate(compact_physical_packets, start=1)
+        for position, packet in enumerate(parent_packets, start=1)
     }
 
-    def build_fragment_unit(
-        fragment_packets: list[dict[str, Any]],
+    def fragment_id(fragment_index: int, fragment_count: int) -> str:
+        return (
+            parent_group_id
+            if fragment_count == 1
+            else f"{parent_group_id}_fragment_{fragment_index:04d}"
+        )
+
+    def build_from_atoms(
+        atoms: list[dict[str, Any]],
         fragment_index: int,
         fragment_count: int,
     ) -> dict[str, Any]:
-        first_packet_id = str(fragment_packets[0]["packet_id"])
-        last_packet_id = str(fragment_packets[-1]["packet_id"])
-        fragment_id = parent_group_id if fragment_count == 1 else f"{parent_group_id}_fragment_{fragment_index:04d}"
-        fragment_flow_context = {
-            **parent_flow_summary,
-            "flow_packet_first_index": flow_packet_positions[first_packet_id],
-            "flow_packet_last_packet_index": flow_packet_positions[last_packet_id],
-        }
-        fragment_compact_unit_context = {
-            "parent_group_id": parent_group_id,
-            "group_fragment_id": fragment_id,
-            "compact_unit_index": fragment_index,
-            "compact_unit_count": fragment_count,
-            "fragment_physical_packet_count": len(fragment_packets),
-            "fragment_first_packet_id": first_packet_id,
-            "fragment_last_packet_id": last_packet_id,
-        }
-        return build_header_only_unit(
+        current_fragment_id = fragment_id(fragment_index, fragment_count)
+        physical_packets = [
+            atom["physical_packet"]
+            for atom in atoms
+            if atom["kind"] == "physical_header"
+        ]
+        canonical_payload_regions = []
+        for atom in atoms:
+            if atom["kind"] != "canonical_payload":
+                continue
+            entry = copy.deepcopy(atom["canonical_payload_region"])
+            entry["ownership"]["anchor_group_fragment_id"] = current_fragment_id
+            canonical_payload_regions.append(entry)
+
+        source_packet_lookup: dict[str, dict[str, Any]] = {}
+        for atom in atoms:
+            for packet in atom_source_packets(atom):
+                packet_id = str(packet["packet_id"])
+                if packet_id in parent_packet_ids:
+                    source_packet_lookup.setdefault(packet_id, packet)
+        ids_context_packets = sorted(
+            source_packet_lookup.values(),
+            key=packet_capture_order_key,
+        )
+
+        fragment_flow_context = None
+        fragment_compact_unit_context = None
+        if grouping_policy == "flow_context_aware":
+            parent_flow_summary = parent_group.get("parent_flow_summary")
+            if not isinstance(parent_flow_summary, dict):
+                raise ValueError(f"Flow Parent Group {parent_group_id!r} lacks parent_flow_summary.")
+            represented_positions = [
+                flow_positions[str(packet["packet_id"])]
+                for packet in ids_context_packets
+                if str(packet["packet_id"]) in flow_positions
+            ]
+            if not represented_positions:
+                raise ValueError(f"V3 flow fragment {current_fragment_id!r} has no physical packet anchor.")
+            first_position = min(represented_positions)
+            last_position = max(represented_positions)
+            fragment_flow_context = {
+                **parent_flow_summary,
+                "flow_packet_first_index": first_position,
+                "flow_packet_last_packet_index": last_position,
+            }
+            fragment_compact_unit_context = {
+                "parent_group_id": parent_group_id,
+                "group_fragment_id": current_fragment_id,
+                "compact_unit_index": fragment_index,
+                "compact_unit_count": fragment_count,
+                "fragment_physical_packet_count": len(ids_context_packets),
+                "fragment_first_packet_id": str(ids_context_packets[0]["packet_id"]),
+                "fragment_last_packet_id": str(ids_context_packets[-1]["packet_id"]),
+            }
+
+        return build_v3_unit(
             experiment_id=experiment_id,
             source_packet_json=source_packet_json,
             source_packet_json_schema_version=source_packet_json_schema_version,
             group_metadata=group_metadata,
-            modification_unit_id=fragment_id,
-            unit_type=(
-                "header_only_flow_context_aware_group"
-                if fragment_count == 1
-                else "header_only_flow_context_aware_group_fragment"
-            ),
-            physical_packets=fragment_packets,
+            modification_unit_id=current_fragment_id,
+            unit_type=unit_type_for_atoms(atoms, grouping_policy, fragment_count > 1),
+            capabilities=capabilities,
+            physical_packets=physical_packets,
+            canonical_payload_regions=canonical_payload_regions,
+            ids_context_packets=ids_context_packets,
             token_config=token_config,
             ids_context_mapping=ids_context_mapping,
             fragment_flow_context=fragment_flow_context,
             fragment_compact_unit_context=fragment_compact_unit_context,
         )
 
+    atoms: list[dict[str, Any]] = []
+    if capabilities.allows_header_edits:
+        for packet in parent_packets:
+            packet_id = str(packet["packet_id"])
+            atoms.append(
+                {
+                    "kind": "physical_header",
+                    "order_key": (
+                        int(packet["reduced_packet_index"]),
+                        0,
+                        packet_id,
+                        0,
+                    ),
+                    "physical_packet": compact_packets_by_id[packet_id],
+                    "source_packets": [packet],
+                }
+            )
+
+    def payload_atom(entry: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        _region_id, start, _end = payload_entry_interval(entry)
+        source_packets = [
+            packets_by_id[packet_id]
+            for packet_id in record["source_packet_ids"]
+            if packet_id in parent_packet_ids
+        ]
+        if not source_packets:
+            raise ValueError(
+                f"Owner Parent Group {parent_group_id!r} lacks a physical anchor for "
+                f"canonical region {record['canonical_region_id']!r}."
+            )
+        return {
+            "kind": "canonical_payload",
+            "order_key": (
+                int(record["first_reduced_packet_index"]),
+                1,
+                str(record["canonical_region_id"]),
+                start,
+            ),
+            "canonical_payload_region": entry,
+            "source_packets": source_packets,
+        }
+
+    def candidate_entry_fits(entry: dict[str, Any], record: dict[str, Any]) -> bool:
+        # Reserve the longest normal fragment id/count envelope during range sizing.
+        # Final units can then add their real fragment metadata without invalidating
+        # the adaptive maximum-byte calculation.
+        candidate = build_from_atoms([payload_atom(entry, record)], 999999, 999999)
+        return token_plan_fits(candidate)
+
+    def build_entry(
+        record: dict[str, Any],
+        *,
+        start: int,
+        end: int,
+        mode: str,
+        provenance: dict[str, Any],
+        range_index: int = 1,
+        range_count: int = 1,
+    ) -> dict[str, Any]:
+        return build_payload_entry(
+            record=record,
+            start_offset_bytes=start,
+            end_offset_bytes=end,
+            mode=mode,
+            provenance=provenance,
+            range_index=range_index,
+            range_count=range_count,
+            left_context_bytes=int(token_config["payload_window_left_context_bytes"]),
+            right_context_bytes=int(token_config["payload_window_right_context_bytes"]),
+            payload_replacement_size_policy=token_config["payload_replacement_size_policy"],
+            anchor_group_fragment_id=parent_group_id,
+        )
+
+    def maximum_fitting_bytes(
+        record: dict[str, Any],
+        *,
+        start: int,
+        end: int,
+        provenance: dict[str, Any],
+    ) -> int:
+        maximum_size = end - start
+        policy = token_config["payload_replacement_size_policy"]
+        tier_intervals: list[tuple[int, int]] = []
+        previous_maximum = 0
+        for tier in policy.get("tiers", []):
+            tier_maximum = tier.get("max_original_bytes")
+            interval_end = (
+                maximum_size
+                if tier_maximum is None
+                else min(maximum_size, int(tier_maximum))
+            )
+            interval_start = previous_maximum + 1
+            if interval_start <= interval_end:
+                tier_intervals.append((interval_start, interval_end))
+            if tier_maximum is None or interval_end == maximum_size:
+                break
+            previous_maximum = int(tier_maximum)
+        if not tier_intervals or tier_intervals[-1][1] != maximum_size:
+            raise ValueError(
+                "Payload replacement tiers do not cover the candidate editable range."
+            )
+
+        best = 0
+        for interval_start, interval_end in tier_intervals:
+            low = interval_start
+            high = interval_end
+            interval_best = 0
+            while low <= high:
+                size = (low + high) // 2
+                probe_start = min(
+                    max(start, start + int(token_config["payload_window_left_context_bytes"])),
+                    end - size,
+                )
+                candidate = build_entry(
+                    record,
+                    start=probe_start,
+                    end=probe_start + size,
+                    mode="adaptive_byte_window",
+                    provenance={
+                        **provenance,
+                        "maximum_bytes_available_per_window": maximum_size,
+                        "window_count_formula": (
+                            "ceil(total_editable_bytes/"
+                            "maximum_bytes_available_per_window)"
+                        ),
+                    },
+                    range_index=999999,
+                    range_count=999999,
+                )
+                if candidate_entry_fits(candidate, record):
+                    interval_best = size
+                    low = size + 1
+                else:
+                    high = size - 1
+            best = max(best, interval_best)
+        return best
+
+    if capabilities.allows_payload_edits:
+        for record in parent_group.get("records", []):
+            payload_length = len(payload_bytes(record))
+            if payload_length == 0:
+                continue
+            full_provenance = {
+                "semantic_segmentation_status": "not_required_full_region_fits",
+                "source_semantic_element_id": None,
+            }
+            full_entry = build_entry(
+                record,
+                start=0,
+                end=payload_length,
+                mode="canonical_region_full",
+                provenance=full_provenance,
+            )
+            if candidate_entry_fits(full_entry, record):
+                atoms.append(payload_atom(full_entry, record))
+                continue
+
+            partitions, semantic_summary = build_semantic_partitions(record)
+            for partition in partitions:
+                partition_start = int(partition["start_offset_bytes"])
+                partition_end = int(partition["end_offset_bytes"])
+                if partition["kind"] == "semantic_element":
+                    whole_mode = "semantic_element"
+                    provenance = {
+                        **semantic_summary,
+                        "source_semantic_element_id": partition["semantic_element_id"],
+                        "semantic_type": partition["semantic_type"],
+                    }
+                    whole_entry = build_entry(
+                        record,
+                        start=partition_start,
+                        end=partition_end,
+                        mode=whole_mode,
+                        provenance=provenance,
+                    )
+                    if candidate_entry_fits(whole_entry, record):
+                        atoms.append(payload_atom(whole_entry, record))
+                        continue
+                else:
+                    provenance = {
+                        **semantic_summary,
+                        "fallback_reason": partition["fallback_reason"],
+                    }
+
+                maximum_bytes = maximum_fitting_bytes(
+                    record,
+                    start=partition_start,
+                    end=partition_end,
+                    provenance=provenance,
+                )
+                indivisible_overflow = maximum_bytes == 0
+                if indivisible_overflow:
+                    maximum_bytes = 1
+                ranges = balanced_contiguous_ranges(
+                    start_offset_bytes=partition_start,
+                    end_offset_bytes=partition_end,
+                    maximum_bytes_available_per_window=maximum_bytes,
+                )
+                for range_index, (range_start, range_end) in enumerate(ranges, start=1):
+                    range_provenance = {
+                        **provenance,
+                        "maximum_bytes_available_per_window": maximum_bytes,
+                        "window_count_formula": "ceil(total_editable_bytes/maximum_bytes_available_per_window)",
+                    }
+                    if indivisible_overflow:
+                        range_provenance["indivisible_overflow"] = True
+                    entry = build_entry(
+                        record,
+                        start=range_start,
+                        end=range_end,
+                        mode="adaptive_byte_window",
+                        provenance=range_provenance,
+                        range_index=range_index,
+                        range_count=len(ranges),
+                    )
+                    atoms.append(payload_atom(entry, record))
+
+    atoms.sort(key=atom_order_key)
+    if not atoms:
+        return []
+
+    if grouping_policy == "fixed_packet_count" and ids_context_mapping is not None:
+        return [build_from_atoms(atoms, 1, 1)]
+
     chunks: list[list[dict[str, Any]]] = []
     current_chunk: list[dict[str, Any]] = []
-    for packet in compact_physical_packets:
-        candidate_chunk = current_chunk + [packet]
-        candidate_unit = build_fragment_unit(candidate_chunk, len(chunks) + 1, 1)
-        if current_chunk and not token_plan_fits(candidate_unit):
+    for atom in atoms:
+        candidate_chunk = current_chunk + [atom]
+        candidate = build_from_atoms(candidate_chunk, len(chunks) + 1, 1)
+        if current_chunk and not token_plan_fits(candidate):
             chunks.append(current_chunk)
-            current_chunk = [packet]
+            current_chunk = [atom]
         else:
             current_chunk = candidate_chunk
     if current_chunk:
@@ -1318,8 +1342,8 @@ def build_header_only_prompt_units_for_group(
     while True:
         fragment_count = len(chunks)
         units = [
-            build_fragment_unit(fragment_packets, fragment_index, fragment_count)
-            for fragment_index, fragment_packets in enumerate(chunks, start=1)
+            build_from_atoms(chunk, fragment_index, fragment_count)
+            for fragment_index, chunk in enumerate(chunks, start=1)
         ]
         oversized_index = next(
             (
@@ -1330,9 +1354,21 @@ def build_header_only_prompt_units_for_group(
             None,
         )
         if oversized_index is None:
-            for unit in units:
-                if not token_plan_fits(unit):
-                    mark_over_budget_header_unit(unit)
+            indivisible_unit = next(
+                (unit for unit in units if not token_plan_fits(unit)),
+                None,
+            )
+            if indivisible_unit is not None:
+                has_payload = bool(indivisible_unit.get("canonical_payload_regions"))
+                reason = (
+                    "indivisible_canonical_payload_byte_exceeds_prompt_target_context"
+                    if has_payload and not indivisible_unit.get("physical_packets")
+                    else "indivisible_physical_packet_exceeds_prompt_target_context"
+                )
+                raise ValueError(
+                    f"{reason}: unit={indivisible_unit['modification_unit_id']!r}, "
+                    f"overflow_tokens={indivisible_unit['token_plan']['overflow_tokens']}."
+                )
             return units
         oversized_chunk = chunks[oversized_index]
         midpoint = max(1, len(oversized_chunk) // 2)
@@ -1340,6 +1376,110 @@ def build_header_only_prompt_units_for_group(
             oversized_chunk[:midpoint],
             oversized_chunk[midpoint:],
         ]
+
+
+def validate_v3_prompt_unit(
+    prompt_unit: dict[str, Any],
+    capabilities: ModificationCapabilities,
+) -> None:
+    if prompt_unit.get("schema_version") != MODIFICATION_UNIT_SCHEMA_VERSION:
+        raise ValueError(f"Step 15 units must use {MODIFICATION_UNIT_SCHEMA_VERSION}.")
+    if prompt_unit.get("strategy") != capabilities.strategy:
+        raise ValueError("V3 unit strategy does not match resolved capabilities.")
+    if prompt_unit.get("capabilities") != capabilities.as_metadata():
+        raise ValueError("V3 unit capabilities do not match common.modification_strategy.")
+
+    header_regions = [
+        region
+        for physical_packet in prompt_unit.get("physical_packets", [])
+        for region in physical_packet.get("header_field_classifications", [])
+        if isinstance(region, dict) and region.get("editable")
+    ]
+    payload_entries = prompt_unit.get("canonical_payload_regions", [])
+    payload_regions = [
+        region
+        for entry in payload_entries
+        for region in entry.get("editable_regions", [])
+        if isinstance(region, dict) and region.get("editable")
+    ]
+    expected_target_presence = {
+        "editable_headers_present": bool(header_regions),
+        "editable_payload_present": bool(payload_regions),
+    }
+    if prompt_unit.get("editable_target_presence") != expected_target_presence:
+        raise ValueError("V3 editable_target_presence does not match the unit's actual targets.")
+    if not capabilities.allows_header_edits and header_regions:
+        raise ValueError("Payload-only V3 unit exposes editable physical headers.")
+    if not capabilities.allows_payload_edits and payload_regions:
+        raise ValueError("Header-only V3 unit exposes editable canonical payload.")
+    for region in header_regions:
+        if region.get("identity_type") != "physical_header_region":
+            raise ValueError("Editable headers must use physical_header_region ownership.")
+        if region.get("field") not in ACTIVE_EDITABLE_HEADER_FIELDS:
+            raise ValueError(f"Unexpected editable header field: {region.get('field')!r}")
+        if region.get("operation") != "replace_uint" or region.get("replacement_format") != "uint":
+            raise ValueError("Editable header operation must be replace_uint with uint replacements.")
+    for entry in payload_entries:
+        ownership = entry.get("ownership")
+        if not isinstance(ownership, dict) or ownership.get("policy") != PAYLOAD_OWNERSHIP_POLICY:
+            raise ValueError("V3 canonical payload entry lacks the canonical ownership contract.")
+        if ownership.get("owner_parent_group_id") != prompt_unit.get("parent_group_id"):
+            raise ValueError("V3 canonical payload entry is emitted outside its owner Parent Group.")
+        if ownership.get("anchor_group_fragment_id") != prompt_unit.get("modification_unit_id"):
+            raise ValueError("V3 canonical payload anchor_group_fragment_id is inconsistent.")
+        aliases = entry.get("physical_aliases")
+        if not isinstance(aliases, list) or not aliases:
+            raise ValueError("V3 canonical payload entry lacks physical alias context.")
+        for region in entry.get("editable_regions", []):
+            required = {
+                "authorized_start_offset_bytes",
+                "authorized_end_offset_bytes",
+                "authorized_length_bytes",
+                "max_replacement_bytes",
+                "max_replacement_hex_chars",
+            }
+            if not required.issubset(region):
+                raise ValueError("V3 payload target lacks explicit authorization limits.")
+            if int(region["max_replacement_hex_chars"]) != int(region["max_replacement_bytes"]) * 2:
+                raise ValueError("V3 payload replacement byte/hex limits are inconsistent.")
+
+
+def validate_v3_population(
+    *,
+    header_packet_ids: list[str],
+    payload_entries: list[dict[str, Any]],
+    ordered_packets: list[dict[str, Any]],
+    canonical_records: list[dict[str, Any]],
+    capabilities: ModificationCapabilities,
+) -> dict[str, Any]:
+    if capabilities.allows_header_edits:
+        expected_packet_ids = [str(packet["packet_id"]) for packet in ordered_packets]
+        if Counter(header_packet_ids) != Counter(expected_packet_ids):
+            raise ValueError("V3 editable-header packet ownership is incomplete or duplicated.")
+    elif header_packet_ids:
+        raise ValueError("Payload-only V3 population contains physical header edit owners.")
+
+    if capabilities.allows_payload_edits:
+        payload_coverage = validate_canonical_payload_coverage(
+            entries=payload_entries,
+            canonical_records=canonical_records,
+        )
+    else:
+        if payload_entries:
+            raise ValueError("Header-only V3 population contains canonical payload edit owners.")
+        payload_coverage = {
+            "canonical_region_count": len(canonical_records),
+            "editable_canonical_region_count": 0,
+            "editable_canonical_payload_byte_count": 0,
+            "duplicate_editable_byte_count": 0,
+            "missing_editable_byte_count": 0,
+            "overlapping_editable_interval_count": 0,
+        }
+    return {
+        "header_owner_physical_packet_count": len(header_packet_ids),
+        "duplicate_header_owner_physical_packet_count": 0,
+        **payload_coverage,
+    }
 
 
 def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -> dict[str, Any]:
@@ -1353,14 +1493,16 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
         "token_plan": prompt_unit.get("token_plan"),
         "token_planning_validation_status": prompt_unit.get("token_planning_validation_status"),
         "physical_packet_count": len(prompt_unit.get("physical_packets", [])),
+        "canonical_payload_region_entry_count": len(prompt_unit.get("canonical_payload_regions", [])),
         "editable_header_region_count": sum(
             int(packet.get("editable_header_region_count") or 0)
             for packet in prompt_unit.get("physical_packets", [])
         ),
+        "editable_payload_region_count": int(prompt_unit.get("editable_payload_region_count") or 0),
         "editable_region_count": prompt_unit["editable_region_count"],
-        "context_truncation": prompt_unit["context_truncation"],
         "fragment_flow_context": prompt_unit.get("fragment_flow_context"),
         "fragment_compact_unit_context": prompt_unit.get("fragment_compact_unit_context"),
+        "capabilities": prompt_unit.get("capabilities"),
         "modification_unit_file_size_bytes_pretty": prompt_unit_path.stat().st_size,
     }
     if "ids_context" in prompt_unit:
@@ -1423,39 +1565,6 @@ def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]],
     }
 
 
-#This function enforces the header-only Step 15 source-unit contract.
-def validate_header_only_prompt_unit(prompt_unit: dict[str, Any]) -> None:
-    if prompt_unit.get("schema_version") != HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION:
-        raise ValueError("Header-only Step 15 units must use compact_modification_unit_v2.")
-    forbidden_payload_fields = {
-        "packets",
-        "canonical_region_ids",
-        "editable_canonical_region_ids",
-        "context_canonical_region_ids",
-        "packet_ids",
-        "editable_packet_ids",
-        "context_packet_ids",
-        "payload_window_count",
-        "editable_payload_region_count",
-        "payload_strategy_version",
-    }
-    present_forbidden_fields = sorted(forbidden_payload_fields.intersection(prompt_unit))
-    if present_forbidden_fields:
-        raise ValueError(f"V2 header-only unit contains retired V1 payload fields: {present_forbidden_fields}")
-    for physical_packet in prompt_unit.get("physical_packets", []):
-        for region in physical_packet.get("header_field_classifications", []):
-            if not region.get("editable"):
-                continue
-            if region.get("identity_type") != "physical_header_region":
-                raise ValueError("Header-only editable regions must use identity_type=physical_header_region.")
-            if region.get("field") not in ACTIVE_EDITABLE_HEADER_FIELDS:
-                raise ValueError(f"Unexpected editable header field in header-only unit: {region.get('field')!r}")
-            if region.get("operation") != "replace_uint":
-                raise ValueError("Header-only editable regions must use operation=replace_uint.")
-            if region.get("replacement_format") != "uint":
-                raise ValueError("Header-only editable regions must use replacement_format=uint.")
-
-
 #This function builds the top-level compact modification-units manifest artifact.
 def build_manifest(
     *,
@@ -1467,40 +1576,40 @@ def build_manifest(
     group_size_packets: int | None,
     token_config: dict[str, Any],
     header_policy: dict[str, Any],
+    capabilities: ModificationCapabilities,
     parent_group_count: int,
     parent_group_index: list[dict[str, Any]],
     parent_group_stats: dict[str, Any],
     prompt_unit_summaries: list[dict[str, Any]],
     header_classification_artifacts: dict[str, Any],
     physical_parent_group_coverage: dict[str, Any],
+    editable_ownership_coverage: dict[str, Any],
     ids_context_mapping: IdsContextMapping | None = None,
 ) -> dict[str, Any]:
+    capability_metadata = capabilities.as_metadata()
     metadata = {
-            "schema_version": HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
+            "schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "source_packet_json": str(input_json_path),
             "source_packet_json_schema_version": packet_json.get("metadata", {}).get("schema_version"),
             "output_dir": str(output_dir),
-            "strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
-            "modification_strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
-            "header_only": True,
-            "editable_payload_regions_enabled": False,
-            "editable_header_regions_enabled": True,
-            "expected_editable_header_fields": ACTIVE_EDITABLE_HEADER_FIELDS,
+            "strategy": capabilities.strategy,
+            "modification_strategy": capabilities.strategy,
+            "capabilities": capability_metadata,
+            "header_only": capabilities.allows_header_edits and not capabilities.allows_payload_edits,
+            "editable_payload_regions_enabled": capabilities.allows_payload_edits,
+            "editable_header_regions_enabled": capabilities.allows_header_edits,
             "grouping_policy": grouping_policy,
             "grouping_unit": GROUPING_UNIT,
-            "group_size_packets": group_size_packets,
-            "group_size_physical_packets": group_size_packets,
-            "group_size_canonical_regions": None,
             "parent_group_count": parent_group_count,
             "parent_group_index_representation": PARENT_GROUP_INDEX_REPRESENTATION,
             "parent_group_size_statistics": parent_group_stats,
             "modification_unit_count": len(prompt_unit_summaries),
             "total_packet_count": len(packet_json["traffic"]),
             "total_canonical_region_count": len(packet_json["canonical_tcp_regions"]),
-            "compact_view_schema_version": HEADER_ONLY_MODIFICATION_UNIT_SCHEMA_VERSION,
+            "compact_view_schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
             "header_editability_policy": {
                 "schema_version": header_policy["schema_version"],
                 "policy_id": header_policy["policy_id"],
@@ -1525,11 +1634,45 @@ def build_manifest(
                 "prompt_instructions_profile": token_config["prompt_instructions_profile"],
             },
             "token_budget_policy": TOKEN_BUDGET_POLICY,
-            "token_planning_validation_status": "validated_header_only_planning_path",
+            "token_planning_validation_status": "validated_v3_planning_path",
             "over_budget_summary": build_over_budget_summary(prompt_unit_summaries),
             "physical_parent_group_coverage": physical_parent_group_coverage,
-            "immutable_fields": packet_json.get("immutable_fields", []),
+            "editable_ownership_coverage": editable_ownership_coverage,
     }
+    if group_size_packets is not None:
+        metadata["group_size_packets"] = group_size_packets
+    if packet_json.get("immutable_fields"):
+        metadata["immutable_fields"] = packet_json["immutable_fields"]
+    if capabilities.allows_header_edits:
+        metadata["expected_editable_header_fields"] = ACTIVE_EDITABLE_HEADER_FIELDS
+    if uses_header_only_v2_visible_projection(capabilities, token_config):
+        metadata["model_visible_projection"] = {
+            "profile": "baseline_input_profile_v1",
+            "policy": "header_only_v3_to_v2_byte_compatible_projection_v1",
+            "visible_schema_version": "compact_modification_unit_v2",
+            "source_schema_version": MODIFICATION_UNIT_SCHEMA_VERSION,
+        }
+    if capabilities.allows_payload_edits:
+        metadata["payload_contract"] = {
+            "ownership_policy": PAYLOAD_OWNERSHIP_POLICY,
+            "segmentation_policy": PAYLOAD_SEGMENTATION_POLICY,
+            "canonical_payload_container": "canonical_payload_regions",
+            "editable_target_container": "editable_regions",
+            "authorization_fields": {
+                "authorized_range": [
+                    "authorized_start_offset_bytes",
+                    "authorized_end_offset_bytes",
+                    "authorized_length_bytes",
+                ],
+                "replacement_limits": [
+                    "max_replacement_bytes",
+                    "max_replacement_hex_chars",
+                ],
+            },
+            "ownership_container": "ownership",
+            "alias_context_container": "physical_aliases",
+            "payload_replacement_size_policy": token_config["payload_replacement_size_policy"],
+        }
     if ids_context_mapping is not None:
         nonempty_unit_count = sum(
             1 for summary in prompt_unit_summaries if int(summary.get("ids_context_record_count") or 0) > 0
@@ -1573,6 +1716,7 @@ def run_grouping(
 
     config = load_json_config(config_path)
     validate_config(config)
+    capabilities = resolve_modification_strategy(config)
 
     grouping_policy = str(config["pipeline"]["grouping_policy"]).strip()
     paths = default_paths(config)
@@ -1603,6 +1747,11 @@ def run_grouping(
         grouping_policy=grouping_policy,
         group_size_packets=effective_group_size,
         tcp_connections=packet_json["tcp_connections"],
+    )
+    canonical_records = build_canonical_region_records(packet_json)
+    assign_canonical_records_to_owner_groups(
+        canonical_records=canonical_records,
+        parent_groups=parent_groups,
     )
     physical_parent_group_coverage = validate_physical_parent_group_coverage(parent_groups, ordered_traffic)
     parent_group_index = build_parent_group_index(
@@ -1649,8 +1798,11 @@ def run_grouping(
         force=True,
     )
     prompt_unit_summaries = []
+    generated_header_packet_ids: list[str] = []
+    generated_payload_entries: list[dict[str, Any]] = []
     experiment_id = config["experiment"]["experiment_id"]
     source_schema = str(packet_json.get("metadata", {}).get("schema_version", ""))
+    packets_by_id = {str(packet["packet_id"]): packet for packet in ordered_traffic}
 
     for processed_parent_groups, parent_group in enumerate(parent_groups, start=1):
         heartbeat(
@@ -1659,37 +1811,71 @@ def run_grouping(
             f"parent_group_physical_packets={len(parent_group.get('physical_packets', []))}, "
             f"modification_units_written={len(prompt_unit_summaries)}"
         )
-        prompt_units = build_header_only_prompt_units_for_group(
+        modification_units = build_v3_modification_units_for_group(
             experiment_id=experiment_id,
             source_packet_json=input_json_path,
             source_packet_json_schema_version=source_schema,
-            parent_group_id=parent_group["parent_group_id"],
-            group_index=parent_group["group_index"],
             grouping_policy=grouping_policy,
             group_size_packets=effective_group_size,
             parent_group=parent_group,
             header_field_definitions=packet_json["header_field_definitions"],
             header_policy=header_policy,
+            capabilities=capabilities,
             token_config=token_config,
+            packets_by_id=packets_by_id,
             ids_context_mapping=ids_mapping,
         )
-        for prompt_unit in prompt_units:
-            if ids_mapping is not None and grouping_policy == "fixed_packet_count" and not token_plan_fits(prompt_unit):
+        for modification_unit in modification_units:
+            if ids_mapping is not None and grouping_policy == "fixed_packet_count" and not token_plan_fits(modification_unit):
                 raise ValueError(
                     "IDS-aware fixed_packet_count Compact Unit exceeds prompt_target_context; "
                     "Step 15 will not remove packets or detector evidence. "
-                    f"unit={prompt_unit['modification_unit_id']!r}, "
-                    f"overflow_tokens={prompt_unit['token_plan']['overflow_tokens']}"
+                    f"unit={modification_unit['modification_unit_id']!r}, "
+                    f"overflow_tokens={modification_unit['token_plan']['overflow_tokens']}"
                 )
-            validate_header_only_prompt_unit(prompt_unit)
-            prompt_unit_path = output_group_dir / f"{prompt_unit['modification_unit_id']}.json"
-            write_json(prompt_unit_path, prompt_unit)
-            prompt_unit_summaries.append(summarize_prompt_unit(prompt_unit, prompt_unit_path))
+            if not token_plan_fits(modification_unit):
+                raise ValueError(
+                    "Step 15 generated an over-budget V3 Compact Unit that cannot be routed: "
+                    f"unit={modification_unit['modification_unit_id']!r}, "
+                    f"overflow_tokens={modification_unit['token_plan']['overflow_tokens']}."
+                )
+            validate_v3_prompt_unit(modification_unit, capabilities)
+            modification_unit_path = (
+                output_group_dir / f"{modification_unit['modification_unit_id']}.json"
+            )
+            write_json(modification_unit_path, modification_unit)
+            prompt_unit_summaries.append(
+                summarize_prompt_unit(modification_unit, modification_unit_path)
+            )
+            generated_header_packet_ids.extend(
+                str(packet["packet_id"])
+                for packet in modification_unit.get("physical_packets", [])
+            )
+            generated_payload_entries.extend(
+                {
+                    "canonical_region_id": entry["canonical_region_id"],
+                    "editable_regions": [
+                        {
+                            "start_offset_bytes": region["start_offset_bytes"],
+                            "end_offset_bytes": region["end_offset_bytes"],
+                        }
+                        for region in entry.get("editable_regions", [])
+                    ],
+                }
+                for entry in modification_unit.get("canonical_payload_regions", [])
+            )
         heartbeat(
             f"processed_parent_groups={processed_parent_groups}/{len(parent_groups)}, "
             f"modification_units_written={len(prompt_unit_summaries)}"
         )
 
+    editable_ownership_coverage = validate_v3_population(
+        header_packet_ids=generated_header_packet_ids,
+        payload_entries=generated_payload_entries,
+        ordered_packets=ordered_traffic,
+        canonical_records=canonical_records,
+        capabilities=capabilities,
+    )
     manifest = build_manifest(
         config=config,
         input_json_path=input_json_path,
@@ -1699,15 +1885,17 @@ def run_grouping(
         group_size_packets=effective_group_size,
         token_config=token_config,
         header_policy=header_policy,
+        capabilities=capabilities,
         parent_group_count=len(parent_groups),
         parent_group_index=parent_group_index,
         parent_group_stats=parent_group_stats,
         prompt_unit_summaries=prompt_unit_summaries,
         header_classification_artifacts=header_classification_artifacts,
         physical_parent_group_coverage=physical_parent_group_coverage,
+        editable_ownership_coverage=editable_ownership_coverage,
         ids_context_mapping=ids_mapping,
     )
-    manifest_path = output_group_dir / "compact_modification_units_manifest_v2.json"
+    manifest_path = output_group_dir / "compact_modification_units_manifest_v3.json"
     write_json(manifest_path, manifest)
 
     return {
@@ -1721,8 +1909,8 @@ def run_grouping(
         "canonical_region_count": canonical_region_count,
         "group_size_packets": effective_group_size,
         "parent_group_size_statistics": parent_group_stats,
-        "modification_strategy": HEADER_ONLY_MODIFICATION_STRATEGY,
-        "manifest_schema_version": HEADER_ONLY_MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
+        "modification_strategy": capabilities.strategy,
+        "manifest_schema_version": MODIFICATION_UNITS_MANIFEST_SCHEMA_VERSION,
     }
 
 
@@ -1783,7 +1971,7 @@ def main() -> None:
             print(f"Configured group size (physical packets): {result['group_size_packets']}")
         print(f"Parent group size statistics: {result['parent_group_size_statistics']}")
         print(f"Output directory: {result['output_dir']}")
-        print(f"Group manifest written to: {result['manifest_path']}")
+        print(f"Modification-units manifest written to: {result['manifest_path']}")
 
 
 if __name__ == "__main__":

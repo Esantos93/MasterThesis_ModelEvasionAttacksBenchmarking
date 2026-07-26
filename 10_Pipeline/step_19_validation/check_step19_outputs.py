@@ -64,12 +64,14 @@ def summarize_step19(validated: Path, validation_report: Path, sample_size: int)
     evaluation_counts = Counter(packet.get("evaluation_status", "<missing>") for packet in packet_results)
     authorization_counts = Counter(packet.get("authorization_materialization_status", "<missing>") for packet in packet_results)
     semantic_counts = Counter(packet.get("semantic_protocol_status", "<missing>") for packet in packet_results)
+    payload_functional_counts = Counter(packet.get("payload_functional_coherence_status", "<missing>") for packet in packet_results)
 
     print("\nSTEP 19 PACKET RESULT COUNTS")
     print("status:", json.dumps(dict(sorted(status_counts.items())), indent=2, ensure_ascii=False))
     print("evaluation_status:", json.dumps(dict(sorted(evaluation_counts.items())), indent=2, ensure_ascii=False))
     print("authorization_materialization_status:", json.dumps(dict(sorted(authorization_counts.items())), indent=2, ensure_ascii=False))
     print("semantic_protocol_status:", json.dumps(dict(sorted(semantic_counts.items())), indent=2, ensure_ascii=False))
+    print("payload_functional_coherence_status:", json.dumps(dict(sorted(payload_functional_counts.items())), indent=2, ensure_ascii=False))
 
     rejected = [packet for packet in packet_results if packet.get("status") == "rejected"]
     print_json("FIRST REJECTED PACKET RESULTS", rejected[:sample_size], limit=5000)

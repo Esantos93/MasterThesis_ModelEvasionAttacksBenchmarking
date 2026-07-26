@@ -31,9 +31,9 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
-PROMPT_UNIT_SCHEMA_VERSION = "prompt_unit_v1"
-MERGED_SCHEMA_VERSION = "patch_applied_traffic_v3"
-REPORT_SCHEMA_VERSION = "patch_application_report_v3"
+PROMPT_UNIT_SCHEMA_VERSIONS = {"prompt_unit_v1", "prompt_unit_v2"}
+MERGED_SCHEMA_VERSION = "patch_applied_traffic_v4"
+REPORT_SCHEMA_VERSION = "patch_application_report_v4"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
 
 
@@ -186,7 +186,7 @@ def resolve_prompt_unit_path(metadata: dict[str, Any], prompt_root: Path | None)
     return None
 
 
-#This function loads and validates the active Step 16 prompt_unit_v1 artifact.
+#This function loads and validates a Step 16 prompt unit artifact with Step 18-compatible traceability.
 def load_prompt_unit(metadata: dict[str, Any], prompt_root: Path | None) -> tuple[dict[str, Any] | None, str | None]:
     prompt_path = resolve_prompt_unit_path(metadata, prompt_root)
     if prompt_path is None:
@@ -194,7 +194,7 @@ def load_prompt_unit(metadata: dict[str, Any], prompt_root: Path | None) -> tupl
     prompt_unit = read_json(prompt_path)
     if not isinstance(prompt_unit, dict):
         return None, "prompt_unit_root_not_object"
-    if prompt_unit.get("schema_version") != PROMPT_UNIT_SCHEMA_VERSION:
+    if prompt_unit.get("schema_version") not in PROMPT_UNIT_SCHEMA_VERSIONS:
         return None, "prompt_unit_schema_version_invalid"
     if not isinstance(prompt_unit.get("input_traceability"), dict):
         return None, "prompt_unit_traceability_missing"
@@ -212,12 +212,53 @@ def build_editable_region_lookup(prompt_unit: dict[str, Any]) -> dict[tuple[str,
     for region in regions:
         if not isinstance(region, dict):
             continue
-        packet_id = region.get("packet_id")
         region_id = region.get("region_id")
-        if packet_id is None or not isinstance(region_id, str):
+        if not isinstance(region_id, str):
             continue
-        lookup[(str(packet_id), region_id)] = region
+        if region.get("identity_type") == "canonical_payload_region":
+            canonical_region_id = region.get("canonical_region_id")
+            if isinstance(canonical_region_id, str) and canonical_region_id:
+                lookup[(canonical_region_id, region_id)] = region
+                lookup[(canonical_region_id, canonical_region_id)] = region
+            continue
+        packet_id = region.get("packet_id")
+        if packet_id is not None:
+            lookup[(str(packet_id), region_id)] = region
+        canonical_region_id = region.get("canonical_region_id")
+        if isinstance(canonical_region_id, str):
+            lookup[(canonical_region_id, region_id)] = region
+            lookup[(canonical_region_id, canonical_region_id)] = region
     return lookup
+
+
+#This function resolves the Step 16 editable region targeted by one normalized patch.
+def resolve_editable_region_for_patch(
+    *,
+    patch: dict[str, Any],
+    editable_lookup: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[str | None, dict[str, Any] | None]:
+    region_id = patch.get("region_id")
+    if not isinstance(region_id, str):
+        return None, None
+    candidate_ids = [
+        patch.get("packet_id"),
+        patch.get("representative_packet_id"),
+        patch.get("canonical_region_id"),
+    ]
+    for candidate_id in candidate_ids:
+        if candidate_id is None:
+            continue
+        region = editable_lookup.get((str(candidate_id), region_id))
+        if region is not None:
+            return str(candidate_id), region
+    for (_candidate_id, candidate_region_id), region in editable_lookup.items():
+        if candidate_region_id == region_id:
+            if region.get("identity_type") == "canonical_payload_region":
+                target_id = region.get("canonical_region_id")
+            else:
+                target_id = region.get("packet_id")
+            return str(target_id) if target_id is not None else None, region
+    return None, None
 
 
 #This function returns the packet ids visible to one prompt unit for later LLM Output Failure accounting.
@@ -237,15 +278,15 @@ def packet_ids_from_prompt_unit(prompt_unit: dict[str, Any] | None) -> list[str]
     if editable_packet_ids is None:
         editable_packet_ids = []
     if not isinstance(packet_ids, list):
-        raise ValueError("prompt_unit_v1 input_traceability.packet_ids must be a list.")
+        raise ValueError("prompt_unit input_traceability.packet_ids must be a list.")
     if not isinstance(editable_packet_ids, list):
-        raise ValueError("prompt_unit_v1 input_traceability.editable_packet_ids must be a list.")
+        raise ValueError("prompt_unit input_traceability.editable_packet_ids must be a list.")
     canonical_packet_ids = stable_unique_strings(editable_packet_ids or packet_ids)
     if packet_ids and editable_packet_ids:
         all_packet_ids = set(stable_unique_strings(packet_ids))
         editable_set = set(canonical_packet_ids)
         if not editable_set.issubset(all_packet_ids):
-            raise ValueError("prompt_unit_v1 editable_packet_ids must be contained in packet_ids when both are present.")
+            raise ValueError("prompt_unit editable_packet_ids must be contained in packet_ids when both are present.")
     return canonical_packet_ids
 
 
@@ -324,7 +365,124 @@ def build_header_edit(
     return edit, None
 
 
-#This function validates one payload patch against Step 16 traceability and converts it to an absolute payload edit.
+#This helper checks that a value is a JSON integer, excluding booleans.
+def is_json_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+#This helper returns the representative physical owner declared by Step 15 V3 ownership.
+def payload_owner_packet_id_from_region(region: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    ownership = region.get("ownership")
+    region_id = region.get("region_id")
+    if not isinstance(ownership, dict):
+        return None, {"reason": "canonical_payload_region_ownership_missing", "region_id": region_id}
+    representative_packet_id = ownership.get("representative_packet_id")
+    if not isinstance(representative_packet_id, str) or not representative_packet_id:
+        return None, {"reason": "canonical_payload_region_representative_packet_id_missing", "region_id": region_id}
+    return representative_packet_id, None
+
+
+#This helper normalizes Step 15 V3 physical_aliases[].representations[] for common payload materialization.
+def packet_aliases_from_region(region: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    canonical_region_id = region.get("canonical_region_id")
+    region_id = region.get("region_id")
+    if not isinstance(canonical_region_id, str) or not canonical_region_id:
+        return [], {"reason": "canonical_payload_region_id_missing", "region_id": region_id}
+
+    canonical_stream_start = region.get("stream_start")
+    canonical_stream_end = region.get("stream_end")
+    if not is_json_int(canonical_stream_start) or not is_json_int(canonical_stream_end) or canonical_stream_start < 0 or canonical_stream_end < canonical_stream_start:
+        return [], {"reason": "canonical_payload_region_stream_bounds_invalid", "region_id": region_id, "canonical_region_id": canonical_region_id}
+
+    physical_aliases = region.get("physical_aliases")
+    if not isinstance(physical_aliases, list) or not physical_aliases:
+        return [], {"reason": "canonical_payload_region_physical_aliases_missing", "region_id": region_id, "canonical_region_id": canonical_region_id}
+
+    normalized_aliases = []
+    for alias_index, physical_alias in enumerate(physical_aliases, start=1):
+        if not isinstance(physical_alias, dict):
+            return [], {"reason": "canonical_payload_physical_alias_not_object", "region_id": region_id, "alias_index": alias_index}
+        packet_id = physical_alias.get("packet_id")
+        if not isinstance(packet_id, str) or not packet_id:
+            return [], {"reason": "canonical_payload_physical_alias_packet_id_missing", "region_id": region_id, "alias_index": alias_index}
+        representations = physical_alias.get("representations")
+        if not isinstance(representations, list) or not representations:
+            return [], {"reason": "canonical_payload_physical_alias_representations_missing", "packet_id": packet_id, "region_id": region_id, "alias_index": alias_index}
+        for representation_index, representation in enumerate(representations, start=1):
+            if not isinstance(representation, dict):
+                return [], {
+                    "reason": "canonical_payload_physical_representation_not_object",
+                    "packet_id": packet_id,
+                    "region_id": region_id,
+                    "alias_index": alias_index,
+                    "representation_index": representation_index,
+                }
+            physical_representation_id = representation.get("physical_representation_id")
+            stream_start = representation.get("stream_start")
+            stream_end = representation.get("stream_end")
+            payload_start = representation.get("packet_payload_offset_start_bytes")
+            payload_end = representation.get("packet_payload_offset_end_bytes")
+            if (
+                not isinstance(physical_representation_id, str)
+                or not physical_representation_id
+                or not is_json_int(stream_start)
+                or not is_json_int(stream_end)
+                or not is_json_int(payload_start)
+                or not is_json_int(payload_end)
+            ):
+                return [], {
+                    "reason": "canonical_payload_physical_representation_fields_invalid",
+                    "packet_id": packet_id,
+                    "region_id": region_id,
+                    "alias_index": alias_index,
+                    "representation_index": representation_index,
+                }
+            stream_length = stream_end - stream_start
+            payload_length = payload_end - payload_start
+            if (
+                stream_start < canonical_stream_start
+                or stream_end > canonical_stream_end
+                or stream_length <= 0
+                or payload_start < 0
+                or payload_length <= 0
+                or payload_length != stream_length
+            ):
+                return [], {
+                    "reason": "canonical_payload_physical_representation_bounds_invalid",
+                    "packet_id": packet_id,
+                    "region_id": region_id,
+                    "physical_representation_id": physical_representation_id,
+                }
+            normalized_aliases.append(
+                {
+                    "packet_id": packet_id,
+                    "alias_id": physical_representation_id,
+                    "physical_representation_id": physical_representation_id,
+                    "canonical_region_id": canonical_region_id,
+                    "canonical_start_offset_bytes": stream_start - canonical_stream_start,
+                    "payload_start_offset_bytes": payload_start,
+                    "length_bytes": stream_length,
+                    "stream_start": stream_start,
+                    "stream_end": stream_end,
+                    "packet_payload_offset_start_bytes": payload_start,
+                    "packet_payload_offset_end_bytes": payload_end,
+                }
+            )
+    return normalized_aliases, None
+
+
+#This helper returns the affected physical packet ids for a canonical payload region.
+def packet_ids_from_region_aliases(region: dict[str, Any]) -> list[str]:
+    aliases, _alias_error = packet_aliases_from_region(region)
+    packet_ids = [
+        str(alias["packet_id"])
+        for alias in aliases
+        if isinstance(alias, dict) and alias.get("packet_id") is not None
+    ]
+    return stable_unique_strings(packet_ids)
+
+
+#This function validates one payload patch against Step 16 traceability and converts it to a canonical payload edit.
 def build_payload_edit(
     *,
     patch: dict[str, Any],
@@ -334,19 +492,43 @@ def build_payload_edit(
     packet_index: dict[str, dict[str, Any]],
     parsed_path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    packet_id = patch.get("packet_id") or patch.get("canonical_region_id")
     region_id = patch.get("region_id")
-    packet_id_text = str(packet_id)
-    if packet_id_text not in packet_index:
-        return None, {"reason": "packet_id_not_in_step14_reference", "packet_id": packet_id_text, "patch_index": patch_index}
+    canonical_region_id = region.get("canonical_region_id")
+    if not isinstance(canonical_region_id, str) or not canonical_region_id:
+        return None, {"reason": "canonical_payload_region_id_missing", "region_id": region_id, "patch_index": patch_index}
+    if patch.get("canonical_region_id") is not None and patch.get("canonical_region_id") != canonical_region_id:
+        return None, {
+            "reason": "canonical_payload_region_id_mismatch",
+            "region_id": region_id,
+            "expected_canonical_region_id": canonical_region_id,
+            "actual_canonical_region_id": patch.get("canonical_region_id"),
+            "patch_index": patch_index,
+        }
+    representative_packet_id_text, owner_error = payload_owner_packet_id_from_region(region)
+    if owner_error is not None:
+        return None, {**owner_error, "patch_index": patch_index}
+    if representative_packet_id_text not in packet_index:
+        return None, {"reason": "packet_id_not_in_step14_reference", "packet_id": representative_packet_id_text, "patch_index": patch_index}
+    if patch.get("representative_packet_id") is not None and patch.get("representative_packet_id") != representative_packet_id_text:
+        return None, {
+            "reason": "canonical_payload_representative_packet_id_mismatch",
+            "packet_id": representative_packet_id_text,
+            "region_id": region_id,
+            "actual_representative_packet_id": patch.get("representative_packet_id"),
+            "patch_index": patch_index,
+        }
 
     operation = patch.get("operation")
-    allowed_operations = region.get("allowed_operations") or ["replace_region"]
+    allowed_operations = region.get("allowed_operations")
+    if not isinstance(allowed_operations, list) or not allowed_operations:
+        return None, {"reason": "canonical_payload_allowed_operations_missing", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
     if operation not in allowed_operations:
-        return None, {"reason": "operation_not_allowed_for_region", "packet_id": packet_id_text, "region_id": region_id, "operation": operation, "allowed_operations": allowed_operations, "patch_index": patch_index}
+        return None, {"reason": "operation_not_allowed_for_region", "packet_id": representative_packet_id_text, "region_id": region_id, "operation": operation, "allowed_operations": allowed_operations, "patch_index": patch_index}
 
+    if region.get("identity_type") != "canonical_payload_region" or region.get("region_type") != "canonical_payload_region":
+        return None, {"reason": "payload_patch_references_non_canonical_region", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
     if patch.get("region_type") != region.get("region_type"):
-        return None, {"reason": "region_type_mismatch", "packet_id": packet_id_text, "region_id": region_id, "expected_region_type": region.get("region_type"), "actual_region_type": patch.get("region_type"), "patch_index": patch_index}
+        return None, {"reason": "region_type_mismatch", "packet_id": representative_packet_id_text, "region_id": region_id, "expected_region_type": region.get("region_type"), "actual_region_type": patch.get("region_type"), "patch_index": patch_index}
 
     replacement_format = patch.get("replacement_format")
     replacement = patch.get("replacement")
@@ -354,7 +536,7 @@ def build_payload_edit(
     if expected_format in {"hex", "text"} and replacement_format != expected_format:
         return None, {
             "reason": "replacement_format_mismatch",
-            "packet_id": packet_id_text,
+            "packet_id": representative_packet_id_text,
             "region_id": region_id,
             "expected_format": expected_format,
             "replacement_format": replacement_format,
@@ -363,7 +545,7 @@ def build_payload_edit(
     if not isinstance(replacement, str):
         return None, {
             "reason": "replacement_not_string",
-            "packet_id": packet_id_text,
+            "packet_id": representative_packet_id_text,
             "region_id": region_id,
             "replacement_format": replacement_format,
             "patch_index": patch_index,
@@ -372,7 +554,7 @@ def build_payload_edit(
         if not is_valid_hex(replacement):
             return None, {
                 "reason": "replacement_hex_invalid",
-                "packet_id": packet_id_text,
+                "packet_id": representative_packet_id_text,
                 "region_id": region_id,
                 "replacement_format": replacement_format,
                 "patch_index": patch_index,
@@ -383,69 +565,117 @@ def build_payload_edit(
     else:
         return None, {
             "reason": "replacement_format_unsupported",
-            "packet_id": packet_id_text,
+            "packet_id": representative_packet_id_text,
             "region_id": region_id,
             "replacement_format": replacement_format,
             "patch_index": patch_index,
         }
 
-    region_start = region.get("start_offset_bytes")
-    region_length = region.get("length_bytes")
-    if not isinstance(region_start, int) or not isinstance(region_length, int) or region_start < 0 or region_length < 0:
-        return None, {"reason": "editable_region_offsets_invalid", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
+    stream_start = region.get("stream_start")
+    stream_end = region.get("stream_end")
+    canonical_region_start = 0
+    if is_json_int(stream_start) and is_json_int(stream_end):
+        canonical_region_length = stream_end - stream_start
+    else:
+        canonical_region_length = None
+    if (
+        not is_json_int(stream_start)
+        or not is_json_int(stream_end)
+        or not is_json_int(canonical_region_length)
+        or stream_start < 0
+        or canonical_region_length < 0
+    ):
+        return None, {"reason": "editable_canonical_region_offsets_invalid", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
+
+    authorized_start = region.get("authorized_start_offset_bytes")
+    authorized_end = region.get("authorized_end_offset_bytes")
+    authorized_length = region.get("authorized_length_bytes")
+    if (
+        not is_json_int(authorized_start)
+        or not is_json_int(authorized_end)
+        or not is_json_int(authorized_length)
+        or authorized_start < 0
+        or authorized_end < authorized_start
+        or authorized_length != authorized_end - authorized_start
+        or authorized_end > canonical_region_length
+    ):
+        return None, {"reason": "authorized_canonical_region_offsets_invalid", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
 
     if operation == "replace_region":
-        absolute_start = region_start
-        replaced_length = region_length
+        canonical_start = authorized_start
+        replaced_length = authorized_length
         local_offset = 0
     elif operation == "replace_byte_range":
         local_offset = patch.get("offset_from_region_start_bytes")
         replaced_length = patch.get("length_bytes")
         if not isinstance(local_offset, int) or not isinstance(replaced_length, int) or local_offset < 0 or replaced_length < 0:
-            return None, {"reason": "replace_byte_range_offsets_invalid", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
-        if local_offset + replaced_length > region_length:
+            return None, {"reason": "replace_byte_range_offsets_invalid", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
+        if local_offset + replaced_length > authorized_length:
             return None, {
                 "reason": "replace_byte_range_exceeds_region",
-                "packet_id": packet_id_text,
+                "packet_id": representative_packet_id_text,
                 "region_id": region_id,
                 "offset_from_region_start_bytes": local_offset,
                 "length_bytes": replaced_length,
-                "region_length_bytes": region_length,
+                "region_length_bytes": authorized_length,
                 "patch_index": patch_index,
             }
-        absolute_start = region_start + local_offset
+        canonical_start = authorized_start + local_offset
     else:
         return None, {"reason": "unsupported_patch_operation", "operation": operation, "patch_index": patch_index}
 
-    original_payload_hex = packet_index[packet_id_text].get("payload_hex", "")
-    if not isinstance(original_payload_hex, str) or not is_valid_hex(original_payload_hex):
-        return None, {"reason": "reference_payload_hex_invalid", "packet_id": packet_id_text, "patch_index": patch_index}
-    payload_length_bytes = len(original_payload_hex) // 2
-    if absolute_start + replaced_length > payload_length_bytes:
+    aliases, alias_error = packet_aliases_from_region(region)
+    if alias_error is not None:
+        return None, {**alias_error, "packet_id": representative_packet_id_text, "patch_index": patch_index}
+    if not aliases:
+        return None, {"reason": "canonical_payload_region_aliases_missing", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
+    traceability_packet_ids = set(packet_ids_from_prompt_unit(prompt_unit))
+    alias_packet_ids = set()
+    for alias in aliases:
+        alias_packet_id = alias.get("packet_id")
+        if alias_packet_id is None:
+            return None, {"reason": "canonical_payload_alias_missing_packet_id", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
+        alias_packet_id_text = str(alias_packet_id)
+        alias_packet_ids.add(alias_packet_id_text)
+        if alias_packet_id_text not in packet_index:
+            return None, {"reason": "packet_id_not_in_step14_reference", "packet_id": alias_packet_id_text, "region_id": region_id, "patch_index": patch_index}
+        original_payload_hex = packet_index[alias_packet_id_text].get("payload_hex", "")
+        if not isinstance(original_payload_hex, str) or not is_valid_hex(original_payload_hex):
+            return None, {"reason": "reference_payload_hex_invalid", "packet_id": alias_packet_id_text, "patch_index": patch_index}
+    if traceability_packet_ids and not alias_packet_ids.issubset(traceability_packet_ids):
         return None, {
-            "reason": "patch_exceeds_reference_payload",
-            "packet_id": packet_id_text,
+            "reason": "canonical_payload_alias_not_in_prompt_traceability",
+            "packet_id": representative_packet_id_text,
             "region_id": region_id,
-            "absolute_start_offset_bytes": absolute_start,
-            "length_bytes": replaced_length,
-            "payload_length_bytes": payload_length_bytes,
+            "alias_packet_ids": sorted(alias_packet_ids),
+            "traceability_packet_ids": sorted(traceability_packet_ids),
             "patch_index": patch_index,
         }
 
     return {
         "edit_kind": "canonical_payload",
-        "packet_id": packet_id_text,
+        "packet_id": representative_packet_id_text,
+        "representative_packet_id": representative_packet_id_text,
+        "canonical_region_id": canonical_region_id,
         "region_id": region_id,
-        "region_type": region.get("region_type"),
+        "identity_type": "canonical_payload_region",
+        "region_type": "canonical_payload_region",
+        "semantic_element_id": region.get("semantic_element_id"),
+        "canonical_window_id": region.get("canonical_window_id"),
         "operation": operation,
-        "absolute_start_offset_bytes": absolute_start,
+        "canonical_region_start_offset_bytes": canonical_region_start,
+        "canonical_region_length_bytes": canonical_region_length,
+        "authorized_canonical_start_offset_bytes": authorized_start,
+        "authorized_canonical_length_bytes": authorized_length,
+        "canonical_start_offset_bytes": canonical_start,
         "replaced_length_bytes": replaced_length,
         "replacement_format": replacement_format,
+        "replacement": replacement,
+        "replacement_text": replacement if replacement_format == "text" else None,
         "replacement_hex": replacement_hex,
         "replacement_length_bytes": len(replacement_hex) // 2,
-        "authorized_region_start_offset_bytes": region_start,
-        "authorized_region_length_bytes": region_length,
         "offset_from_region_start_bytes": local_offset,
+        "packet_aliases": aliases,
         "patch_index": patch_index,
         "parsed_file": str(parsed_path),
         "prompt_unit_id": prompt_unit.get("prompt_unit_id"),
@@ -466,20 +696,26 @@ def build_patch_edit(
     packet_index: dict[str, dict[str, Any]],
     parsed_path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    packet_id = patch.get("packet_id") or patch.get("canonical_region_id")
     region_id = patch.get("region_id")
-    if packet_id is None or not isinstance(region_id, str):
+    if not isinstance(region_id, str):
         return None, {"reason": "patch_missing_packet_or_region", "patch_index": patch_index}
-    packet_id_text = str(packet_id)
     traceability = prompt_unit.get("input_traceability", {})
     editable_packet_ids = {str(value) for value in traceability.get("editable_packet_ids", [])}
-    if editable_packet_ids and packet_id_text not in editable_packet_ids:
-        return None, {"reason": "patch_references_non_editable_packet", "packet_id": packet_id_text, "patch_index": patch_index}
+    if patch.get("operation") == "replace_uint" or patch.get("region_type") == "header_field":
+        packet_id = patch.get("packet_id")
+        if packet_id is not None and editable_packet_ids and str(packet_id) not in editable_packet_ids:
+            return None, {"reason": "patch_references_non_editable_packet", "packet_id": str(packet_id), "patch_index": patch_index}
 
-    region = editable_lookup.get((packet_id_text, region_id))
+    target_id, region = resolve_editable_region_for_patch(patch=patch, editable_lookup=editable_lookup)
     if region is None:
-        return None, {"reason": "patch_references_unknown_region", "packet_id": packet_id_text, "region_id": region_id, "patch_index": patch_index}
+        return None, {"reason": "patch_references_unknown_region", "packet_id": target_id, "region_id": region_id, "patch_index": patch_index}
     if region.get("identity_type") == "physical_header_region" or patch.get("operation") == "replace_uint":
+        packet_id = patch.get("packet_id")
+        if packet_id is None:
+            return None, {"reason": "header_patch_missing_packet_id", "region_id": region_id, "patch_index": patch_index}
+        packet_id_text = str(packet_id)
+        if editable_packet_ids and packet_id_text not in editable_packet_ids:
+            return None, {"reason": "patch_references_non_editable_packet", "packet_id": packet_id_text, "patch_index": patch_index}
         if not capabilities.allows_header_edits:
             return None, {
                 "reason": "header_edits_not_allowed_by_modification_strategy",
@@ -497,11 +733,12 @@ def build_patch_edit(
             packet_index=packet_index,
             parsed_path=parsed_path,
         )
+    representative_packet_id_text, _owner_error = payload_owner_packet_id_from_region(region)
     if not capabilities.allows_payload_edits:
         return None, {
             "reason": "payload_edits_not_allowed_by_modification_strategy",
             "modification_strategy": capabilities.strategy,
-            "packet_id": packet_id_text,
+            "packet_id": representative_packet_id_text,
             "region_id": region_id,
             "patch_index": patch_index,
         }
@@ -585,6 +822,7 @@ def apply_validated_edits(
     explicit_payload_edits = []
     payload_no_effect_edits = []
     derived_header_changes = []
+    derived_payload_projection_changes = []
     explicit_edit_relationships = []
     payload_edit_relationships = []
     materialization_errors = []
@@ -609,39 +847,32 @@ def apply_validated_edits(
         explicit_edit_relationships.extend(materialization["explicit_edit_relationships"])
         materialization_errors.extend(materialization["materialization_issues"])
 
-    by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for edit in edits:
-        if edit.get("edit_kind") != "canonical_payload":
-            continue
-        by_packet[edit["packet_id"]].append(edit)
-
-    payload_packet_ids = sorted(by_packet)
-    if heartbeat and payload_packet_ids:
-        heartbeat(f"Applying payload edits for {len(payload_packet_ids)} packets.", force=True)
-    for payload_packet_index, packet_id in enumerate(payload_packet_ids, start=1):
-        packet_edits = by_packet[packet_id]
-        if heartbeat:
-            heartbeat(f"Applied payload edits for {payload_packet_index}/{len(payload_packet_ids)} packets.")
+    payload_edits = [edit for edit in edits if edit.get("edit_kind") == "canonical_payload"]
+    if heartbeat and payload_edits:
+        heartbeat(f"Applying {len(payload_edits)} canonical payload edits across physical aliases.", force=True)
+    if payload_edits:
         try:
-            materialization = materialize_payload_edits(output_by_packet_id[packet_id], packet_edits)
+            materialization = materialize_payload_edits(output_by_packet_id, payload_edits)
         except ValueError as error:
             payload_materialization_issues.append(
                 {
                     "severity": "error",
                     "reason": "payload_materialization_failed",
-                    "packet_id": packet_id,
                     "detail": str(error),
                 }
             )
-            continue
-        output_by_packet_id[packet_id].clear()
-        output_by_packet_id[packet_id].update(materialization["materialized_packet"])
-        explicit_payload_edits.extend(materialization["explicit_edits"])
-        applied.extend(materialization["applied_patches"])
-        no_effect.extend(materialization["no_effect_edits"])
-        payload_no_effect_edits.extend(materialization["no_effect_edits"])
-        payload_edit_relationships.extend(materialization["explicit_edit_relationships"])
-        payload_materialization_issues.extend(materialization["materialization_issues"])
+        else:
+            for packet_id, materialized_packet in materialization["materialized_packets_by_id"].items():
+                if packet_id in output_by_packet_id:
+                    output_by_packet_id[packet_id].clear()
+                    output_by_packet_id[packet_id].update(materialized_packet)
+            explicit_payload_edits.extend(materialization["explicit_edits"])
+            applied.extend(materialization["applied_patches"])
+            no_effect.extend(materialization["no_effect_edits"])
+            payload_no_effect_edits.extend(materialization["no_effect_edits"])
+            derived_payload_projection_changes.extend(materialization["derived_payload_projection_changes"])
+            payload_edit_relationships.extend(materialization["explicit_edit_relationships"])
+            payload_materialization_issues.extend(materialization["materialization_issues"])
     return {
         "traffic": output_records,
         "applied_patches": applied,
@@ -650,6 +881,7 @@ def apply_validated_edits(
         "explicit_payload_edits": explicit_payload_edits,
         "payload_no_effect_edits": payload_no_effect_edits,
         "derived_header_changes": derived_header_changes,
+        "derived_payload_projection_changes": derived_payload_projection_changes,
         "explicit_edit_relationships": explicit_edit_relationships,
         "payload_edit_relationships": payload_edit_relationships,
         "header_materialization_issues": materialization_errors,
@@ -875,22 +1107,37 @@ def apply_model_patches(
     explicit_payload_edits = materialized["explicit_payload_edits"]
     payload_no_effect_edits = materialized["payload_no_effect_edits"]
     derived_header_changes = materialized["derived_header_changes"]
+    derived_payload_projection_changes = materialized["derived_payload_projection_changes"]
     explicit_edit_relationships = materialized["explicit_edit_relationships"]
     payload_edit_relationships = materialized["payload_edit_relationships"]
     materialization_errors = materialized["header_materialization_issues"]
     payload_materialization_issues = materialized["payload_materialization_issues"]
     if heartbeat:
-        heartbeat("Building Step 18 V3 summary indexes.", force=True)
-    modified_packet_ids = sorted({patch["packet_id"] for patch in applied_patches})
+        heartbeat("Building Step 18 V4 summary indexes.", force=True)
+    modified_packet_ids = sorted(
+        {
+            str(patch["packet_id"])
+            for patch in applied_patches
+            if patch.get("edit_kind") == "physical_header" and patch.get("packet_id") is not None
+        }
+        | {
+            str(change["packet_id"])
+            for change in derived_payload_projection_changes
+            if change.get("packet_id") is not None
+        }
+    )
     applied_header_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "physical_header"]
     applied_payload_edits = [edit for edit in applied_patches if edit.get("edit_kind") == "canonical_payload"]
     explicit_header_count_by_prompt_unit: dict[str, int] = defaultdict(int)
+    explicit_payload_count_by_prompt_unit: dict[str, int] = defaultdict(int)
     payload_count_by_prompt_unit: dict[str, int] = defaultdict(int)
     effective_count_by_prompt_unit: dict[str, int] = defaultdict(int)
     no_effect_count_by_prompt_unit: dict[str, int] = defaultdict(int)
     derived_count_by_prompt_unit: dict[str, int] = defaultdict(int)
     for edit in explicit_header_edits:
         explicit_header_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
+    for edit in explicit_payload_edits:
+        explicit_payload_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
     for edit in applied_patches:
         effective_count_by_prompt_unit[str(edit.get("prompt_unit_id"))] += 1
     for edit in no_effect_edits:
@@ -907,7 +1154,8 @@ def apply_model_patches(
     for group in accepted_groups:
         prompt_unit_key = str(group.get("prompt_unit_id"))
         group["explicit_header_edit_count"] = explicit_header_count_by_prompt_unit[prompt_unit_key]
-        group["accepted_edit_count"] = explicit_header_count_by_prompt_unit[prompt_unit_key] + payload_count_by_prompt_unit[prompt_unit_key]
+        group["explicit_payload_edit_count"] = explicit_payload_count_by_prompt_unit[prompt_unit_key]
+        group["accepted_edit_count"] = explicit_header_count_by_prompt_unit[prompt_unit_key] + explicit_payload_count_by_prompt_unit[prompt_unit_key]
         group["effective_edit_count"] = effective_count_by_prompt_unit[prompt_unit_key]
         group["no_effect_edit_count"] = no_effect_count_by_prompt_unit[prompt_unit_key]
         group["derived_header_change_count"] = derived_count_by_prompt_unit[prompt_unit_key]
@@ -923,17 +1171,18 @@ def apply_model_patches(
         "llm_output_failure_groups": llm_output_failure_groups,
         "patch_application_errors": patch_application_errors,
         "explicit_header_edits": sorted(explicit_header_edits, key=lambda item: (item["packet_id"], item.get("field", ""), item["patch_index"], item.get("materialization_sequence_index", 0))),
-        "explicit_payload_edits": sorted(explicit_payload_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"], item.get("materialization_sequence_index", 0))),
-        "applied_patches": sorted(applied_patches, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
+        "explicit_payload_edits": sorted(explicit_payload_edits, key=lambda item: (item["canonical_region_id"], item.get("canonical_start_offset_bytes", -1), item["prompt_unit_id"], item["patch_index"], item.get("materialization_sequence_index", 0))),
+        "applied_patches": sorted(applied_patches, key=lambda item: (item["packet_id"], item.get("field", ""), item.get("canonical_region_id", ""), item.get("canonical_start_offset_bytes", -1), item["prompt_unit_id"], item["patch_index"])),
         "effective_header_edits": sorted(applied_header_edits, key=lambda item: (item["packet_id"], item["field"], item["patch_index"])),
-        "payload_edits": sorted(applied_payload_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
+        "payload_edits": sorted(applied_payload_edits, key=lambda item: (item["canonical_region_id"], item.get("canonical_start_offset_bytes", -1), item["prompt_unit_id"], item["patch_index"])),
         "no_effect_edits": sorted(no_effect_edits, key=lambda item: (item["packet_id"], item.get("field", ""), item["patch_index"])),
-        "payload_no_effect_edits": sorted(payload_no_effect_edits, key=lambda item: (item["packet_id"], item.get("absolute_start_offset_bytes", -1), item["patch_index"])),
+        "payload_no_effect_edits": sorted(payload_no_effect_edits, key=lambda item: (item["canonical_region_id"], item.get("canonical_start_offset_bytes", -1), item["prompt_unit_id"], item["patch_index"])),
         "derived_header_changes": sorted(derived_header_changes, key=lambda item: (item.get("packet_id", ""), item.get("derived_field", ""), item.get("patch_index", 0))),
+        "derived_payload_projection_changes": sorted(derived_payload_projection_changes, key=lambda item: (item.get("packet_id", ""), item.get("payload_start_offset_bytes", -1), item.get("canonical_region_id", ""), item.get("prompt_unit_id", ""), item.get("patch_index", 0))),
         "explicit_edit_relationships": sorted(explicit_edit_relationships, key=lambda item: (item.get("packet_id", ""), item.get("field", ""), item.get("patch_index", 0), item.get("classification", ""))),
-        "payload_edit_relationships": sorted(payload_edit_relationships, key=lambda item: (item.get("packet_id", ""), item.get("region_id", ""), item.get("patch_index", 0), item.get("classification", ""))),
+        "payload_edit_relationships": sorted(payload_edit_relationships, key=lambda item: (item.get("canonical_region_id", ""), item.get("previous_patch_index", 0), item.get("patch_index", 0), item.get("classification", ""))),
         "header_materialization_issues": sorted(materialization_errors, key=lambda item: (item.get("packet_id", ""), item.get("reason", ""))),
-        "payload_materialization_issues": sorted(payload_materialization_issues, key=lambda item: (item.get("packet_id", ""), item.get("reason", ""))),
+        "payload_materialization_issues": sorted(payload_materialization_issues, key=lambda item: (item.get("canonical_region_id", ""), item.get("packet_id", ""), item.get("reason", ""))),
         "modified_packet_ids": modified_packet_ids,
         "summary": {
             "reference_packet_count": len(reference_records),
@@ -945,6 +1194,7 @@ def apply_model_patches(
             "effective_header_edit_count": len(applied_header_edits),
             "explicit_header_edit_count": len(explicit_header_edits),
             "derived_header_change_count": len(derived_header_changes),
+            "derived_payload_projection_change_count": len(derived_payload_projection_changes),
             "explicit_edit_relationship_count": len(explicit_edit_relationships),
             "header_materialization_issue_count": len(materialization_errors),
             "payload_materialization_issue_count": len(payload_materialization_issues),
@@ -1034,6 +1284,7 @@ def merge_model_outputs(
             "no_effect_edits": model_report["no_effect_edits"],
             "payload_no_effect_edits": model_report["payload_no_effect_edits"],
             "derived_header_changes": model_report["derived_header_changes"],
+            "derived_payload_projection_changes": model_report["derived_payload_projection_changes"],
             "explicit_edit_relationships": model_report["explicit_edit_relationships"],
             "payload_edit_relationships": model_report["payload_edit_relationships"],
             "header_materialization_issues": model_report["header_materialization_issues"],

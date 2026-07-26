@@ -63,7 +63,12 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     print("derived_header_changes:", len(patch_application.get("derived_header_changes", [])))
     print("explicit_edit_relationships:", len(patch_application.get("explicit_edit_relationships", [])))
     print("header_materialization_issues:", len(patch_application.get("header_materialization_issues", [])))
+    print("explicit_payload_edits:", len(patch_application.get("explicit_payload_edits", [])))
     print("payload_edits:", len(patch_application.get("payload_edits", [])))
+    print("payload_no_effect_edits:", len(patch_application.get("payload_no_effect_edits", [])))
+    print("derived_payload_projection_changes:", len(patch_application.get("derived_payload_projection_changes", [])))
+    print("payload_edit_relationships:", len(patch_application.get("payload_edit_relationships", [])))
+    print("payload_materialization_issues:", len(patch_application.get("payload_materialization_issues", [])))
     print("modified_packet_ids:", len(patch_application.get("modified_packet_ids", [])))
     print("errors:", len(patch_application.get("errors", [])))
 
@@ -78,10 +83,22 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     payload_edits = patch_application.get("payload_edits", [])
     if payload_edits:
         print_json(
-            "WARNING: PAYLOAD EDITS FOUND. HEADER-ONLY RUNS EXPECT ZERO.",
+            "FIRST EFFECTIVE CANONICAL PAYLOAD EDITS",
             payload_edits[:sample_size],
             limit=5000,
         )
+
+    payload_projection_changes = patch_application.get("derived_payload_projection_changes", [])
+    if payload_projection_changes:
+        print_json(
+            "FIRST DERIVED PAYLOAD PROJECTION CHANGES",
+            payload_projection_changes[:sample_size],
+            limit=5000,
+        )
+
+    payload_materialization_issues = patch_application.get("payload_materialization_issues", [])
+    if payload_materialization_issues:
+        print_json("FIRST STEP 18 PAYLOAD MATERIALIZATION ISSUES", payload_materialization_issues[:sample_size], limit=5000)
 
     errors = patch_application.get("errors", [])
     if errors:

@@ -44,12 +44,61 @@ class ReparseArtifactCleanupTest(unittest.TestCase):
 
 
 class PromptPackageContractTest(unittest.TestCase):
-    def test_rejects_historical_v1_source_contract(self) -> None:
+    def test_rejects_prompt_unit_v1_contract(self) -> None:
         prompt_package = build_header_prompt_package()
-        prompt_package["source_modification_unit_schema_version"] = "compact_modification_unit_v1"
+        prompt_package["schema_version"] = "prompt_unit_v1"
 
-        with self.assertRaisesRegex(ValueError, "accepts only prompt units generated from"):
-            run_llm_batch.validate_prompt_package(prompt_package, Path("historical.prompt.json"))
+        with self.assertRaisesRegex(ValueError, "prompt_unit_v2"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("historical_prompt.prompt.json"))
+
+    def test_rejects_historical_source_contracts(self) -> None:
+        for schema_version in ("compact_modification_unit_v1", "compact_modification_unit_v2"):
+            with self.subTest(schema_version=schema_version):
+                prompt_package = build_header_prompt_package()
+                prompt_package["source_modification_unit_schema_version"] = schema_version
+
+                with self.assertRaisesRegex(ValueError, "accepts only prompt units generated from"):
+                    run_llm_batch.validate_prompt_package(
+                        prompt_package,
+                        Path(f"historical_{schema_version}.prompt.json"),
+                    )
+
+    def test_rejects_capabilities_not_matching_shared_registry(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["capabilities"]["allows_payload_edits"] = True
+
+        with self.assertRaisesRegex(ValueError, "Capabilities do not match"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("wrong_capabilities.prompt.json"))
+
+    def test_requires_explicit_source_modification_unit_id(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package.pop("source_modification_unit_id")
+
+        with self.assertRaisesRegex(ValueError, "source_modification_unit_id"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("missing_source_id.prompt.json"))
+
+    def test_rejects_empty_target_population(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["editable_target_presence"] = {
+            "editable_headers_present": False,
+            "editable_payload_present": False,
+        }
+        prompt_package["input_traceability"]["editable_target_presence"] = dict(
+            prompt_package["editable_target_presence"]
+        )
+        prompt_package["input_traceability"]["editable_regions"] = []
+        prompt_package["expected_output_format"]["required_top_level_keys"] = [
+            "schema_version",
+            "parent_group_id",
+            "prompt_unit_id",
+        ]
+        prompt_package["expected_output_format"]["forbidden_top_level_keys"] = [
+            "patches",
+            "header_edits",
+        ]
+
+        with self.assertRaisesRegex(ValueError, "at least one editable target"):
+            run_llm_batch.validate_prompt_package(prompt_package, Path("empty_targets.prompt.json"))
 
     def test_requires_current_token_plan(self) -> None:
         prompt_package = build_header_prompt_package()
@@ -83,9 +132,22 @@ class PromptPackageContractTest(unittest.TestCase):
 
 #This function builds a minimal payload-only prompt package for validation tests.
 def build_prompt_package() -> dict:
+    capabilities = {
+        "strategy": "canonical_payload_only_strategy_v1",
+        "allows_header_edits": False,
+        "allows_payload_edits": True,
+        "requires_payload_preservation": False,
+    }
+    target_presence = {
+        "editable_headers_present": False,
+        "editable_payload_present": True,
+    }
     return {
-        "schema_version": "prompt_unit_v1",
-        "source_modification_unit_schema_version": "compact_modification_unit_v2",
+        "schema_version": "prompt_unit_v2",
+        "source_modification_unit_schema_version": "compact_modification_unit_v3",
+        "modification_strategy": capabilities["strategy"],
+        "capabilities": capabilities,
+        "editable_target_presence": target_presence,
         "token_plan": {
             "policy": "compact_patch_token_budget_v2",
             "estimated_input_tokens": 10,
@@ -99,27 +161,50 @@ def build_prompt_package() -> dict:
         },
         "parent_group_id": "parent_001",
         "prompt_unit_id": "unit_001",
+        "source_modification_unit_id": "unit_001",
         "prompt_contract": "patch_output",
+        "expected_output_format": {
+            "required_top_level_keys": [
+                "schema_version",
+                "parent_group_id",
+                "prompt_unit_id",
+                "patches",
+            ],
+            "optional_top_level_keys": [],
+            "forbidden_top_level_keys": ["header_edits"],
+            "recognized_abstention_reasons": [],
+        },
         "messages": [{"role": "user", "content": "test"}],
         "input_traceability": {
+            "source_modification_unit_id": "unit_001",
+            "source_modification_unit_schema_version": "compact_modification_unit_v3",
+            "modification_strategy": capabilities["strategy"],
+            "capabilities": capabilities,
+            "editable_target_presence": target_presence,
             "packet_ids": ["tcp_region_001"],
-            "editable_packet_ids": ["tcp_region_001"],
+            "editable_packet_ids": [],
             "context_packet_ids": [],
             "canonical_region_ids": ["tcp_region_001"],
             "editable_canonical_region_ids": ["tcp_region_001"],
             "context_canonical_region_ids": [],
             "editable_regions": [
                 {
+                    "identity_type": "canonical_payload_region",
                     "packet_id": "tcp_region_001",
                     "canonical_region_id": "tcp_region_001",
                     "region_id": "payload_full",
-                    "region_type": "payload_byte_range",
+                    "region_type": "canonical_payload_byte_range",
                     "format": "hex",
                     "start_offset_bytes": 0,
                     "end_offset_bytes": 4,
                     "length_bytes": 4,
                     "allowed_operations": ["replace_byte_range"],
                     "coordinate_space": "canonical_tcp_region",
+                    "authorized_start_offset_bytes": 0,
+                    "authorized_end_offset_bytes": 4,
+                    "authorized_length_bytes": 4,
+                    "max_replacement_bytes": 16,
+                    "max_replacement_hex_chars": 32,
                 }
             ],
         },
@@ -132,6 +217,10 @@ def build_payload_prompt_package(length_bytes: int) -> dict:
     region = package["input_traceability"]["editable_regions"][0]
     region["end_offset_bytes"] = length_bytes
     region["length_bytes"] = length_bytes
+    region["authorized_end_offset_bytes"] = length_bytes
+    region["authorized_length_bytes"] = length_bytes
+    region["max_replacement_bytes"] = max(16, length_bytes * 2)
+    region["max_replacement_hex_chars"] = region["max_replacement_bytes"] * 2
     return package
 
 
@@ -140,7 +229,27 @@ def build_mixed_prompt_package(payload_length_bytes: int) -> dict:
     package = build_payload_prompt_package(payload_length_bytes)
     header_region = build_header_prompt_package()["input_traceability"]["editable_regions"][0]
     package["prompt_unit_id"] = "unit_mixed_001"
+    package["source_modification_unit_id"] = "unit_mixed_001"
+    capabilities = {
+        "strategy": "hybrid_header_canonical_payload_strategy_v1",
+        "allows_header_edits": True,
+        "allows_payload_edits": True,
+        "requires_payload_preservation": False,
+    }
+    target_presence = {
+        "editable_headers_present": True,
+        "editable_payload_present": True,
+    }
+    package["modification_strategy"] = capabilities["strategy"]
+    package["capabilities"] = capabilities
+    package["editable_target_presence"] = target_presence
+    package["expected_output_format"]["required_top_level_keys"].append("header_edits")
+    package["expected_output_format"]["forbidden_top_level_keys"] = []
     package["input_traceability"]["editable_regions"].append(header_region)
+    package["input_traceability"]["source_modification_unit_id"] = "unit_mixed_001"
+    package["input_traceability"]["modification_strategy"] = capabilities["strategy"]
+    package["input_traceability"]["capabilities"] = capabilities
+    package["input_traceability"]["editable_target_presence"] = target_presence
     package["input_traceability"]["physical_packet_ids"] = ["packet_000001"]
     package["input_traceability"]["editable_packet_ids"].append("packet_000001")
     package["input_traceability"]["editable_header_packet_ids"] = ["packet_000001"]
@@ -149,9 +258,22 @@ def build_mixed_prompt_package(payload_length_bytes: int) -> dict:
 
 #This function builds a minimal header-only prompt package for validation tests.
 def build_header_prompt_package() -> dict:
+    capabilities = {
+        "strategy": "header_only_strategy_v1",
+        "allows_header_edits": True,
+        "allows_payload_edits": False,
+        "requires_payload_preservation": True,
+    }
+    target_presence = {
+        "editable_headers_present": True,
+        "editable_payload_present": False,
+    }
     return {
-        "schema_version": "prompt_unit_v1",
-        "source_modification_unit_schema_version": "compact_modification_unit_v2",
+        "schema_version": "prompt_unit_v2",
+        "source_modification_unit_schema_version": "compact_modification_unit_v3",
+        "modification_strategy": capabilities["strategy"],
+        "capabilities": capabilities,
+        "editable_target_presence": target_presence,
         "token_plan": {
             "policy": "compact_patch_token_budget_v2",
             "estimated_input_tokens": 10,
@@ -165,9 +287,26 @@ def build_header_prompt_package() -> dict:
         },
         "parent_group_id": "parent_001",
         "prompt_unit_id": "unit_header_001",
+        "source_modification_unit_id": "unit_header_001",
         "prompt_contract": "patch_output",
+        "expected_output_format": {
+            "required_top_level_keys": [
+                "schema_version",
+                "parent_group_id",
+                "prompt_unit_id",
+                "header_edits",
+            ],
+            "optional_top_level_keys": [],
+            "forbidden_top_level_keys": ["patches"],
+            "recognized_abstention_reasons": [],
+        },
         "messages": [{"role": "user", "content": "test"}],
         "input_traceability": {
+            "source_modification_unit_id": "unit_header_001",
+            "source_modification_unit_schema_version": "compact_modification_unit_v3",
+            "modification_strategy": capabilities["strategy"],
+            "capabilities": capabilities,
+            "editable_target_presence": target_presence,
             "packet_ids": [],
             "physical_packet_ids": ["packet_000001"],
             "editable_packet_ids": ["packet_000001"],
@@ -197,10 +336,8 @@ def build_header_prompt_package() -> dict:
 
 def build_prompt_engineering_header_prompt_package() -> dict:
     package = build_header_prompt_package()
-    package["expected_output_format"] = {
-        "optional_top_level_keys": ["abstention"],
-        "recognized_abstention_reasons": ["no_useful_header_edit"],
-    }
+    package["expected_output_format"]["optional_top_level_keys"] = ["abstention"]
+    package["expected_output_format"]["recognized_abstention_reasons"] = ["no_useful_header_edit"]
     return package
 
 
@@ -305,6 +442,30 @@ Explanation after.
 
 #This test case covers Step 17 patch-output validation against prompt traceability.
 class AbstentionValidationTest(unittest.TestCase):
+    def test_runtime_summary_row_preserves_v3_strategy_and_target_presence(self) -> None:
+        metadata = {
+            "modification_strategy": "hybrid_header_canonical_payload_strategy_v1",
+            "capabilities": {
+                "strategy": "hybrid_header_canonical_payload_strategy_v1",
+                "allows_header_edits": True,
+                "allows_payload_edits": True,
+                "requires_payload_preservation": False,
+            },
+            "editable_target_presence": {
+                "editable_headers_present": True,
+                "editable_payload_present": False,
+            },
+        }
+
+        row = summarize_llm_runtime.build_prompt_row(Path("unit.metadata.json"), metadata, [])
+
+        self.assertEqual(row["modification_strategy"], "hybrid_header_canonical_payload_strategy_v1")
+        self.assertTrue(row["allows_header_edits"])
+        self.assertTrue(row["allows_payload_edits"])
+        self.assertFalse(row["requires_payload_preservation"])
+        self.assertTrue(row["editable_headers_present"])
+        self.assertFalse(row["editable_payload_present"])
+
     def build_output(self, *, header_edits: list, abstention_marker: object = Ellipsis) -> dict:
         output = {
             "schema_version": "patch_output_v1",
@@ -429,7 +590,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                 {
                     "canonical_region_id": "tcp_region_001",
                     "region_id": "payload_full",
-                    "region_type": "payload_byte_range",
+                    "region_type": "canonical_payload_byte_range",
                     "operation": "replace_byte_range",
                     "offset_from_region_start_bytes": 0,
                     "length_bytes": 2,
@@ -455,7 +616,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                     "packet_id": "tcp_region_001",
                     "canonical_region_id": "tcp_region_999",
                     "region_id": "payload_full",
-                    "region_type": "payload_byte_range",
+                    "region_type": "canonical_payload_byte_range",
                     "operation": "replace_byte_range",
                     "offset_from_region_start_bytes": 0,
                     "length_bytes": 2,
@@ -470,11 +631,166 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertFalse(result["accepted"])
         self.assertEqual(result["reason"], "packet_id_canonical_region_id_mismatch")
 
+    def test_payload_only_rejects_header_edits_branch(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_001",
+            "patches": [],
+            "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "header_edits_not_authorized_for_prompt")
+
+    def test_hybrid_accepts_payload_patch_and_header_edit_together(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_mixed_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 0,
+                    "length_bytes": 2,
+                    "replacement_format": "hex",
+                    "replacement": "4142",
+                }
+            ],
+            "header_edits": [["packet_000001", "ipv4.ttl", 128]],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_mixed_prompt_package(4))
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["patch_count"], 2)
+
+    def test_payload_patch_rejects_unknown_canonical_target(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_unknown",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 0,
+                    "length_bytes": 1,
+                    "replacement_format": "hex",
+                    "replacement": "00",
+                }
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "patch_references_unknown_or_non_editable_region")
+
+    def test_payload_patch_rejects_oversized_replacement(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 0,
+                    "length_bytes": 1,
+                    "replacement_format": "hex",
+                    "replacement": "00" * 17,
+                }
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "replacement_exceeds_max_replacement_bytes")
+
+    def test_overlapping_payload_patches_are_rejected(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 0,
+                    "length_bytes": 2,
+                    "replacement_format": "hex",
+                    "replacement": "4142",
+                },
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 1,
+                    "length_bytes": 2,
+                    "replacement_format": "hex",
+                    "replacement": "4344",
+                },
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_prompt_package())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "overlapping_payload_patches")
+
+    def test_disjoint_payload_patches_are_accepted(self) -> None:
+        parsed_output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_001",
+            "patches": [
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 0,
+                    "length_bytes": 2,
+                    "replacement_format": "hex",
+                    "replacement": "4142",
+                },
+                {
+                    "canonical_region_id": "tcp_region_001",
+                    "region_id": "payload_full",
+                    "region_type": "canonical_payload_byte_range",
+                    "operation": "replace_byte_range",
+                    "offset_from_region_start_bytes": 2,
+                    "length_bytes": 2,
+                    "replacement_format": "hex",
+                    "replacement": "4344",
+                },
+            ],
+        }
+
+        result = run_llm_batch.validate_patch_output(parsed_output, build_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["patch_count"], 2)
+
     def test_header_replace_uint_patch_is_accepted(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
-            "prompt_unit_id": "unit_header_001",
+            "prompt_unit_id": "unit_mixed_001",
             "patches": [
                 {
                     "packet_id": "packet_000001",
@@ -485,9 +801,10 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                     "replacement": 128,
                 }
             ],
+            "header_edits": [],
         }
 
-        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+        result = run_llm_batch.validate_patch_output(parsed_output, build_mixed_prompt_package(4))
 
         self.assertTrue(result["accepted"])
 
@@ -495,7 +812,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         parsed_output = {
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
-            "prompt_unit_id": "unit_header_001",
+            "prompt_unit_id": "unit_mixed_001",
             "patches": [
                 {
                     "canonical_region_id": "tcp_region_context_only",
@@ -506,9 +823,10 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                     "replacement": 128,
                 }
             ],
+            "header_edits": [],
         }
 
-        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+        result = run_llm_batch.validate_patch_output(parsed_output, build_mixed_prompt_package(4))
 
         self.assertTrue(result["accepted"])
         self.assertEqual(parsed_output["patches"][0]["packet_id"], "packet_000001")
@@ -518,7 +836,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         parsed_output = {
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
-            "prompt_unit_id": "unit_header_001",
+            "prompt_unit_id": "unit_mixed_001",
             "patches": [
                 {
                     "packet_id": "packet_000001",
@@ -529,9 +847,10 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                     "replacement": 128,
                 }
             ],
+            "header_edits": [],
         }
 
-        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+        result = run_llm_batch.validate_patch_output(parsed_output, build_mixed_prompt_package(4))
 
         self.assertTrue(result["accepted"])
         self.assertEqual(parsed_output["patches"][0]["region_type"], "header_field")
@@ -541,7 +860,6 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
             "prompt_unit_id": "unit_header_001",
-            "patches": [],
             "header_edits": [["packet_000001", "ipv4.ttl", 128]],
         }
 
@@ -766,7 +1084,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                 "identity_type": "canonical_payload_region",
                 "packet_id": "packet_000001",
                 "region_id": "packet_000001:payload",
-                "region_type": "payload_byte_range",
+                "region_type": "canonical_payload_byte_range",
                 "field": "payload",
                 "allowed_operations": ["replace_byte_range"],
             }
@@ -863,7 +1181,6 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
             "prompt_unit_id": "unit_header_001",
-            "patches": [],
             "header_edits": [["packet_999999", "ipv4.ttl", 128]],
         }
 
@@ -877,7 +1194,6 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
             "prompt_unit_id": "unit_header_001",
-            "patches": [],
             "header_edits": [["packet_000001:ipv4.ttl", 128]],
         }
 
@@ -886,7 +1202,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertFalse(result["accepted"])
         self.assertEqual(result["reason"], "header_edit_invalid_shape")
 
-    def test_compact_header_edits_drop_duplicate_compact_patch_drafts(self) -> None:
+    def test_header_only_rejects_redundant_patches_branch(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
@@ -903,15 +1219,14 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
 
         result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
 
-        self.assertTrue(result["accepted"])
-        self.assertEqual(len(parsed_output["patches"]), 1)
-        self.assertEqual(parsed_output["patches"][0]["region_id"], "packet_000001:ipv4.ttl")
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "payload_patches_not_authorized_for_prompt")
 
     def test_header_replace_uint_patch_rejects_out_of_range_value(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
-            "prompt_unit_id": "unit_header_001",
+            "prompt_unit_id": "unit_mixed_001",
             "patches": [
                 {
                     "packet_id": "packet_000001",
@@ -922,9 +1237,10 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
                     "replacement": 0,
                 }
             ],
+            "header_edits": [],
         }
 
-        result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
+        result = run_llm_batch.validate_patch_output(parsed_output, build_mixed_prompt_package(4))
 
         self.assertFalse(result["accepted"])
         self.assertEqual(result["reason"], "replacement_uint_below_min")
@@ -934,11 +1250,12 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
             "prompt_unit_id": "unit_header_001",
+            "header_edits": [],
             "patches": [
                 {
                     "canonical_region_id": "tcp_region_001",
                     "region_id": "payload_full",
-                    "region_type": "payload_byte_range",
+                    "region_type": "canonical_payload_byte_range",
                     "operation": "replace_byte_range",
                     "offset_from_region_start_bytes": 0,
                     "length_bytes": 1,
@@ -951,7 +1268,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
 
         self.assertFalse(result["accepted"])
-        self.assertEqual(result["reason"], "patch_references_non_editable_packet")
+        self.assertEqual(result["reason"], "payload_patches_not_authorized_for_prompt")
 
     def test_compact_header_edits_reject_ttl_zero(self) -> None:
         parsed_output = {
@@ -1092,13 +1409,15 @@ def build_runtime_prompt(
 ) -> dict:
     prompt_package = build_header_prompt_package()
     prompt_package["prompt_unit_id"] = prompt_unit_id
+    prompt_package["source_modification_unit_id"] = prompt_unit_id
     prompt_package["group_id"] = prompt_unit_id
+    prompt_package["input_traceability"]["source_modification_unit_id"] = prompt_unit_id
     prompt_package["messages"] = [{"role": "user", "content": prompt_unit_id}]
     if prompt_engineering:
-        prompt_package["expected_output_format"] = {
-            "optional_top_level_keys": ["abstention"],
-            "recognized_abstention_reasons": ["no_useful_header_edit"],
-        }
+        prompt_package["expected_output_format"]["optional_top_level_keys"] = ["abstention"]
+        prompt_package["expected_output_format"]["recognized_abstention_reasons"] = [
+            "no_useful_header_edit"
+        ]
     prompt_package["token_plan"].update(
         {
             "estimated_input_tokens": estimated_input_tokens,

@@ -16,7 +16,7 @@ from common.ids_context import IDS_CONTEXT_SCHEMA_VERSION
 from common.token_budget import build_compact_patch_token_plan
 from step_14_pcap_to_json.packet_headers_extraction import HEADER_FIELD_DEFINITIONS
 from step_14_pcap_to_json.tcp_canonicalization import canonicalize_tcp_records
-from step_15_grouping.check_step15_output import check_header_only_units
+from step_15_grouping.check_step15_output import check_v3_units
 from step_15_grouping.group_packets import run_grouping
 from step_15_grouping.ids_context_mapping import load_ids_context_mapping
 from step_16_prompt_builder.build_prompts import (
@@ -137,12 +137,13 @@ def config(
     grouping_policy: str,
     group_size: int | None = None,
     header_policy: str = "conservative_header_editability_v1",
+    modification_strategy: str = "header_only_strategy_v1",
 ) -> dict:
     pipeline = {
         "grouping_policy": grouping_policy,
         "grouping_unit": "physical_packet",
         "experiment_config_label": f"test-{grouping_policy}",
-        "modification_strategy": "header_only_strategy_v1",
+        "modification_strategy": modification_strategy,
         "header_editability_policy": header_policy,
     }
     if group_size is not None:
@@ -299,17 +300,17 @@ class CanonicalStep15Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "packet_json_v4"):
                 self.run_step15(source, config(root, "fixed_packet_count", group_size=1), root)
 
-    def test_step15_rejects_non_header_only_strategy(self) -> None:
+    def test_step15_rejects_unknown_strategy(self) -> None:
         source = packet_json_v4([tcp_record(1, 1000, b"attack")])
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             active_config = config(root, "fixed_packet_count", group_size=1)
             active_config["pipeline"]["modification_strategy"] = "unsupported_strategy"
-            with self.assertRaisesRegex(ValueError, "No other modification strategy"):
+            with self.assertRaisesRegex(ValueError, "Unsupported pipeline.modification_strategy"):
                 self.run_step15(source, active_config, root)
 
-    def test_header_only_strategy_emits_v2_units_without_payload_editability(self) -> None:
+    def test_header_only_strategy_emits_v3_units_without_payload_editability(self) -> None:
         records = [
             tcp_record(packet_number, 1000 + packet_number * 10, b"attack")
             for packet_number in range(1, 8)
@@ -325,8 +326,8 @@ class CanonicalStep15Tests(unittest.TestCase):
             )
             manifest, units = self.run_step15(source, active_config, root)
 
-        self.assertEqual("compact_modification_units_manifest_v2", manifest["metadata"]["schema_version"])
-        self.assertEqual("compact_modification_unit_v2", manifest["metadata"]["compact_view_schema_version"])
+        self.assertEqual("compact_modification_units_manifest_v3", manifest["metadata"]["schema_version"])
+        self.assertEqual("compact_modification_unit_v3", manifest["metadata"]["compact_view_schema_version"])
         self.assertEqual("header_only_strategy_v1", manifest["metadata"]["strategy"])
         self.assertTrue(manifest["metadata"]["header_only"])
         self.assertFalse(manifest["metadata"]["editable_payload_regions_enabled"])
@@ -346,22 +347,24 @@ class CanonicalStep15Tests(unittest.TestCase):
             ["ipv4.tos", "ipv4.ttl", "tcp.window"],
             manifest["metadata"]["expected_editable_header_fields"],
         )
-        self.assertTrue(all(unit["schema_version"] == "compact_modification_unit_v2" for unit in units))
+        self.assertTrue(all(unit["schema_version"] == "compact_modification_unit_v3" for unit in units))
+        self.assertTrue(
+            all(
+                unit["capabilities"]
+                == {
+                    "strategy": "header_only_strategy_v1",
+                    "allows_header_edits": True,
+                    "allows_payload_edits": False,
+                    "requires_payload_preservation": True,
+                }
+                for unit in units
+            )
+        )
         self.assertTrue(all(unit["header_only"] for unit in units))
         self.assertTrue(all("physical_packet_ids" not in unit["group_metadata"] for unit in units))
-        retired_v1_fields = {
-            "packets",
-            "canonical_region_ids",
-            "editable_canonical_region_ids",
-            "context_canonical_region_ids",
-            "packet_ids",
-            "editable_packet_ids",
-            "context_packet_ids",
-            "payload_window_count",
-            "editable_payload_region_count",
-            "payload_strategy_version",
-        }
-        self.assertTrue(all(not retired_v1_fields.intersection(unit) for unit in units))
+        self.assertTrue(all("canonical_payload_regions" not in unit for unit in units))
+        self.assertTrue(all(unit["editable_target_presence"]["editable_headers_present"] for unit in units))
+        self.assertTrue(all(not unit["editable_target_presence"]["editable_payload_present"] for unit in units))
         self.assertEqual([18, 3], [unit["editable_region_count"] for unit in units])
         self.assertEqual([18, 3], [unit["editable_header_region_count"] for unit in units])
         editable_regions = [
@@ -429,6 +432,342 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
         self.assertEqual([34], [unit["editable_header_region_count"] for unit in units])
 
+    def test_header_only_v3_baseline_projection_is_byte_identical_to_historical_v2(self) -> None:
+        source = packet_json_v4(
+            [
+                tcp_record(1, 1000, b"attack"),
+                tcp_record(2, 1006, b"payload"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(root, "fixed_packet_count", group_size=2)
+            _manifest, units = self.run_step15(source, active_config, root)
+
+        v3_unit = units[0]
+        historical_v2_unit = copy.deepcopy(v3_unit)
+        historical_v2_unit["schema_version"] = "compact_modification_unit_v2"
+        historical_v2_unit.pop("capabilities")
+        historical_v2_unit.pop("editable_target_presence")
+        historical_v2_unit.pop("model_visible_projection")
+        structure = load_prompt_input_json_data_structure_from_config(active_config)
+        _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
+        v3_parts = build_compact_patch_prompt_parts(
+            prompt_unit=v3_unit,
+            prompt_input_structure=structure,
+            instruction_lines=instruction_lines,
+        )
+        historical_parts = build_compact_patch_prompt_parts(
+            prompt_unit=historical_v2_unit,
+            prompt_input_structure=structure,
+            instruction_lines=instruction_lines,
+        )
+
+        self.assertEqual(historical_parts["json_prompt_input"], v3_parts["json_prompt_input"])
+        self.assertEqual(historical_parts["content"], v3_parts["content"])
+
+    def test_canonical_payload_only_v3_uses_first_alias_owner_without_editable_headers(self) -> None:
+        records = [
+            tcp_record(1, 1000, b"attack"),
+            tcp_record(2, 1000, b"attack"),
+        ]
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "fixed_packet_count",
+                group_size=1,
+                modification_strategy="canonical_payload_only_strategy_v1",
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+            checker_summary = check_v3_units(
+                manifest,
+                root
+                / "05_groups"
+                / "fixed_packet_count_size_001"
+                / "compact_modification_units_manifest_v3.json",
+            )
+
+        self.assertEqual("compact_modification_units_manifest_v3", manifest["metadata"]["schema_version"])
+        self.assertEqual(
+            {
+                "strategy": "canonical_payload_only_strategy_v1",
+                "allows_header_edits": False,
+                "allows_payload_edits": True,
+                "requires_payload_preservation": False,
+            },
+            manifest["metadata"]["capabilities"],
+        )
+        self.assertEqual(1, len(source["canonical_tcp_regions"]))
+        self.assertEqual(2, manifest["metadata"]["parent_group_count"])
+        payload_entries = [
+            entry
+            for unit in units
+            for entry in unit.get("canonical_payload_regions", [])
+        ]
+        self.assertEqual(1, len(payload_entries))
+        entry = payload_entries[0]
+        self.assertEqual("packet_000001", entry["ownership"]["representative_packet_id"])
+        self.assertEqual(units[0]["parent_group_id"], entry["ownership"]["owner_parent_group_id"])
+        self.assertEqual(units[0]["modification_unit_id"], entry["ownership"]["anchor_group_fragment_id"])
+        self.assertEqual(
+            ["packet_000001", "packet_000002"],
+            [alias["packet_id"] for alias in entry["physical_aliases"]],
+        )
+        self.assertTrue(all("physical_packets" not in unit for unit in units))
+        self.assertTrue(all(not unit["editable_target_presence"]["editable_headers_present"] for unit in units))
+        self.assertTrue(all(unit["editable_target_presence"]["editable_payload_present"] for unit in units))
+        target = entry["editable_regions"][0]
+        self.assertEqual(0, target["authorized_start_offset_bytes"])
+        self.assertEqual(6, target["authorized_end_offset_bytes"])
+        self.assertEqual(6, target["authorized_length_bytes"])
+        self.assertEqual(target["max_replacement_bytes"] * 2, target["max_replacement_hex_chars"])
+        self.assertEqual(6, manifest["metadata"]["editable_ownership_coverage"]["editable_canonical_payload_byte_count"])
+        self.assertEqual(6, checker_summary["canonical_payload_coverage"]["editable_canonical_payload_byte_count"])
+
+    def test_hybrid_v3_exposes_physical_headers_and_canonical_payload_once(self) -> None:
+        records = [
+            tcp_record(1, 1000, b"alpha"),
+            tcp_record(2, 1005, b"beta"),
+        ]
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="hybrid_header_canonical_payload_strategy_v1",
+            )
+            manifest, units = self.run_step15(source, active_config, root)
+            checker_summary = check_v3_units(
+                manifest,
+                root
+                / "05_groups"
+                / "flow_context_aware"
+                / "compact_modification_units_manifest_v3.json",
+            )
+
+        self.assertTrue(manifest["metadata"]["editable_header_regions_enabled"])
+        self.assertTrue(manifest["metadata"]["editable_payload_regions_enabled"])
+        self.assertEqual(
+            ["packet_000001", "packet_000002"],
+            [
+                packet["packet_id"]
+                for unit in units
+                for packet in unit.get("physical_packets", [])
+            ],
+        )
+        intervals = sorted(
+            (
+                entry["canonical_region_id"],
+                region["start_offset_bytes"],
+                region["end_offset_bytes"],
+            )
+            for unit in units
+            for entry in unit.get("canonical_payload_regions", [])
+            for region in entry["editable_regions"]
+        )
+        self.assertEqual(len(source["canonical_tcp_regions"]), len(intervals))
+        self.assertTrue(any(unit["editable_target_presence"]["editable_headers_present"] for unit in units))
+        self.assertTrue(any(unit["editable_target_presence"]["editable_payload_present"] for unit in units))
+        self.assertEqual(2, checker_summary["editable_header_region_count"] // 3)
+        self.assertGreater(checker_summary["editable_payload_region_count"], 0)
+        self.assertTrue(
+            all(
+                unit["token_plan"]["total_planned_tokens"]
+                == unit["token_plan"]["estimated_input_tokens"] + unit["token_plan"]["planned_output_tokens"]
+                for unit in units
+            )
+        )
+
+    def test_hybrid_header_target_only_unit_keeps_v3_visible_schema_and_header_skeleton(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"")])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "fixed_packet_count",
+                group_size=1,
+                modification_strategy="hybrid_header_canonical_payload_strategy_v1",
+            )
+            _manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(1, len(units))
+        self.assertEqual(
+            {
+                "editable_headers_present": True,
+                "editable_payload_present": False,
+            },
+            units[0]["editable_target_presence"],
+        )
+        structure = load_prompt_input_json_data_structure_from_config(active_config)
+        _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
+        parts = build_compact_patch_prompt_parts(
+            prompt_unit=units[0],
+            prompt_input_structure=structure,
+            instruction_lines=instruction_lines,
+        )
+        self.assertEqual("compact_modification_unit_v3", parts["json_prompt_input"]["schema_version"])
+        self.assertIn('"header_edits": []', parts["output_skeleton"])
+        self.assertNotIn('"patches": []', parts["output_skeleton"])
+
+    def test_payload_v3_uses_explicit_semantic_elements_before_adaptive_fallback(self) -> None:
+        payload = b"A" * 600
+        source = packet_json_v4([tcp_record(1, 1000, payload)])
+        source["canonical_tcp_regions"][0]["application_semantic_elements"] = [
+            {
+                "semantic_element_id": "element_a",
+                "semantic_type": "application_record",
+                "start_offset_bytes": 0,
+                "end_offset_bytes": 300,
+            },
+            {
+                "semantic_element_id": "element_b",
+                "semantic_type": "application_record",
+                "start_offset_bytes": 300,
+                "end_offset_bytes": 600,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="canonical_payload_only_strategy_v1",
+            )
+            active_config["llm"]["prompt_target_context"] = 3000
+            _manifest, units = self.run_step15(source, active_config, root)
+
+        entries = [
+            entry
+            for unit in units
+            for entry in unit.get("canonical_payload_regions", [])
+        ]
+        self.assertGreaterEqual(len(entries), 2)
+        self.assertTrue(
+            all(
+                entry["semantic_segmentation"]["semantic_segmentation_status"]
+                == "explicit_source_semantics"
+                for entry in entries
+            )
+        )
+        self.assertEqual(
+            {"element_a", "element_b"},
+            {
+                entry["semantic_segmentation"]["source_semantic_element_id"]
+                for entry in entries
+            },
+        )
+
+    def test_payload_v3_adaptive_fallback_is_balanced_contiguous_and_non_overlapping(self) -> None:
+        payload = bytes(index % 251 for index in range(1000))
+        source = packet_json_v4([tcp_record(1, 1000, payload)])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="canonical_payload_only_strategy_v1",
+            )
+            active_config["llm"]["prompt_target_context"] = 3000
+            manifest, units = self.run_step15(source, active_config, root)
+
+        targets = sorted(
+            (
+                region["start_offset_bytes"],
+                region["end_offset_bytes"],
+                entry["semantic_segmentation"],
+            )
+            for unit in units
+            for entry in unit.get("canonical_payload_regions", [])
+            for region in entry["editable_regions"]
+        )
+        self.assertGreater(len(targets), 1)
+        cursor = 0
+        lengths = []
+        for start, end, segmentation in targets:
+            self.assertEqual(cursor, start)
+            self.assertEqual("adaptive_byte_window", segmentation["mode"])
+            self.assertEqual("source_semantics_unavailable", segmentation["semantic_segmentation_status"])
+            lengths.append(end - start)
+            cursor = end
+        self.assertEqual(len(payload), cursor)
+        self.assertLessEqual(max(lengths) - min(lengths), 1)
+        self.assertEqual(0, manifest["metadata"]["editable_ownership_coverage"]["missing_editable_byte_count"])
+        self.assertEqual(0, manifest["metadata"]["editable_ownership_coverage"]["overlapping_editable_interval_count"])
+        self.assertTrue(
+            all(
+                unit["token_plan"]["overflow_tokens"] == 0
+                for unit in units
+            ),
+            [
+                (
+                    unit["modification_unit_id"],
+                    unit["token_plan"]["overflow_tokens"],
+                    unit["token_plan"]["total_planned_tokens"],
+                    unit["token_plan"]["prompt_target_context"],
+                )
+                for unit in units
+                if unit["token_plan"]["overflow_tokens"] != 0
+            ],
+        )
+
+    def test_payload_v3_fails_when_an_indivisible_byte_exceeds_the_token_target(self) -> None:
+        source = packet_json_v4([tcp_record(1, 1000, b"x")])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "flow_context_aware",
+                modification_strategy="canonical_payload_only_strategy_v1",
+            )
+            active_config["llm"]["prompt_target_context"] = 1200
+            with self.assertRaisesRegex(
+                ValueError,
+                "indivisible_canonical_payload_byte_exceeds_prompt_target_context",
+            ):
+                self.run_step15(source, active_config, root)
+
+    def test_fixed_size_header_parent_group_fragments_without_splitting_packets(self) -> None:
+        records = [
+            tcp_record(packet_number, 1000 + packet_number * 10, b"")
+            for packet_number in range(1, 21)
+        ]
+        source = packet_json_v4(records)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            active_config = config(
+                root,
+                "fixed_packet_count",
+                group_size=20,
+            )
+            active_config["llm"]["prompt_target_context"] = 1800
+            manifest, units = self.run_step15(source, active_config, root)
+
+        self.assertEqual(1, manifest["metadata"]["parent_group_count"])
+        self.assertGreater(len(units), 1)
+        covered_packet_ids = [
+            packet["packet_id"]
+            for unit in units
+            for packet in unit["physical_packets"]
+        ]
+        self.assertEqual(
+            [record["packet_id"] for record in records],
+            covered_packet_ids,
+        )
+        self.assertEqual(len(covered_packet_ids), len(set(covered_packet_ids)))
+        self.assertTrue(
+            all(unit["token_plan"]["overflow_tokens"] == 0 for unit in units)
+        )
+
     def test_flow_context_aware_groups_by_tcp_connection_and_propagates_non_editable_context(self) -> None:
         first_flow_records = [tcp_record(packet_number, 1000 + packet_number, b"a") for packet_number in [1, 3, 5]]
         second_flow_records = [tcp_record(packet_number, 2000 + packet_number, b"b") for packet_number in [2, 4]]
@@ -445,9 +784,9 @@ class CanonicalStep15Tests(unittest.TestCase):
                 "flow_context_aware",
             )
             manifest, units = self.run_step15(source, active_config, root)
-            checker_summary = check_header_only_units(
+            checker_summary = check_v3_units(
                 manifest,
-                root / "05_groups" / "flow_context_aware" / "compact_modification_units_manifest_v2.json",
+                root / "05_groups" / "flow_context_aware" / "compact_modification_units_manifest_v3.json",
             )
 
         connection_ids = {connection["tcp_connection_id"] for connection in source["tcp_connections"]}
@@ -461,7 +800,7 @@ class CanonicalStep15Tests(unittest.TestCase):
         self.assertEqual(2, len(units))
         self.assertEqual("compact_patch_token_budget_v2", manifest["metadata"]["token_budget_policy"])
         self.assertEqual("flow_context_aware", manifest["metadata"]["grouping_policy"])
-        self.assertIsNone(manifest["metadata"]["group_size_packets"])
+        self.assertNotIn("group_size_packets", manifest["metadata"])
         self.assertEqual(5, manifest["metadata"]["physical_parent_group_coverage"]["covered_physical_packet_count"])
         self.assertEqual(connection_ids, {unit["fragment_flow_context"]["flow_id"] for unit in units})
         self.assertEqual(2, checker_summary["flow_context_parent_count"])
@@ -713,9 +1052,9 @@ class CanonicalStep15Tests(unittest.TestCase):
             active_config = enable_ids_context(config(root, "fixed_packet_count", group_size=1))
             write_pre_bundle(root, active_config, pre_bundle(alerts))
             manifest, units = self.run_step15(source, active_config, root)
-            checker_summary = check_header_only_units(
+            checker_summary = check_v3_units(
                 manifest,
-                root / "05_groups" / "fixed_packet_count_size_001" / "compact_modification_units_manifest_v2.json",
+                root / "05_groups" / "fixed_packet_count_size_001" / "compact_modification_units_manifest_v3.json",
             )
 
         context = units[0]["ids_context"]
@@ -742,6 +1081,19 @@ class CanonicalStep15Tests(unittest.TestCase):
             self.assertNotIn(hidden_term, serialized)
         self.assertEqual(3, checker_summary["ids_context_total_materialized_records"])
         self.assertTrue(manifest["metadata"]["ids_context_enabled"])
+        self.assertNotIn("model_visible_projection", manifest["metadata"])
+        self.assertNotIn("model_visible_projection", units[0])
+        structure = load_prompt_input_json_data_structure_from_config(active_config)
+        _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
+        prompt_parts = build_compact_patch_prompt_parts(
+            prompt_unit=units[0],
+            prompt_input_structure=structure,
+            instruction_lines=instruction_lines,
+        )
+        self.assertEqual(
+            "compact_modification_unit_v3",
+            prompt_parts["json_prompt_input"]["schema_version"],
+        )
 
     def test_conservative_propagation_deduplicates_alerts_and_uses_unit_packet_ids(self) -> None:
         source = packet_json_v4([tcp_record(1, 1000, b"a"), tcp_record(2, 1010, b"b")])

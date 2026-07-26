@@ -216,7 +216,6 @@ def build_worst_case_patch_output(
         prompt_input,
         payload_replacement_size_policy=payload_replacement_size_policy,
     )
-
     output: dict[str, Any] = {
         "schema_version": PATCH_OUTPUT_SCHEMA_VERSION,
         "parent_group_id": parent_group_id,
@@ -310,7 +309,7 @@ def estimate_worst_case_output_tokens(
 def load_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
     llm_config = config.get("llm")
     if not isinstance(llm_config, dict):
-        raise ValueError("Active V2 configs require an llm object.")
+        raise ValueError("Active compact-patch configs require an llm object.")
     if "chars_per_token_estimate" in llm_config:
         raise ValueError(
             "llm.chars_per_token_estimate is obsolete; use "
@@ -318,12 +317,12 @@ def load_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
         )
     if "token_budget_safety_factor" in llm_config:
         raise ValueError(
-            "llm.token_budget_safety_factor is obsolete and must not be used by the V2 token plan."
+            "llm.token_budget_safety_factor is obsolete and must not be used by the active token plan."
         )
 
     token_budget_config = llm_config.get("token_budget")
     if not isinstance(token_budget_config, dict):
-        raise ValueError("Active V2 configs require an llm.token_budget object.")
+        raise ValueError("Active compact-patch configs require an llm.token_budget object.")
     required_fields = (
         "policy",
         "chars_per_token_estimate",
@@ -332,7 +331,7 @@ def load_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
     missing_fields = [field for field in required_fields if field not in token_budget_config]
     if missing_fields:
         raise ValueError(
-            "llm.token_budget is missing required V2 fields: " + ", ".join(missing_fields)
+            "llm.token_budget is missing required fields: " + ", ".join(missing_fields)
         )
 
     policy = str(token_budget_config["policy"])

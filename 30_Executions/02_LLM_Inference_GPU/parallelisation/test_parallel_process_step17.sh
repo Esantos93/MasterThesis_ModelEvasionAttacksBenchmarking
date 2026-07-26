@@ -32,7 +32,7 @@ for required_path in \
   "${RUNNER}" \
   "${SAMPLE_BUILDER}" \
   "${CONFIG_PATH}" \
-  "${PROMPT_DIR}/prompt_units_manifest_v1.json" \
+  "${PROMPT_DIR}/prompt_units_manifest_v2.json" \
   "${MODEL_PATH}"; do
   if [[ ! -e "${required_path}" ]]; then
     echo "Required path not found: ${required_path}"
@@ -57,7 +57,7 @@ echo "Process A: batch=${BATCH_SIZE_A}, gpu_memory_utilization=${VLLM_GPU_MEMORY
 echo "Process B: batch=${BATCH_SIZE_B}, gpu_memory_utilization=${VLLM_GPU_MEMORY_UTILIZATION_B}, max_model_len=${RUNTIME_MAX_MODEL_LEN_B}"
 
 python3 "${SAMPLE_BUILDER}" \
-  --input-manifest "${PROMPT_DIR}/prompt_units_manifest_v1.json" \
+  --input-manifest "${PROMPT_DIR}/prompt_units_manifest_v2.json" \
   --output-manifest "${sample_manifest}" \
   --sample-size "${SAMPLE_SIZE}" \
   --sample-method "${SAMPLE_METHOD}"

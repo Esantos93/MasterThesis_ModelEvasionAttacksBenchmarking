@@ -30,7 +30,7 @@ def write_json(path: Path, data: Any) -> None:
 
 def parse_variant(value: str) -> tuple[str, Path]:
     if "=" not in value:
-        raise argparse.ArgumentTypeError("Variant must use NAME=/path/to/prompt_units_manifest_v1.json.")
+        raise argparse.ArgumentTypeError("Variant must use NAME=/path/to/prompt_units_manifest_v2.json.")
     name, raw_path = value.split("=", 1)
     name = name.strip()
     if not name or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):

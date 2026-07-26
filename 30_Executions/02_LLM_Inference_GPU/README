@@ -59,7 +59,7 @@ QWEN32_PROMPT_DIR="/tf/thesis_Santos/02_OutputFiles/<qwen_experiment>/06_prompts
 ```
 
 Only enabled models require a prompt path. The preflight verifies each
-directory and its `prompt_units_manifest_v1.json` before starting the first
+directory and its `prompt_units_manifest_v2.json` before starting the first
 model. In `smoke` mode, only the model-specific Step 17 smoke limit is applied
 to the existing prompt population. In `full` mode, Step 17 consumes the whole
 existing manifest. Step 16 is neither executed nor compressed in this mode.
@@ -260,8 +260,8 @@ IDs. The sample is deterministic and stratified by parent-flow packet count:
 
 ```bash
 python3 /tf/thesis_Santos/04_Steps/build_paired_prompt_manifest_samples.py \
-  --variant ctx4096=/path/to/ctx4096/prompt_units_manifest_v1.json \
-  --variant ctx6144=/path/to/ctx6144/prompt_units_manifest_v1.json \
+  --variant ctx4096=/path/to/ctx4096/prompt_units_manifest_v2.json \
+  --variant ctx6144=/path/to/ctx6144/prompt_units_manifest_v2.json \
   --output-dir /path/to/paired_same_traffic_10000 \
   --target-packet-count 10000 \
   --seed flow_context_target_comparison_v1
