@@ -136,14 +136,14 @@ def config(
     output_root: Path,
     grouping_policy: str,
     group_size: int | None = None,
-    header_policy_path: str | None = None,
+    header_policy: str = "conservative_header_editability_v1",
 ) -> dict:
     pipeline = {
         "grouping_policy": grouping_policy,
         "grouping_unit": "physical_packet",
         "experiment_config_label": f"test-{grouping_policy}",
         "modification_strategy": "header_only_strategy_v1",
-        "header_editability_policy_path": header_policy_path or "step_15_grouping/01_editability_policies/header_v1.json",
+        "header_editability_policy": header_policy,
     }
     if group_size is not None:
         pipeline["group_size_packets"] = group_size
@@ -387,38 +387,16 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            policy_path = root / "expanded_header_policy.json"
-            baseline_policy = json.loads(
-                Path("step_15_grouping/01_editability_policies/header_v1.json").read_text(encoding="utf-8")
-            )
-            identification_rule = {
-                "rule_id": "test_ipv4_identification_editable",
-                "protocol": "ipv4",
-                "field": "identification",
-                "classification": "llm_editable_headers_region",
-                "editable": True,
-                "allowed_operations": ["replace_uint"],
-                "constraints": {"encoding": "uint16_be", "min": 0, "max": 65535},
-                "source_refs": [],
-            }
-            baseline_policy["policy_id"] = "test_expanded_header_editability"
-            baseline_policy["rules"].insert(2, identification_rule)
-            for rule in baseline_policy["rules"]:
-                fields = rule.get("fields", [])
-                if "ipv4.identification" in fields:
-                    rule["fields"] = [field for field in fields if field != "ipv4.identification"]
-            policy_path.write_text(json.dumps(baseline_policy), encoding="utf-8")
-
             active_config = config(
                 root,
                 "fixed_packet_count",
                 group_size=6,
-                header_policy_path=str(policy_path),
+                header_policy="aggressive_header_editability_v1",
             )
             manifest, units = self.run_step15(source, active_config, root)
 
-        self.assertEqual(
-            ["ipv4.identification", "ipv4.tos", "ipv4.ttl", "tcp.window"],
+        self.assertIn(
+            "ipv4.identification",
             manifest["metadata"]["expected_editable_header_fields"],
         )
         editable_regions = [
@@ -428,10 +406,28 @@ class CanonicalStep15Tests(unittest.TestCase):
             for region in packet["header_field_classifications"]
         ]
         self.assertEqual(
-            {"ipv4.identification", "ipv4.tos", "ipv4.ttl", "tcp.window"},
+            {
+                "ipv4.tos",
+                "ipv4.identification",
+                "ipv4.ttl",
+                "tcp.window",
+                "ipv4.flags_fragment_offset",
+                "ipv4.flags.reserved",
+                "ipv4.flags.dont_fragment",
+                "ipv4.flags.more_fragments",
+                "ipv4.fragment_offset_units",
+                "tcp.flags.cwr",
+                "tcp.flags.ece",
+                "tcp.flags.urg",
+                "tcp.flags.psh",
+                "tcp.flags.rst",
+                "tcp.flags.syn",
+                "tcp.flags.fin",
+                "tcp.urgent_pointer",
+            },
             {region["field"] for region in editable_regions},
         )
-        self.assertEqual([8], [unit["editable_header_region_count"] for unit in units])
+        self.assertEqual([34], [unit["editable_header_region_count"] for unit in units])
 
     def test_flow_context_aware_groups_by_tcp_connection_and_propagates_non_editable_context(self) -> None:
         first_flow_records = [tcp_record(packet_number, 1000 + packet_number, b"a") for packet_number in [1, 3, 5]]
