@@ -78,8 +78,9 @@
     "grouping_policy": "fixed_packet_count",
     "grouping_unit": "canonical_tcp_region",
     "group_size_packets": 3,
-    "traffic_selection_policy": "conservative_v1",
-    "validation_policy": "reject_invalid",
+    "header_editability_policy": "conservative_header_editability_v1",
+    "pre_llm_traffic_selection_policy": "conservative_v1",
+    "post_llm_traffic_validation_policy": "reject_invalid_v1",
     "signature_mutation_weight": 0.0
   }
 }

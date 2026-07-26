@@ -77,9 +77,9 @@
     "grouping_unit": "physical_packet",
     "group_size_packets": 6,
     "modification_strategy": "header_only_strategy_v1",
-    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_expanded_v1.json",
-    "traffic_selection_policy": "conservative_v1",
-    "validation_policy": "reject_invalid",
+    "header_editability_policy": "aggressive_header_editability_v1",
+    "pre_llm_traffic_selection_policy": "conservative_v1",
+    "post_llm_traffic_validation_policy": "reject_invalid_v1",
     "signature_mutation_weight": 0.0
   }
 }

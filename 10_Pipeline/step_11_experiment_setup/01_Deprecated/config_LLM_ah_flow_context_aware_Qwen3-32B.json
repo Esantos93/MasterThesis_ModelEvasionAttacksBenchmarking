@@ -1,7 +1,7 @@
 {
   "experiment": {
     "experiment_id": "exp_cicids2017_ah_flow_context_aware_Qwen3_32B",
-    "description": "Deprecated aggressive headers-only CICIDS2017 candidate retired when the family was reduced to Llama 3.1 8B and Gemma 4 26B-A4B because of full-run runtime cost. It used Flow-context-aware grouping and expanded_header_editability_v1 with non-editable payload. Model used Qwen/Qwen3-32B. Conservative control: experiment 08.",
+    "description": "Deprecated aggressive headers-only CICIDS2017 candidate retired when the family was reduced to Llama 3.1 8B and Gemma 4 26B-A4B because of full-run runtime cost. It used Flow-context-aware grouping and aggressive_header_editability_v1 with non-editable payload. Model used Qwen/Qwen3-32B. Conservative control: experiment 08.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -76,9 +76,9 @@
     "grouping_policy": "flow_context_aware",
     "grouping_unit": "physical_packet",
     "modification_strategy": "header_only_strategy_v1",
-    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_expanded_v1.json",
-    "traffic_selection_policy": "conservative_v1",
-    "validation_policy": "reject_invalid",
+    "header_editability_policy": "aggressive_header_editability_v1",
+    "pre_llm_traffic_selection_policy": "conservative_v1",
+    "post_llm_traffic_validation_policy": "reject_invalid_v1",
     "signature_mutation_weight": 0.0
   }
 }

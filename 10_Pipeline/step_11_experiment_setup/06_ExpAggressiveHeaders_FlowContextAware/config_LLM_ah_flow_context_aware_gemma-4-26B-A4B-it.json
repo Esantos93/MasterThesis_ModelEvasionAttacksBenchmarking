@@ -1,7 +1,7 @@
 {
   "experiment": {
     "experiment_id": "exp_cicids2017_ah_flow_context_aware_gemma-4-26B-A4B-it",
-    "description": "Aggressive headers-only CICIDS2017 experiment using the Flow-context-aware grouping policy and expanded_header_editability_v1. Payload remains non-editable. Model used google/gemma-4-26B-A4B-it. Conservative control: experiment 07.",
+    "description": "Aggressive headers-only CICIDS2017 experiment using the Flow-context-aware grouping policy and aggressive_header_editability_v1. Payload remains non-editable. Model used google/gemma-4-26B-A4B-it. Conservative control: experiment 07.",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -76,9 +76,9 @@
     "grouping_policy": "flow_context_aware",
     "grouping_unit": "physical_packet",
     "modification_strategy": "header_only_strategy_v1",
-    "header_editability_policy_path": "step_15_grouping/01_editability_policies/header_expanded_v1.json",
-    "traffic_selection_policy": "conservative_v1",
-    "validation_policy": "reject_invalid",
+    "header_editability_policy": "aggressive_header_editability_v1",
+    "pre_llm_traffic_selection_policy": "conservative_v1",
+    "post_llm_traffic_validation_policy": "reject_invalid_v1",
     "signature_mutation_weight": 0.0
   }
 }
