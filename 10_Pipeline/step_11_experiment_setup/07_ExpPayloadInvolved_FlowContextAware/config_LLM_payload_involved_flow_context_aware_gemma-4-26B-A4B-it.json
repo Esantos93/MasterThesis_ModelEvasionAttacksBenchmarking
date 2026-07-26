@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_payload_involved_flow_context_aware_gemma-4-26B-A4B-it",
+    "experiment_id": "exp_cicids2017_flow_context_aware_gemma-4-26B-A4B-it",
     "description": "Payload-involved CICIDS2017 comparison run using Flow-context-aware grouping, conservative header editability, and the hybrid header plus canonical payload modification strategy. Model used google/gemma-4-26B-A4B-it.",
     "output_root": "/home/santos/Experiments"
   },
