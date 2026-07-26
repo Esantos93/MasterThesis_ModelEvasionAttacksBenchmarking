@@ -62,14 +62,18 @@ def policy_path_from_name(policy_name: str) -> Path:
     return Path(__file__).with_name(f"mapping_policy_{policy_name}.json")
 
 
-# This function chooses the mapping policy path. CLI overrides config; config overrides the step default.
+# This function chooses the mapping policy path. CLI overrides the named Step 13 config policy.
 def resolve_mapping_policy_path(config: dict[str, Any], cli_policy_path: str | Path | None) -> Path:
     if cli_policy_path:
         return Path(cli_policy_path).expanduser()
 
-    policy_value = str(config.get("pipeline", {}).get("traffic_selection_policy", "")).strip()
+    policy_value = str(
+        config.get("pipeline", {}).get("pre_llm_traffic_selection_policy", "")
+    ).strip()
     if not policy_value:
-        return DEFAULT_MAPPING_POLICY_FILE
+        raise ValueError(
+            "pipeline.pre_llm_traffic_selection_policy must be a non-empty string."
+        )
     if policy_value.endswith(".json") or "/" in policy_value or "\\" in policy_value:
         return Path(policy_value).expanduser()
     return policy_path_from_name(policy_value)
@@ -909,7 +913,7 @@ def parse_cli_args() -> argparse.Namespace:
     )
     add(
         "--mapping-policy-file",
-        help="Optional JSON packet mapping policy override. Defaults to pipeline.traffic_selection_policy.",
+        help="Optional JSON packet mapping policy override. Defaults to pipeline.pre_llm_traffic_selection_policy.",
     )
     add(
         "--matching-policy",
