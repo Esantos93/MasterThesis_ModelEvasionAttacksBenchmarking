@@ -1038,6 +1038,8 @@ def validate_merged_traffic(
                             )
                         )
 
+    accepted_effective_edit_packet_ids = set(patches_by_packet) | set(recorded_payload_projection_changes_by_packet)
+    llm_output_failure_only_packet_id_set = llm_output_failure_packet_id_set - accepted_effective_edit_packet_ids
     packet_id_counts = Counter(
         str(record.get("packet_id"))
         for record in traffic
@@ -1226,17 +1228,18 @@ def validate_merged_traffic(
         group_semantic_invalid = any(item["severity"] == "error" and str(item["reason"]).startswith(("ipv4_", "tcp_")) for item in group["issues"])
         group_semantic_warning = any(item["severity"] == "warning" and str(item["reason"]).startswith(("ipv4_", "tcp_")) for item in group["issues"])
         group_has_payload_edits = any(str(packet_id) in explicit_payload_edits_by_packet for packet_id in group["packet_ids"])
-        group_has_llm_output_failure = any(str(packet_id) in llm_output_failure_packet_id_set for packet_id in group["packet_ids"])
+        group_has_llm_output_failure_provenance = any(str(packet_id) in llm_output_failure_packet_id_set for packet_id in group["packet_ids"])
+        group_requires_llm_output_failure_preservation = any(str(packet_id) in llm_output_failure_only_packet_id_set for packet_id in group["packet_ids"])
         group_status = (
             "Invalid Traffic"
             if group_has_error
             else "LLM Output Failure"
-            if group_has_llm_output_failure
+            if group_requires_llm_output_failure_preservation
             else "Accepted for Reconstruction"
         )
         if group_has_error:
             invalid_group_keys.add(group["group_key"])
-        if group_has_llm_output_failure:
+        if group_requires_llm_output_failure_preservation:
             llm_output_failure_group_keys.add(group["group_key"])
         group_results.append(
             {
@@ -1247,7 +1250,8 @@ def validate_merged_traffic(
                 "semantic_protocol_status": "invalid" if group_semantic_invalid else "potentially_invalid" if group_semantic_warning else "valid",
                 "payload_functional_coherence_status": "indeterminate" if group_has_payload_edits else "not_applicable",
                 "invalid_traffic": group_has_error,
-                "llm_output_failure": group_has_llm_output_failure,
+                "llm_output_failure": group_requires_llm_output_failure_preservation,
+                "llm_output_failure_provenance": group_has_llm_output_failure_provenance,
                 "packet_count": len(group["record_indexes"]),
                 "packet_ids": group["packet_ids"],
                 "record_indexes": group["record_indexes"],
@@ -1267,7 +1271,8 @@ def validate_merged_traffic(
         record = item["record"]
         group_invalid = item["group_key"] in invalid_group_keys
         packet_id = record.get("packet_id") if isinstance(record, dict) else None
-        llm_output_failure = packet_id is not None and str(packet_id) in llm_output_failure_packet_id_set
+        llm_output_failure_provenance = packet_id is not None and str(packet_id) in llm_output_failure_packet_id_set
+        llm_output_failure = packet_id is not None and str(packet_id) in llm_output_failure_only_packet_id_set
         original_packet = original_by_packet_id.get(str(packet_id)) if packet_id is not None else None
         packet_result = {
             "group_key": item["group_key"],
@@ -1286,6 +1291,7 @@ def validate_merged_traffic(
             ),
             "invalid_traffic": group_invalid,
             "llm_output_failure": llm_output_failure,
+            "llm_output_failure_provenance": llm_output_failure_provenance,
             "record_has_direct_error": item["record_has_error"],
             "group_rejection_reason": (
                 "step17_llm_output_failure_group"
@@ -1314,6 +1320,28 @@ def validate_merged_traffic(
         elif isinstance(record, dict):
             accepted_packets.append(record)
             reconstruction_packets.append(record)
+
+    accepted_packet_id_set = {
+        str(packet["packet_id"])
+        for packet in accepted_packets
+        if isinstance(packet, dict) and packet.get("packet_id") is not None
+    }
+    validated_effective_payload_projection_changes = sorted(
+        [
+            deepcopy(change)
+            for change in recorded_payload_projection_changes
+            if isinstance(change, dict)
+            and change.get("packet_id") is not None
+            and str(change["packet_id"]) in accepted_packet_id_set
+        ],
+        key=lambda item: (
+            str(item.get("packet_id", "")),
+            int(item.get("payload_start_offset_bytes", -1)),
+            str(item.get("canonical_region_id", "")),
+            str(item.get("prompt_unit_id", "")),
+            int(item.get("patch_index", 0)),
+        ),
+    )
 
     reference_missing_packet_ids = []
     if original_by_packet_id:
@@ -1365,6 +1393,7 @@ def validate_merged_traffic(
         "llm_output_failure_packets": llm_output_failure_packets,
         "preserved_invalid_traffic_packets": preserved_invalid_traffic_packets,
         "preserved_llm_output_failure_packets": preserved_llm_output_failure_packets,
+        "validated_effective_payload_projection_changes": validated_effective_payload_projection_changes,
         "invalid_traffic_groups": sorted(
             [group for group in group_results if group["invalid_traffic"]],
             key=lambda item: item["group_key"],
@@ -1385,6 +1414,7 @@ def validate_merged_traffic(
             "llm_output_failure_group_count": len(llm_output_failure_groups),
             "llm_output_failure_rejected_group_count": len(llm_output_failure_group_keys),
             "llm_output_failure_packet_count": len(llm_output_failure_packet_id_set),
+            "llm_output_failure_only_packet_count": len(llm_output_failure_only_packet_id_set),
             "llm_output_failure_rejected_packet_count": len(llm_output_failure_packets),
             "llm_output_failure_preserved_packet_count": len(preserved_llm_output_failure_packets),
             "error_count": error_count,
@@ -1403,6 +1433,7 @@ def validate_merged_traffic(
             ),
             "no_effect_edit_count": len(no_effect_edits),
             "payload_edit_count": len(payload_edits),
+            "validated_effective_payload_projection_change_count": len(validated_effective_payload_projection_changes),
             "explicit_payload_edit_count": sum(len(edits) for edits in explicit_payload_edits_by_packet.values()),
             "explicit_header_edit_count": sum(len(edits) for edits in explicit_header_edits_by_packet.values()),
             "derived_header_change_count": sum(len(changes) for changes in recorded_derived_by_packet.values()),
@@ -1480,9 +1511,15 @@ def run_validation(
                 "invalid_traffic_source": "Step 19 maps validation errors in accepted Step 18 groups to Invalid Traffic.",
                 "post_reconstruction_policy": (
                     "The Step 19 validated traffic artifact preserves the full POST packet universe for downstream "
-                    "PCAP reconstruction. Packets from LLM Output Failure or Invalid Traffic groups are emitted as "
-                    "original Step 14 no-op records when the reference packet is available, while their failure labels "
-                    "remain in this validation report for model-output and traffic-validity metrics."
+                    "PCAP reconstruction. Packets from Invalid Traffic groups are emitted as original Step 14 no-op "
+                    "records when the reference packet is available. Packets with LLM Output Failure provenance are "
+                    "preserved as original only when no accepted effective edit from another prompt unit survives "
+                    "validation for the same physical packet."
+                ),
+                "step20_payload_projection_source": (
+                    "Step 20 must consume validated_effective_payload_projection_changes for payload byte-level "
+                    "projection auditing. The collection contains only Step 18 payload projections that survive "
+                    "Step 19 validation and remain present in validated_modified_traffic."
                 ),
                 "unexpectedly_uncovered_warning_policy": (
                     "Every packet absent from both accepted and failed Step 17 prompt-unit traceability emits a warning."
@@ -1504,6 +1541,7 @@ def run_validation(
         "invalid_traffic_groups": validation["invalid_traffic_groups"],
         "group_results": validation["group_results"],
         "packet_results": validation["packet_results"],
+        "validated_effective_payload_projection_changes": validation["validated_effective_payload_projection_changes"],
     }
     valid_output = {
         "metadata": {
@@ -1519,10 +1557,12 @@ def run_validation(
             "accepted_group_count": validation["summary"]["accepted_group_count"],
             "invalid_traffic_group_count": validation["summary"]["invalid_traffic_group_count"],
             "llm_output_failure_group_count": validation["summary"]["llm_output_failure_group_count"],
-            "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_failed_or_invalid_groups",
+            "validated_effective_payload_projection_change_count": validation["summary"]["validated_effective_payload_projection_change_count"],
+            "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_invalid_and_failure_only_packets",
             "post_llm_traffic_validation_policy": validation_policy.as_metadata(),
         },
         "traffic": validation["reconstruction_packets"],
+        "validated_effective_payload_projection_changes": validation["validated_effective_payload_projection_changes"],
     }
     write_json(report_path, report)
     write_json(valid_output_path, valid_output)
