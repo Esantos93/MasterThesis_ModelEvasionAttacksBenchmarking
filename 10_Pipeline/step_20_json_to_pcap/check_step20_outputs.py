@@ -13,7 +13,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.naming import sanitize_name_component
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v4"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v5"
 EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION = "validated_modified_traffic_v4"
 DEFAULT_EXPERIMENT_ROOT = Path("/home/santos/Experiments/exp_cicids2017_baseline_004")
 DEFAULT_EXPERIMENT_CONFIG_LABEL = "baseline-004-headers-only-fixed-size-6"
@@ -204,6 +204,18 @@ def main() -> None:
         "network_protocol_validation.summary.network_protocol_validation_error_count",
         protocol_summary.get("network_protocol_validation_error_count") if isinstance(protocol_summary, dict) else None,
     )
+    add_zero_check(
+        failures,
+        "network_protocol_validation.summary.payload_projection_mismatch_count",
+        protocol_summary.get("payload_projection_mismatch_count") if isinstance(protocol_summary, dict) else None,
+    )
+    if isinstance(protocol_summary, dict) and "projected_net_payload_delta_bytes" in protocol_summary:
+        add_equal_check(
+            failures,
+            "network_protocol_validation.summary.realized_net_payload_delta_bytes",
+            protocol_summary.get("realized_net_payload_delta_bytes"),
+            protocol_summary.get("projected_net_payload_delta_bytes"),
+        )
 
     if not args.allow_payload_changes:
         for field in HEADER_ONLY_ZERO_FIELDS:

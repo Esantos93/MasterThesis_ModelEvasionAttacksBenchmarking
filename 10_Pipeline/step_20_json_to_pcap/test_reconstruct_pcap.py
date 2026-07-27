@@ -3,12 +3,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from common.modification_strategy import resolve_modification_strategy
 from step_20_json_to_pcap.reconstruct_pcap import (
     EXPECTED_INPUT_SCHEMA_VERSION,
-    PATCH_APPLICATION_SCHEMA_VERSION,
-    STEP18_MERGED_SCHEMA_VERSION,
     STEP19_FULL_POST_RECONSTRUCTION_POLICY,
     TcpReconstructionError,
     apply_ethernet_minimum_padding,
@@ -17,9 +16,9 @@ from step_20_json_to_pcap.reconstruct_pcap import (
     internet_checksum_is_valid,
     prepare_tcp_sequence_translation,
     reconstruct_validated_traffic,
-    step19_v4_source_contract_summary,
     tcp_option_kinds_from_bytes,
     translate_tcp_number,
+    validate_step19_effective_payload_projection_contract,
     validate_step19_v4_input,
 )
 
@@ -52,6 +51,7 @@ def step19_v4_metadata(
         "accepted_group_count": packet_count,
         "invalid_traffic_group_count": 0,
         "llm_output_failure_group_count": 0,
+        "validated_effective_payload_projection_change_count": 0,
         "post_reconstruction_policy": STEP19_FULL_POST_RECONSTRUCTION_POLICY,
         "post_llm_traffic_validation_policy": {"policy_id": "reject_invalid_v1"},
     }
@@ -485,7 +485,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             Path("validated_modified_traffic.json"),
             capabilities,
             FakeValidationPolicy(),
-        )
+        )[:2]
 
         self.assertEqual(EXPECTED_INPUT_SCHEMA_VERSION, metadata["schema_version"])
         self.assertEqual([], traffic)
@@ -519,60 +519,151 @@ class Step19InputSchemaTests(unittest.TestCase):
                 FakeValidationPolicy(),
             )
 
-    def test_payload_capable_v4_source_contract_summarizes_projection_evidence(self):
+    def test_rejects_legacy_full_post_reconstruction_policy(self):
+        validated = {
+            "metadata": {
+                **step19_v4_metadata(packet_count=0),
+                "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_failed_or_invalid_groups",
+            },
+            "traffic": [],
+            "validated_effective_payload_projection_changes": [],
+        }
+        capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
+
+        with self.assertRaisesRegex(ValueError, "full POST reconstruction policy"):
+            validate_step19_v4_input(
+                validated,
+                Path("validated_modified_traffic.json"),
+                capabilities,
+                FakeValidationPolicy(),
+            )
+
+    def test_payload_capable_requires_step19_effective_projection_collection(self):
+        validated = {
+            "metadata": step19_v4_metadata(packet_count=0),
+            "traffic": [],
+        }
+        capabilities = resolve_modification_strategy(
+            {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires validated_effective_payload_projection_changes"):
+            validate_step19_v4_input(
+                validated,
+                Path("validated_modified_traffic.json"),
+                capabilities,
+                FakeValidationPolicy(),
+            )
+
+    def test_rejects_projection_count_mismatch(self):
+        metadata = step19_v4_metadata(packet_count=1)
+        metadata["validated_effective_payload_projection_change_count"] = 2
+        capabilities = resolve_modification_strategy(
+            {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
+        )
+
+        with self.assertRaisesRegex(ValueError, "validated_effective_payload_projection_change_count"):
+            validate_step19_effective_payload_projection_contract(
+                projections=[PcapReconstructionIntegrationTests.payload_projection_changes(b"abcd")[0]],
+                projection_collection_present=True,
+                metadata=metadata,
+                traffic=[{"packet_id": "packet_000001", "evaluation_status": "Accepted for Reconstruction"}],
+                capabilities=capabilities,
+                input_json_path=Path("validated_modified_traffic.json"),
+            )
+
+    def test_rejects_unknown_projection_packet_id(self):
+        metadata = step19_v4_metadata(packet_count=1)
+        metadata["validated_effective_payload_projection_change_count"] = 1
+        capabilities = resolve_modification_strategy(
+            {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside the validated traffic universe"):
+            validate_step19_effective_payload_projection_contract(
+                projections=[PcapReconstructionIntegrationTests.payload_projection_changes(b"abcd")[0]],
+                projection_collection_present=True,
+                metadata=metadata,
+                traffic=[{"packet_id": "packet_999999", "evaluation_status": "Accepted for Reconstruction"}],
+                capabilities=capabilities,
+                input_json_path=Path("validated_modified_traffic.json"),
+            )
+
+    def test_rejects_projection_for_failure_only_packet(self):
+        metadata = step19_v4_metadata(packet_count=1)
+        metadata["validated_effective_payload_projection_change_count"] = 1
+        capabilities = resolve_modification_strategy(
+            {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
+        )
+
+        with self.assertRaisesRegex(ValueError, "LLM Output Failure-only"):
+            validate_step19_effective_payload_projection_contract(
+                projections=[PcapReconstructionIntegrationTests.payload_projection_changes(b"abcd")[0]],
+                projection_collection_present=True,
+                metadata=metadata,
+                traffic=[{"packet_id": "packet_000001", "evaluation_status": "LLM Output Failure", "llm_output_failure": True}],
+                capabilities=capabilities,
+                input_json_path=Path("validated_modified_traffic.json"),
+            )
+
+    def test_header_only_rejects_effective_payload_projection_collection(self):
+        metadata = step19_v4_metadata(packet_count=1)
+        metadata["validated_effective_payload_projection_change_count"] = 1
+        capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
+
+        with self.assertRaisesRegex(ValueError, "header-only reconstruction must not contain"):
+            validate_step19_effective_payload_projection_contract(
+                projections=[PcapReconstructionIntegrationTests.payload_projection_changes(b"abcd")[0]],
+                projection_collection_present=True,
+                metadata=metadata,
+                traffic=[{"packet_id": "packet_000001", "evaluation_status": "Accepted for Reconstruction"}],
+                capabilities=capabilities,
+                input_json_path=Path("validated_modified_traffic.json"),
+            )
+
+    def test_payload_capable_v4_source_contract_summarizes_step19_effective_projection_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
-            source_merged_json = temp_dir / "merged_modified_traffic.json"
             validation_report = temp_dir / "validation_report.json"
-            source_merged_json.write_text(
-                json.dumps(
-                    {
-                        "metadata": {"schema_version": STEP18_MERGED_SCHEMA_VERSION},
-                        "patch_application": {
-                            "schema_version": PATCH_APPLICATION_SCHEMA_VERSION,
-                            "explicit_payload_edits": [{"patch_index": 1}],
-                            "payload_edits": [{"patch_index": 1}],
-                            "derived_payload_projection_changes": [
-                                {
-                                    "packet_id": "packet_000001",
-                                    "physical_representation_id": "packet_000001:payload_region_000001:repr_000001",
-                                    "canonical_region_id": "payload_region_000001",
-                                    "payload_start_offset_bytes": 0,
-                                    "replaced_length_bytes": 3,
-                                    "replacement_length_bytes": 4,
-                                    "payload_length_delta_bytes": 1,
-                                    "original_segment_hex": "616263",
-                                    "replacement_hex": "61626364",
-                                    "requires_pipeline_recalculation": [
-                                        "ipv4.total_length",
-                                        "ipv4.checksum",
-                                        "tcp.checksum",
-                                        "tcp.seq_ack_length_projection",
-                                    ],
-                                }
-                            ],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
             validation_report.write_text(json.dumps({"metadata": {"schema_version": "merged_traffic_validation_report_v4"}}), encoding="utf-8")
             capabilities = resolve_modification_strategy(
                 {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
             )
             metadata = step19_v4_metadata(
                 packet_count=1,
-                source_merged_json=str(source_merged_json),
                 validation_report=str(validation_report),
             )
+            metadata["validated_effective_payload_projection_change_count"] = 1
+            projections = [
+                {
+                    "packet_id": "packet_000001",
+                    "physical_representation_id": "packet_000001:payload_region_000001:repr_000001",
+                    "canonical_region_id": "payload_region_000001",
+                    "payload_start_offset_bytes": 0,
+                    "replaced_length_bytes": 3,
+                    "replacement_length_bytes": 4,
+                    "payload_length_delta_bytes": 1,
+                    "original_segment_hex": "616263",
+                    "replacement_hex": "61626364",
+                    "requires_pipeline_recalculation": [
+                        "ipv4.total_length",
+                        "ipv4.checksum",
+                        "tcp.checksum",
+                        "tcp.seq_ack_length_projection",
+                    ],
+                }
+            ]
 
-            summary = step19_v4_source_contract_summary(
+            summary = validate_step19_effective_payload_projection_contract(
+                projections=projections,
+                projection_collection_present=True,
                 metadata=metadata,
+                traffic=[{"packet_id": "packet_000001", "evaluation_status": "Accepted for Reconstruction"}],
                 capabilities=capabilities,
                 input_json_path=temp_dir / "09_validation" / "branch" / "validated_modified_traffic.json",
             )
 
-        self.assertEqual("loaded_from_step18_patch_application_report_v4", summary["payload_projection_evidence_status"])
+        self.assertEqual("loaded_from_step19_validated_effective_payload_projection_changes_v1", summary["payload_projection_evidence_status"])
         self.assertEqual(1, summary["projection_change_count"])
         self.assertEqual(1, summary["length_delta_projection_count"])
         self.assertEqual(1, summary["net_payload_delta_bytes"])
@@ -691,55 +782,34 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         ]
 
     @classmethod
-    def write_step19_v4_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes) -> tuple[Path, Path]:
-        source_merged_json = root / "merged_modified_traffic.json"
+    def write_step19_v4_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes) -> tuple[Path, list[dict]]:
         validation_report = root / "validation_report.json"
         payload_capable = strategy in {
             "canonical_payload_only_strategy_v1",
             "hybrid_header_canonical_payload_strategy_v1",
         }
         projections = cls.payload_projection_changes(first_payload) if payload_capable else []
-        payload_edits = [{"patch_index": 1, "edit_kind": "canonical_payload"}] if projections else []
-        header_edits = (
-            [{"patch_index": 2, "edit_kind": "physical_header", "field": "ipv4.ttl"}]
-            if strategy in {"header_only_strategy_v1", "hybrid_header_canonical_payload_strategy_v1"}
-            else []
-        )
-        source_merged_json.write_text(
-            json.dumps(
-                {
-                    "metadata": {
-                        "schema_version": STEP18_MERGED_SCHEMA_VERSION,
-                        "experiment_id": "test-step20-v4",
-                        "experiment_config_label": "test-step20-v4",
-                    },
-                    "patch_application": {
-                        "schema_version": PATCH_APPLICATION_SCHEMA_VERSION,
-                        "explicit_header_edits": header_edits,
-                        "explicit_payload_edits": payload_edits,
-                        "payload_edits": payload_edits,
-                        "derived_payload_projection_changes": projections,
-                    },
-                    "traffic": [],
-                }
-            ),
-            encoding="utf-8",
-        )
         validation_report.write_text(
             json.dumps(
                 {
                     "metadata": {"schema_version": "merged_traffic_validation_report_v4"},
                     "summary": {
-                        "explicit_payload_edit_count": len(payload_edits),
-                        "derived_payload_projection_change_count": len(projections),
+                        "validated_effective_payload_projection_change_count": len(projections),
                     },
+                    "validated_effective_payload_projection_changes": projections,
                 }
             ),
             encoding="utf-8",
         )
-        return source_merged_json, validation_report
+        return validation_report, projections
 
-    def run_reconstruction_fixture(self, *, strategy: str, traffic: list[dict]) -> tuple[dict, Path]:
+    def run_reconstruction_fixture(
+        self,
+        *,
+        strategy: str,
+        traffic: list[dict],
+        projections_override: list[dict] | None = None,
+    ) -> tuple[dict, Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -748,20 +818,25 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         output_pcap = root / "modified_traffic.pcap"
         report_path = root / "reconstruction_report.json"
         self.write_reference_pcap(reference_pcap)
-        source_merged_json, validation_report = self.write_step19_v4_source_artifacts(
+        validation_report, projections = self.write_step19_v4_source_artifacts(
             root=root,
             strategy=strategy,
             first_payload=bytes.fromhex(traffic[0]["payload_hex"]),
         )
+        if projections_override is not None:
+            projections = projections_override
+        metadata = step19_v4_metadata(
+            packet_count=len(traffic),
+            source_merged_json=str(root / "merged_modified_traffic.json"),
+            validation_report=str(validation_report),
+        )
+        metadata["validated_effective_payload_projection_change_count"] = len(projections)
         with input_json.open("w", encoding="utf-8") as output_file:
             json.dump(
                 {
-                    "metadata": step19_v4_metadata(
-                        packet_count=len(traffic),
-                        source_merged_json=str(source_merged_json),
-                        validation_report=str(validation_report),
-                    ),
+                    "metadata": metadata,
                     "traffic": traffic,
+                    "validated_effective_payload_projection_changes": projections,
                 },
                 output_file,
             )
@@ -788,7 +863,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         packets = rdpcap(str(output_pcap))
 
         self.assertEqual("completed", result["report"]["metadata"]["status"])
-        self.assertEqual("pcap_reconstruction_report_v4", result["report"]["metadata"]["schema_version"])
+        self.assertEqual("pcap_reconstruction_report_v5", result["report"]["metadata"]["schema_version"])
         self.assertEqual(EXPECTED_INPUT_SCHEMA_VERSION, result["report"]["metadata"]["source_validation_schema_version"])
         self.assertEqual(
             "not_required_by_modification_strategy",
@@ -809,7 +884,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
 
         self.assertEqual("completed", result["report"]["metadata"]["status"])
         self.assertEqual(
-            "loaded_from_step18_patch_application_report_v4",
+            "loaded_from_step19_validated_effective_payload_projection_changes_v1",
             result["report"]["source_validation_contract"]["payload_projection_evidence_status"],
         )
         self.assertEqual(1, result["report"]["source_validation_contract"]["projection_change_count"])
@@ -818,6 +893,27 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         self.assertEqual(64, int(packets[0][IP].ttl))
         self.assertEqual(104, int(packets[1][TCP].ack))
         self.assertEqual(1, result["report"]["summary"]["adjusted_tcp_acknowledgement_packet_count"])
+        self.assertEqual(1, result["report"]["network_protocol_validation"]["summary"]["payload_projection_validated_change_count"])
+        self.assertEqual(1, result["report"]["network_protocol_validation"]["summary"]["payload_projection_compared_packet_count"])
+        self.assertEqual(1, result["report"]["network_protocol_validation"]["summary"]["projected_net_payload_delta_bytes"])
+        self.assertEqual(1, result["report"]["network_protocol_validation"]["summary"]["realized_net_payload_delta_bytes"])
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
+
+    def test_payload_only_shrinkage_audits_realized_net_delta(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            traffic=self.traffic(first_payload=b"ab"),
+        )
+        from scapy.all import Raw, TCP, rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(b"ab", bytes(packets[0][Raw].load))
+        self.assertEqual(102, int(packets[1][TCP].ack))
+        self.assertEqual(-1, result["report"]["network_protocol_validation"]["summary"]["projected_net_payload_delta_bytes"])
+        self.assertEqual(-1, result["report"]["network_protocol_validation"]["summary"]["realized_net_payload_delta_bytes"])
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
 
     def test_hybrid_applies_header_and_payload(self):
         result, output_pcap = self.run_reconstruction_fixture(
@@ -830,7 +926,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
 
         self.assertEqual("completed", result["report"]["metadata"]["status"])
         self.assertEqual(
-            "loaded_from_step18_patch_application_report_v4",
+            "loaded_from_step19_validated_effective_payload_projection_changes_v1",
             result["report"]["source_validation_contract"]["payload_projection_evidence_status"],
         )
         self.assertEqual(1, result["report"]["source_validation_contract"]["projection_change_count"])
@@ -839,6 +935,80 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         self.assertEqual(32, int(packets[0][IP].ttl))
         self.assertEqual(4096, int(packets[0][TCP].window))
         self.assertEqual(1, result["report"]["summary"]["tcp_payload_content_changed_packet_count"])
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["projected_net_payload_delta_bytes"])
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["realized_net_payload_delta_bytes"])
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
+
+    def test_failure_provenance_packet_with_accepted_projection_is_reconstructed(self):
+        traffic = self.traffic(first_payload=b"axc")
+        traffic[0]["llm_output_failure_provenance"] = True
+        traffic[0]["llm_output_failure"] = False
+        traffic[0]["evaluation_status"] = "Accepted for Reconstruction"
+
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="hybrid_header_canonical_payload_strategy_v1",
+            traffic=traffic,
+        )
+        from scapy.all import Raw, rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(b"axc", bytes(packets[0][Raw].load))
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
+
+    def test_failure_only_packet_without_projection_is_preserved(self):
+        traffic = self.traffic(first_payload=b"abc")
+        traffic[0]["llm_output_failure"] = True
+        traffic[0]["evaluation_status"] = "LLM Output Failure"
+
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            traffic=traffic,
+            projections_override=[],
+        )
+        from scapy.all import Raw, rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(b"abc", bytes(packets[0][Raw].load))
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_changed_without_effective_projection_count"])
+
+    def test_payload_change_without_effective_projection_fails_audit(self):
+        with self.assertRaisesRegex(RuntimeError, "failed network/transport protocol validation"):
+            self.run_reconstruction_fixture(
+                strategy="canonical_payload_only_strategy_v1",
+                traffic=self.traffic(first_payload=b"axc"),
+                projections_override=[],
+            )
+
+    def test_effective_projection_not_materialized_in_step19_payload_fails_audit(self):
+        projection = self.payload_projection_changes(b"axc")
+        with self.assertRaisesRegex(RuntimeError, "failed network/transport protocol validation"):
+            self.run_reconstruction_fixture(
+                strategy="canonical_payload_only_strategy_v1",
+                traffic=self.traffic(first_payload=b"abc"),
+                projections_override=projection,
+            )
+
+    def test_serialized_payload_mismatch_with_same_length_fails_projection_audit(self):
+        from scapy.all import Ether, IP, PcapWriter, Raw, TCP
+
+        def write_tampered_packets(output_pcap_path: Path, packets: list, scapy: dict) -> None:
+            writer = PcapWriter(str(output_pcap_path), linktype=1, sync=True)
+            try:
+                writer.write(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=1234, dport=80, seq=100, ack=0, flags="PA", window=8192) / Raw(load=b"ayc"))
+                writer.write(packets[1])
+            finally:
+                writer.close()
+
+        with patch("step_20_json_to_pcap.reconstruct_pcap.write_packets", side_effect=write_tampered_packets):
+            with self.assertRaisesRegex(RuntimeError, "failed network/transport protocol validation"):
+                self.run_reconstruction_fixture(
+                    strategy="canonical_payload_only_strategy_v1",
+                    traffic=self.traffic(first_payload=b"axc"),
+                )
 
 
 if __name__ == "__main__":
