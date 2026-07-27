@@ -92,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         help="Step 20 output branch under 10_reconstructed_pcap/. The value is normalized like config labels.",
     )
     parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Explicit Step 20 output directory containing modified_traffic.pcap and reconstruction_report.json.",
+    )
+    parser.add_argument(
         "--expected-packets",
         type=int,
         default=DEFAULT_EXPECTED_PACKET_COUNT,
@@ -116,7 +121,7 @@ def main() -> None:
     args = parse_args()
     experiment_root = Path(args.experiment_root).expanduser()
     experiment_config_label = sanitize_name_component(args.experiment_config_label)
-    output_dir = experiment_root / "10_reconstructed_pcap" / experiment_config_label
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else experiment_root / "10_reconstructed_pcap" / experiment_config_label
     pcap_path = output_dir / "modified_traffic.pcap"
     report_path = output_dir / "reconstruction_report.json"
     failures: list[str] = []

@@ -9,6 +9,7 @@ PAYLOAD_MATERIALIZATION_SCHEMA_VERSION = "canonical_payload_materialization_resu
 SUPPORTED_REPLACEMENT_FORMATS = {"hex", "text"}
 SUPPORTED_PAYLOAD_OPERATIONS = {"replace_region", "replace_byte_range"}
 SUPPORTED_PAYLOAD_REGION_TYPES = {"canonical_payload_region", "canonical_payload_byte_range"}
+ETHERNET_MINIMUM_FRAME_BYTES = 60
 
 
 #This function checks whether a value is valid even-length hexadecimal content.
@@ -177,6 +178,109 @@ def normalize_packet_aliases(edit: dict[str, Any], original_packets_by_id: dict[
             item["length_bytes"],
         ),
     )
+
+
+#This helper returns a nested dictionary or None when the packet has no structured metadata for that layer.
+def nested_dict(packet: dict[str, Any], field: str) -> dict[str, Any] | None:
+    value = packet.get(field)
+    return value if isinstance(value, dict) else None
+
+
+#This helper updates Ethernet/IPv4 length and padding metadata after a payload length change.
+def update_physical_payload_metadata(
+    *,
+    original_packet: dict[str, Any],
+    materialized_packet: dict[str, Any],
+    packet_id: str,
+    old_payload_length: int,
+    new_payload_length: int,
+) -> None:
+    delta = new_payload_length - old_payload_length
+    materialized_packet["payload_length_bytes"] = new_payload_length
+    original_packet_length = original_packet.get("packet_length_bytes")
+    materialized_packet_length = materialized_packet.get("packet_length_bytes")
+    original_ipv4 = nested_dict(original_packet, "ipv4_header")
+    materialized_ipv4 = nested_dict(materialized_packet, "ipv4_header")
+    original_ethernet = nested_dict(original_packet, "ethernet_header")
+    materialized_ethernet = nested_dict(materialized_packet, "ethernet_header")
+
+    if delta == 0:
+        if isinstance(materialized_packet_length, int) and not isinstance(materialized_packet_length, bool):
+            materialized_packet["packet_length_bytes"] = materialized_packet_length
+        return
+
+    if not isinstance(original_packet_length, int) or isinstance(original_packet_length, bool):
+        if isinstance(materialized_packet_length, int) and not isinstance(materialized_packet_length, bool):
+            materialized_packet["packet_length_bytes"] = materialized_packet_length + delta
+        return
+    if original_ipv4 is None or materialized_ipv4 is None or original_ethernet is None or materialized_ethernet is None:
+        materialized_packet["packet_length_bytes"] = original_packet_length + delta
+        return
+
+    if original_ethernet.get("encapsulation") not in {None, "ethernet_ii"}:
+        raise ValueError(f"packet {packet_id!r} uses unsupported Ethernet encapsulation for payload resizing.")
+    if original_ethernet.get("vlan_present") not in {None, False}:
+        raise ValueError(f"packet {packet_id!r} uses VLAN metadata; payload resizing has no validated VLAN/FCS contract.")
+    header_length = original_ethernet.get("header_length_bytes")
+    old_ipv4_total = original_ipv4.get("total_length", original_packet.get("ip_len"))
+    old_padding = original_ethernet.get("padding_length_bytes", 0)
+    if not isinstance(header_length, int) or isinstance(header_length, bool) or header_length < 0:
+        raise ValueError(f"packet {packet_id!r} ethernet_header.header_length_bytes is invalid.")
+    if not isinstance(old_ipv4_total, int) or isinstance(old_ipv4_total, bool) or old_ipv4_total < 0:
+        raise ValueError(f"packet {packet_id!r} ipv4 total length is invalid.")
+    if not isinstance(old_padding, int) or isinstance(old_padding, bool) or old_padding < 0:
+        raise ValueError(f"packet {packet_id!r} ethernet_header.padding_length_bytes is invalid.")
+    old_effective_frame_length = header_length + old_ipv4_total
+    recorded_effective = original_ethernet.get("effective_frame_length_bytes")
+    if isinstance(recorded_effective, int) and not isinstance(recorded_effective, bool) and recorded_effective != old_effective_frame_length:
+        raise ValueError(f"packet {packet_id!r} ethernet effective frame length contradicts IPv4 total length.")
+    if old_effective_frame_length + old_padding != original_packet_length:
+        raise ValueError(f"packet {packet_id!r} packet_length_bytes contradicts Ethernet padding metadata.")
+    capture_relation = original_ipv4.get("capture_relation")
+    if isinstance(capture_relation, dict):
+        trailing = capture_relation.get("trailing_bytes_after_declared_ipv4")
+        status = capture_relation.get("status")
+        if isinstance(trailing, int) and not isinstance(trailing, bool) and trailing != old_padding:
+            raise ValueError(f"packet {packet_id!r} IPv4 trailing bytes disagree with Ethernet padding.")
+        if old_padding and status not in {"complete_with_trailing_bytes", None}:
+            raise ValueError(f"packet {packet_id!r} has trailing bytes not classified as Ethernet padding.")
+    padding_hex = original_ethernet.get("padding_hex", "")
+    if old_padding:
+        if not is_valid_hex(padding_hex) or len(str(padding_hex)) // 2 != old_padding:
+            raise ValueError(f"packet {packet_id!r} Ethernet padding_hex is inconsistent with padding length.")
+    if old_padding and original_ethernet.get("padding_present") not in {True, None}:
+        raise ValueError(f"packet {packet_id!r} has padding length but padding_present is false.")
+
+    new_ipv4_total = old_ipv4_total + delta
+    if new_ipv4_total < 0:
+        raise ValueError(f"packet {packet_id!r} payload resize makes IPv4 total length negative.")
+    new_effective_frame_length = header_length + new_ipv4_total
+    new_padding = max(0, ETHERNET_MINIMUM_FRAME_BYTES - new_effective_frame_length)
+    new_packet_length = new_effective_frame_length + new_padding
+
+    materialized_packet["packet_length_bytes"] = new_packet_length
+    if "ip_len" in materialized_packet:
+        materialized_packet["ip_len"] = new_ipv4_total
+    materialized_ipv4["total_length"] = new_ipv4_total
+    materialized_tcp = nested_dict(materialized_packet, "tcp_header")
+    if materialized_tcp is not None:
+        for tcp_payload_length_field in ["captured_payload_length_bytes", "declared_payload_length_bytes"]:
+            if tcp_payload_length_field in materialized_tcp:
+                materialized_tcp[tcp_payload_length_field] = new_payload_length
+    if isinstance(materialized_ipv4.get("capture_relation"), dict):
+        relation = materialized_ipv4["capture_relation"]
+        relation["captured_bytes_from_ipv4_start"] = new_packet_length - header_length
+        relation["captured_declared_ipv4_bytes"] = new_ipv4_total
+        relation["declared_total_length_bytes"] = new_ipv4_total
+        relation["trailing_bytes_after_declared_ipv4"] = new_padding
+        relation["status"] = "complete_with_trailing_bytes" if new_padding else "complete"
+    materialized_ethernet["effective_frame_length_bytes"] = new_effective_frame_length
+    materialized_ethernet["captured_length_bytes"] = new_packet_length
+    materialized_ethernet["padding_length_bytes"] = new_padding
+    materialized_ethernet["padding_hex"] = "00" * new_padding
+    materialized_ethernet["padding_present"] = new_padding > 0
+    materialized_ethernet["padding_offset_start"] = new_effective_frame_length if new_padding else None
+    materialized_ethernet["padding_offset_end"] = new_packet_length if new_padding else None
 
 
 #This helper validates a normalized canonical edit against its authorized canonical bounds and aliases.
@@ -463,11 +567,14 @@ def materialize_payload_edits(
                 end_hex = start_hex + int(projection["replaced_length_bytes"]) * 2
                 payload_hex = payload_hex[:start_hex] + projection["replacement_hex"] + payload_hex[end_hex:]
             new_payload_length = len(payload_hex) // 2
-            delta = new_payload_length - old_payload_length
             output_packets_by_id[packet_id]["payload_hex"] = payload_hex
-            output_packets_by_id[packet_id]["payload_length_bytes"] = new_payload_length
-            if isinstance(output_packets_by_id[packet_id].get("packet_length_bytes"), int):
-                output_packets_by_id[packet_id]["packet_length_bytes"] = int(output_packets_by_id[packet_id]["packet_length_bytes"]) + delta
+            update_physical_payload_metadata(
+                original_packet=original_packets[packet_id],
+                materialized_packet=output_packets_by_id[packet_id],
+                packet_id=packet_id,
+                old_payload_length=old_payload_length,
+                new_payload_length=new_payload_length,
+            )
 
     else:
         no_effect_edits = [deepcopy(edit) for edit in validated_edits if edit["no_effect"]]

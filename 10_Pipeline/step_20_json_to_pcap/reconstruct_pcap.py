@@ -20,6 +20,7 @@ from common.config import load_json_config, require_keys
 from common.header_policy import editable_header_fields_from_policy, header_field_value, is_editable_header_field, load_header_editability_policy
 from common.io_utils import write_json
 from common.modification_strategy import ModificationCapabilities, resolve_modification_strategy
+from common.payload_materialization import ETHERNET_MINIMUM_FRAME_BYTES as COMMON_ETHERNET_MINIMUM_FRAME_BYTES
 from common.terminal_logging import default_step_log_path, terminal_log
 from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
@@ -28,7 +29,7 @@ REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v5"
 EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v4"
 STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD = "validated_effective_payload_projection_changes"
 STEP19_FULL_POST_RECONSTRUCTION_POLICY = "full_packet_universe_with_original_noop_for_invalid_and_failure_only_packets"
-ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = 60
+ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = COMMON_ETHERNET_MINIMUM_FRAME_BYTES
 TCP_SEQUENCE_MODULUS = 1 << 32
 TCP_SEQUENCE_MASK = TCP_SEQUENCE_MODULUS - 1
 STEP19_V4_REQUIRED_METADATA_FIELDS = [
@@ -1718,6 +1719,86 @@ def audit_reconstructed_pcap(
                 record_issue(record_index, "ethernet_padding_length_invalid", "Frame length does not equal the IPv4 datagram plus required Ethernet minimum padding.", expected_frame_length=expected_frame_length, actual_frame_length=len(frame))
             if any(padding):
                 record_issue(record_index, "ethernet_padding_nonzero", "Ethernet padding outside the IPv4 datagram must contain only zero bytes.")
+            declared_packet_length = record.get("packet_length_bytes")
+            if not is_int_like(declared_packet_length):
+                record_issue(record_index, "packet_length_bytes_metadata_invalid", "Step 19 packet_length_bytes must be an integer physical frame length.")
+            elif int(declared_packet_length) != len(frame):
+                record_issue(
+                    record_index,
+                    "packet_length_bytes_metadata_mismatch",
+                    "Step 19 packet_length_bytes differs from the physical frame length written to PCAP.",
+                    expected_json_value=int(declared_packet_length),
+                    actual_frame_length_bytes=len(frame),
+                )
+            record_ipv4_header = record.get("ipv4_header")
+            if isinstance(record_ipv4_header, dict):
+                record_ipv4_total = record_ipv4_header.get("total_length")
+                if is_int_like(record_ipv4_total) and int(record_ipv4_total) != total_length:
+                    record_issue(
+                        record_index,
+                        "ipv4_total_length_metadata_mismatch",
+                        "Step 19 ipv4_header.total_length differs from the serialized IPv4 total_length.",
+                        expected_json_value=int(record_ipv4_total),
+                        actual_ipv4_total_length=total_length,
+                    )
+                capture_relation = record_ipv4_header.get("capture_relation")
+                if isinstance(capture_relation, dict):
+                    trailing = capture_relation.get("trailing_bytes_after_declared_ipv4")
+                    if is_int_like(trailing) and int(trailing) != len(padding):
+                        record_issue(
+                            record_index,
+                            "ipv4_capture_relation_padding_mismatch",
+                            "Step 19 IPv4 capture_relation trailing bytes differ from reconstructed Ethernet padding.",
+                            expected_json_value=int(trailing),
+                            actual_padding_length_bytes=len(padding),
+                        )
+                    status = capture_relation.get("status")
+                    expected_status = "complete_with_trailing_bytes" if padding else "complete"
+                    if isinstance(status, str) and status != expected_status:
+                        record_issue(
+                            record_index,
+                            "ipv4_capture_relation_status_mismatch",
+                            "Step 19 IPv4 capture_relation status differs from reconstructed Ethernet padding state.",
+                            expected_status=expected_status,
+                            actual_status=status,
+                        )
+            record_ethernet_header = record.get("ethernet_header")
+            if isinstance(record_ethernet_header, dict):
+                metadata_checks = {
+                    "header_length_bytes": 14,
+                    "effective_frame_length_bytes": 14 + total_length,
+                    "captured_length_bytes": len(frame),
+                    "padding_length_bytes": len(padding),
+                }
+                for metadata_field, actual_value in metadata_checks.items():
+                    metadata_value = record_ethernet_header.get(metadata_field)
+                    if is_int_like(metadata_value) and int(metadata_value) != actual_value:
+                        record_issue(
+                            record_index,
+                            f"ethernet_{metadata_field}_metadata_mismatch",
+                            "Step 19 Ethernet metadata differs from the reconstructed PCAP frame.",
+                            field=metadata_field,
+                            expected_json_value=int(metadata_value),
+                            actual_value=actual_value,
+                        )
+                padding_present = record_ethernet_header.get("padding_present")
+                if isinstance(padding_present, bool) and padding_present != bool(padding):
+                    record_issue(
+                        record_index,
+                        "ethernet_padding_present_metadata_mismatch",
+                        "Step 19 Ethernet padding_present differs from the reconstructed PCAP padding state.",
+                        expected_json_value=padding_present,
+                        actual_padding_present=bool(padding),
+                    )
+                padding_hex = record_ethernet_header.get("padding_hex")
+                if isinstance(padding_hex, str) and padding_hex.lower() != ("00" * len(padding)):
+                    record_issue(
+                        record_index,
+                        "ethernet_padding_hex_metadata_mismatch",
+                        "Step 19 Ethernet padding_hex differs from the reconstructed PCAP padding bytes.",
+                        expected_json_value=padding_hex,
+                        actual_padding_hex=padding.hex(),
+                    )
 
             tcp_offset = 14 + ihl
             tcp_length = total_length - ihl

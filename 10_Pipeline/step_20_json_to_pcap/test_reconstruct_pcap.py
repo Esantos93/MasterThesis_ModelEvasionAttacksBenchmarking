@@ -688,17 +688,17 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         }
 
     @staticmethod
-    def write_reference_pcap(path: Path) -> None:
+    def write_reference_pcap(path: Path, first_payload: bytes = b"abc") -> None:
         from scapy.all import Ether, IP, PcapWriter, Raw, TCP
 
         packets = [
             Ether()
             / IP(src="10.0.0.1", dst="10.0.0.2", ttl=64, tos=0)
             / TCP(sport=1234, dport=80, seq=100, ack=0, flags="PA", window=8192)
-            / Raw(load=b"abc"),
+            / Raw(load=first_payload),
             Ether()
             / IP(src="10.0.0.2", dst="10.0.0.1", ttl=64, tos=0)
-            / TCP(sport=80, dport=1234, seq=500, ack=103, flags="A", window=8192),
+            / TCP(sport=80, dport=1234, seq=500, ack=100 + len(first_payload), flags="A", window=8192),
         ]
         writer = PcapWriter(str(path), linktype=1, sync=True)
         try:
@@ -708,7 +708,48 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
             writer.close()
 
     @staticmethod
-    def traffic(*, first_payload: bytes = b"abc", first_ttl: int = 64, first_window: int = 8192) -> list[dict]:
+    @staticmethod
+    def physical_metadata(payload_length: int) -> dict:
+        ipv4_total_length = 40 + payload_length
+        effective_frame_length = 14 + ipv4_total_length
+        padding_length = max(0, 60 - effective_frame_length)
+        packet_length = effective_frame_length + padding_length
+        return {
+            "packet_length_bytes": packet_length,
+            "ipv4_header": {
+                "total_length": ipv4_total_length,
+                "capture_relation": {
+                    "captured_bytes_from_ipv4_start": packet_length - 14,
+                    "captured_declared_ipv4_bytes": ipv4_total_length,
+                    "declared_total_length_bytes": ipv4_total_length,
+                    "trailing_bytes_after_declared_ipv4": padding_length,
+                    "status": "complete_with_trailing_bytes" if padding_length else "complete",
+                },
+            },
+            "ethernet_header": {
+                "encapsulation": "ethernet_ii",
+                "vlan_present": False,
+                "header_length_bytes": 14,
+                "effective_frame_length_bytes": effective_frame_length,
+                "captured_length_bytes": packet_length,
+                "padding_length_bytes": padding_length,
+                "padding_hex": "00" * padding_length,
+                "padding_present": padding_length > 0,
+                "padding_offset_start": effective_frame_length if padding_length else None,
+                "padding_offset_end": packet_length if padding_length else None,
+            },
+        }
+
+    @staticmethod
+    def traffic(
+        *,
+        first_payload: bytes = b"abc",
+        first_ttl: int = 64,
+        first_window: int = 8192,
+        include_physical_metadata: bool = False,
+    ) -> list[dict]:
+        first_record_physical_metadata = PcapReconstructionIntegrationTests.physical_metadata(len(first_payload))
+        second_record_physical_metadata = PcapReconstructionIntegrationTests.physical_metadata(0)
         return [
             {
                 "packet_id": "packet_000001",
@@ -724,6 +765,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
                 "ttl": first_ttl,
                 "window": first_window,
                 "timestamp_epoch_pcap": 1.0,
+                **first_record_physical_metadata,
             },
             {
                 "packet_id": "packet_000002",
@@ -739,12 +781,12 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
                 "ttl": 64,
                 "window": 8192,
                 "timestamp_epoch_pcap": 2.0,
+                **second_record_physical_metadata,
             },
         ]
 
     @staticmethod
-    def payload_projection_changes(first_payload: bytes) -> list[dict]:
-        original_payload = b"abc"
+    def payload_projection_changes(first_payload: bytes, original_payload: bytes = b"abc") -> list[dict]:
         if first_payload == original_payload:
             return []
         return [
@@ -782,13 +824,13 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         ]
 
     @classmethod
-    def write_step19_v4_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes) -> tuple[Path, list[dict]]:
+    def write_step19_v4_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes, original_payload: bytes = b"abc") -> tuple[Path, list[dict]]:
         validation_report = root / "validation_report.json"
         payload_capable = strategy in {
             "canonical_payload_only_strategy_v1",
             "hybrid_header_canonical_payload_strategy_v1",
         }
-        projections = cls.payload_projection_changes(first_payload) if payload_capable else []
+        projections = cls.payload_projection_changes(first_payload, original_payload) if payload_capable else []
         validation_report.write_text(
             json.dumps(
                 {
@@ -809,6 +851,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         strategy: str,
         traffic: list[dict],
         projections_override: list[dict] | None = None,
+        original_payload: bytes = b"abc",
     ) -> tuple[dict, Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -817,11 +860,12 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         input_json = root / "validated_modified_traffic.json"
         output_pcap = root / "modified_traffic.pcap"
         report_path = root / "reconstruction_report.json"
-        self.write_reference_pcap(reference_pcap)
+        self.write_reference_pcap(reference_pcap, first_payload=original_payload)
         validation_report, projections = self.write_step19_v4_source_artifacts(
             root=root,
             strategy=strategy,
             first_payload=bytes.fromhex(traffic[0]["payload_hex"]),
+            original_payload=original_payload,
         )
         if projections_override is not None:
             projections = projections_override
@@ -914,6 +958,104 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         self.assertEqual(-1, result["report"]["network_protocol_validation"]["summary"]["projected_net_payload_delta_bytes"])
         self.assertEqual(-1, result["report"]["network_protocol_validation"]["summary"]["realized_net_payload_delta_bytes"])
         self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
+
+    def test_padding_two_growth_one_keeps_minimum_frame_length_metadata(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            original_payload=b"abcd",
+            traffic=self.traffic(first_payload=b"abcde", include_physical_metadata=True),
+        )
+        from scapy.all import rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(60, len(bytes(packets[0])))
+        self.assertEqual(0, result["report"]["summary"]["issue_counts_by_reason"].get("packet_length_changed_after_reconstruction", 0))
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["issue_counts_by_reason"].get("packet_length_bytes_metadata_mismatch", 0))
+
+    def test_padding_four_growth_one_keeps_minimum_frame_length_metadata(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            original_payload=b"ab",
+            traffic=self.traffic(first_payload=b"abc", include_physical_metadata=True),
+        )
+        from scapy.all import rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(60, len(bytes(packets[0])))
+        self.assertEqual(0, result["report"]["summary"]["issue_counts_by_reason"].get("packet_length_changed_after_reconstruction", 0))
+
+    def test_growth_larger_than_padding_increases_packet_length_by_excess(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            original_payload=b"ab",
+            traffic=self.traffic(first_payload=b"abcdefghij", include_physical_metadata=True),
+        )
+        from scapy.all import rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(64, len(bytes(packets[0])))
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["issue_counts_by_reason"].get("ethernet_padding_length_invalid", 0))
+
+    def test_payload_shrinkage_in_minimum_frame_increases_padding_and_keeps_length(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            original_payload=b"abcd",
+            traffic=self.traffic(first_payload=b"abc", include_physical_metadata=True),
+        )
+        from scapy.all import rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(60, len(bytes(packets[0])))
+        self.assertEqual(1, result["report"]["network_protocol_validation"]["observed_inventory"]["ethernet_padding_3_byte_frame_count"])
+
+    def test_frame_above_minimum_without_padding_changes_length_by_payload_delta(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            original_payload=b"a" * 10,
+            traffic=self.traffic(first_payload=b"a" * 12, include_physical_metadata=True),
+        )
+        from scapy.all import rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(66, len(bytes(packets[0])))
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["observed_inventory"].get("ethernet_padding_1_byte_frame_count", 0))
+
+    def test_content_only_edit_keeps_packet_length_and_padding_metadata(self):
+        result, output_pcap = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            original_payload=b"abcd",
+            traffic=self.traffic(first_payload=b"abxd", include_physical_metadata=True),
+        )
+        from scapy.all import rdpcap
+
+        packets = rdpcap(str(output_pcap))
+
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(60, len(bytes(packets[0])))
+        self.assertEqual(1, result["report"]["network_protocol_validation"]["observed_inventory"]["ethernet_padding_2_byte_frame_count"])
+        self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
+
+    def test_stale_linear_packet_length_metadata_fails_audit(self):
+        traffic = self.traffic(first_payload=b"abcde", include_physical_metadata=True)
+        traffic[0]["packet_length_bytes"] = 61
+        traffic[0]["ethernet_header"]["captured_length_bytes"] = 61
+
+        with self.assertRaisesRegex(RuntimeError, "failed network/transport protocol validation"):
+            self.run_reconstruction_fixture(
+                strategy="canonical_payload_only_strategy_v1",
+                original_payload=b"abcd",
+                traffic=traffic,
+            )
 
     def test_hybrid_applies_header_and_payload(self):
         result, output_pcap = self.run_reconstruction_fixture(

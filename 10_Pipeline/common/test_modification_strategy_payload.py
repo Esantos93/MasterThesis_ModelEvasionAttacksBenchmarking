@@ -72,6 +72,81 @@ def payload_edit(**overrides) -> dict:
     return edit
 
 
+def ethernet_ipv4_packet(
+    packet_id: str,
+    *,
+    payload_hex: str,
+    ipv4_total_length: int,
+    packet_length_bytes: int,
+    padding_length_bytes: int,
+    capture_status: str = "complete_with_trailing_bytes",
+) -> dict:
+    effective_frame_length = 14 + ipv4_total_length
+    return {
+        "packet_id": packet_id,
+        "payload_hex": payload_hex,
+        "payload_length_bytes": len(payload_hex) // 2,
+        "packet_length_bytes": packet_length_bytes,
+        "ip_len": ipv4_total_length,
+        "ethernet_header": {
+            "captured_length_bytes": packet_length_bytes,
+            "effective_frame_length_bytes": effective_frame_length,
+            "encapsulation": "ethernet_ii",
+            "ether_type": 2048,
+            "header_length_bytes": 14,
+            "header_offset_end": 14,
+            "header_offset_start": 0,
+            "outer_ether_type": 2048,
+            "padding_hex": "00" * padding_length_bytes,
+            "padding_length_bytes": padding_length_bytes,
+            "padding_offset_end": packet_length_bytes if padding_length_bytes else None,
+            "padding_offset_start": effective_frame_length if padding_length_bytes else None,
+            "padding_present": padding_length_bytes > 0,
+            "vlan_present": False,
+            "vlan_tags": [],
+        },
+        "ipv4_header": {
+            "total_length": ipv4_total_length,
+            "capture_relation": {
+                "captured_bytes_from_ipv4_start": packet_length_bytes - 14,
+                "captured_declared_ipv4_bytes": ipv4_total_length,
+                "declared_total_length_bytes": ipv4_total_length,
+                "status": capture_status,
+                "trailing_bytes_after_declared_ipv4": padding_length_bytes,
+            },
+        },
+        "tcp_header": {
+            "captured_payload_length_bytes": len(payload_hex) // 2,
+            "declared_payload_length_bytes": len(payload_hex) // 2,
+        },
+    }
+
+
+def single_packet_payload_edit(packet_id: str, *, replaced_length: int, replacement_hex: str) -> dict:
+    return payload_edit(
+        packet_id=packet_id,
+        representative_packet_id=packet_id,
+        canonical_region_id=f"canonical_region_{packet_id}",
+        region_id=f"canonical_region_{packet_id}",
+        canonical_region_length_bytes=4,
+        authorized_canonical_length_bytes=4,
+        replaced_length_bytes=replaced_length,
+        replacement=replacement_hex,
+        replacement_hex=replacement_hex,
+        replacement_length_bytes=len(replacement_hex) // 2,
+        packet_aliases=[
+            {
+                "packet_id": packet_id,
+                "alias_id": f"{packet_id}:payload@0",
+                "canonical_region_id": f"canonical_region_{packet_id}",
+                "canonical_start_offset_bytes": 0,
+                "payload_start_offset_bytes": 0,
+                "length_bytes": 4,
+            }
+        ],
+    )
+
+
 class ModificationStrategyPayloadTests(unittest.TestCase):
     def test_resolves_known_strategies(self) -> None:
         header_only = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
@@ -293,6 +368,154 @@ class ModificationStrategyPayloadTests(unittest.TestCase):
         before = deepcopy(originals)
         materialize_payload_edits(originals, [payload_edit()])
         self.assertEqual(before, originals)
+
+    def test_ethernet_minimum_frame_growth_consumes_two_byte_padding(self) -> None:
+        originals = {
+            "packet_040071": ethernet_ipv4_packet(
+                "packet_040071",
+                payload_hex="00112233",
+                ipv4_total_length=44,
+                packet_length_bytes=60,
+                padding_length_bytes=2,
+            )
+        }
+        result = materialize_payload_edits(
+            originals,
+            [single_packet_payload_edit("packet_040071", replaced_length=1, replacement_hex="aabb")],
+        )
+        packet = result["materialized_packets_by_id"]["packet_040071"]
+
+        self.assertEqual(60, packet["packet_length_bytes"])
+        self.assertEqual(45, packet["ip_len"])
+        self.assertEqual(45, packet["ipv4_header"]["total_length"])
+        self.assertEqual(59, packet["ethernet_header"]["effective_frame_length_bytes"])
+        self.assertEqual(1, packet["ethernet_header"]["padding_length_bytes"])
+        self.assertEqual("00", packet["ethernet_header"]["padding_hex"])
+        self.assertEqual(5, packet["payload_length_bytes"])
+        self.assertEqual(5, packet["tcp_header"]["declared_payload_length_bytes"])
+
+    def test_ethernet_minimum_frame_growth_consumes_four_byte_padding(self) -> None:
+        originals = {
+            "packet_070497": ethernet_ipv4_packet(
+                "packet_070497",
+                payload_hex="00112233",
+                ipv4_total_length=42,
+                packet_length_bytes=60,
+                padding_length_bytes=4,
+            )
+        }
+        result = materialize_payload_edits(
+            originals,
+            [single_packet_payload_edit("packet_070497", replaced_length=1, replacement_hex="aabb")],
+        )
+        packet = result["materialized_packets_by_id"]["packet_070497"]
+
+        self.assertEqual(60, packet["packet_length_bytes"])
+        self.assertEqual(43, packet["ipv4_header"]["total_length"])
+        self.assertEqual(57, packet["ethernet_header"]["effective_frame_length_bytes"])
+        self.assertEqual(3, packet["ethernet_header"]["padding_length_bytes"])
+
+    def test_ethernet_growth_larger_than_padding_increases_packet_length_by_excess(self) -> None:
+        originals = {
+            "packet_growth": ethernet_ipv4_packet(
+                "packet_growth",
+                payload_hex="00112233",
+                ipv4_total_length=44,
+                packet_length_bytes=60,
+                padding_length_bytes=2,
+            )
+        }
+        result = materialize_payload_edits(
+            originals,
+            [single_packet_payload_edit("packet_growth", replaced_length=1, replacement_hex="aabbccdd")],
+        )
+        packet = result["materialized_packets_by_id"]["packet_growth"]
+
+        self.assertEqual(61, packet["packet_length_bytes"])
+        self.assertEqual(47, packet["ipv4_header"]["total_length"])
+        self.assertEqual(61, packet["ethernet_header"]["effective_frame_length_bytes"])
+        self.assertEqual(0, packet["ethernet_header"]["padding_length_bytes"])
+
+    def test_ethernet_minimum_frame_shrink_increases_padding_and_keeps_sixty_bytes(self) -> None:
+        originals = {
+            "packet_shrink": ethernet_ipv4_packet(
+                "packet_shrink",
+                payload_hex="00112233",
+                ipv4_total_length=44,
+                packet_length_bytes=60,
+                padding_length_bytes=2,
+            )
+        }
+        result = materialize_payload_edits(
+            originals,
+            [single_packet_payload_edit("packet_shrink", replaced_length=2, replacement_hex="aa")],
+        )
+        packet = result["materialized_packets_by_id"]["packet_shrink"]
+
+        self.assertEqual(60, packet["packet_length_bytes"])
+        self.assertEqual(43, packet["ipv4_header"]["total_length"])
+        self.assertEqual(57, packet["ethernet_header"]["effective_frame_length_bytes"])
+        self.assertEqual(3, packet["ethernet_header"]["padding_length_bytes"])
+
+    def test_large_unpadded_ethernet_frame_changes_by_payload_delta(self) -> None:
+        originals = {
+            "packet_large": ethernet_ipv4_packet(
+                "packet_large",
+                payload_hex="00112233",
+                ipv4_total_length=70,
+                packet_length_bytes=84,
+                padding_length_bytes=0,
+                capture_status="complete",
+            )
+        }
+        result = materialize_payload_edits(
+            originals,
+            [single_packet_payload_edit("packet_large", replaced_length=1, replacement_hex="aabb")],
+        )
+        packet = result["materialized_packets_by_id"]["packet_large"]
+
+        self.assertEqual(85, packet["packet_length_bytes"])
+        self.assertEqual(71, packet["ipv4_header"]["total_length"])
+        self.assertEqual(85, packet["ethernet_header"]["effective_frame_length_bytes"])
+        self.assertEqual(0, packet["ethernet_header"]["padding_length_bytes"])
+
+    def test_content_only_delta_zero_preserves_physical_lengths_and_padding(self) -> None:
+        originals = {
+            "packet_same": ethernet_ipv4_packet(
+                "packet_same",
+                payload_hex="00112233",
+                ipv4_total_length=44,
+                packet_length_bytes=60,
+                padding_length_bytes=2,
+            )
+        }
+        result = materialize_payload_edits(
+            originals,
+            [single_packet_payload_edit("packet_same", replaced_length=1, replacement_hex="aa")],
+        )
+        packet = result["materialized_packets_by_id"]["packet_same"]
+
+        self.assertEqual(60, packet["packet_length_bytes"])
+        self.assertEqual(44, packet["ipv4_header"]["total_length"])
+        self.assertEqual(58, packet["ethernet_header"]["effective_frame_length_bytes"])
+        self.assertEqual(2, packet["ethernet_header"]["padding_length_bytes"])
+
+    def test_trailing_bytes_not_classified_as_padding_are_not_consumed(self) -> None:
+        originals = {
+            "packet_trailing": ethernet_ipv4_packet(
+                "packet_trailing",
+                payload_hex="00112233",
+                ipv4_total_length=44,
+                packet_length_bytes=60,
+                padding_length_bytes=2,
+                capture_status="complete_with_trailing_data",
+            )
+        }
+        with self.assertRaises(ValueError):
+            materialize_payload_edits(
+                originals,
+                [single_packet_payload_edit("packet_trailing", replaced_length=1, replacement_hex="aabb")],
+            )
 
 
 if __name__ == "__main__":
