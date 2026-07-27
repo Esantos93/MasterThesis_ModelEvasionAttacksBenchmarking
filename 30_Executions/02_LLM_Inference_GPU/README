@@ -10,7 +10,68 @@ compression/compression_step_17.sh
 calibrate_step17_batch_sizes.sh
 compare_step17_batch_calibration.py
 build_prompt_manifest_sample.py
+calibrate_prompt_token_budget.py
 ```
+
+Post-smoke input/output token calibration is intentionally independent from
+the pipeline. Run it after Step 17 inside the same RISE vLLM environment so it
+can load the exact tokenizer used by the model:
+
+```bash
+python /tf/thesis_Santos/04_Steps/calibrate_prompt_token_budget.py
+```
+
+Before execution, edit the `USER CONFIGURATION` block at the beginning of the
+script. It contains the Prompt Unit manifest path, exact model/tokenizer path,
+Step 17 run directory, report output directory and the optional calibration
+parameters. The utility intentionally has no CLI parameters.
+
+The utility reads the manifest and Step 17 artifacts without changing them. It
+measures input characters against Step 17's real chat-template token count,
+tokenizes every raw response, reports token-limit proximity, JSON/string
+truncation evidence and recorded `finish_reason` when available, and returns
+one directly applicable pair: `chars_per_token_estimate` from real input
+evidence and `output_token_estimation_safety_factor` from the larger of:
+
+- the exact-tokenizer hexadecimal/output-density bound;
+- the observed generated-token expansion relative to the compact output JSON
+  used by the planner.
+
+The second bound captures pretty-printed JSON, Markdown wrappers, explanations
+and repeated candidates that are absent from the compact planner serialization.
+The utility emits JSONL, CSV, JSON, and Markdown reports. Current Step 17
+artifacts do not always persist
+`finish_reason`; in that case the report marks it unavailable and keeps
+probable-truncation classification separate from observed facts.
+
+For payload-capable output-budget smoke tests, build one deterministic
+two-panel sample from a complete Step 16 manifest:
+
+```bash
+python3 /tf/thesis_Santos/04_Steps/build_prompt_manifest_sample.py \
+  --input-manifest /path/to/full_step16_run/prompt_units_manifest_v2.json \
+  --output-manifest /path/to/payload_budget_sample_512.json \
+  --sample-size 512 \
+  --representative-size 256 \
+  --sample-method payload_budget_stratified \
+  --max-per-parent 2 \
+  --minimum-per-stratum 4 \
+  --report-path /path/to/payload_budget_sample_512.sample_report.json
+```
+
+The representative panel is stratified by editable-target shape and
+within-shape planned-output-token quartile. Selection is deterministic and
+prioritizes Parent Group diversity. The disjoint stress panel assigns half of
+its capacity to high-output payload-only units, one quarter to high-output
+mixed units and one quarter to payload-capable units with the largest
+authorized hexadecimal replacement. A deterministic risk-ranked fill handles
+undersized pools.
+
+The output manifest does not add fields to individual Prompt Units. Exact
+panel/component membership and selection parameters are stored in the sidecar
+JSON report and copied into manifest metadata. Analyze the representative and
+stress panels separately. This method requires a complete Step 16 manifest; a
+prefix-limited Step 16 run cannot sample the full population.
 
 `run_multi_model_inference.sh` is the sequential multi-model orchestrator. Its
 first section is intentionally edited before each experiment and controls:
