@@ -288,6 +288,28 @@ def resolve_modification_unit_file_path(modification_unit_entry: dict[str, Any],
     raise FileNotFoundError(f"Could not resolve modification unit file for manifest entry: {modification_unit_entry}")
 
 
+#This function validates a required non-negative integer traceability coordinate.
+def require_non_negative_traceability_integer(
+    value: Any,
+    *,
+    field_name: str,
+    canonical_region_id: str,
+    region_id: str | None = None,
+) -> int:
+    target = f", region_id={region_id!r}" if region_id is not None else ""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"Payload traceability field {field_name!r} must be an integer for "
+            f"canonical_region_id={canonical_region_id!r}{target}."
+        )
+    if value < 0:
+        raise ValueError(
+            f"Payload traceability field {field_name!r} must be non-negative for "
+            f"canonical_region_id={canonical_region_id!r}{target}."
+        )
+    return value
+
+
 #This function builds the index of regions that the LLM is allowed to patch.
 def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
     physical_packets_by_id: dict[str, dict[str, Any]] = {}
@@ -303,6 +325,22 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(canonical_region_id, str) or not canonical_region_id:
             raise ValueError("Every canonical payload region must contain canonical_region_id.")
         canonical_region_ids.append(canonical_region_id)
+        stream_start = require_non_negative_traceability_integer(
+            canonical_region.get("stream_start"),
+            field_name="stream_start",
+            canonical_region_id=canonical_region_id,
+        )
+        stream_end = require_non_negative_traceability_integer(
+            canonical_region.get("stream_end"),
+            field_name="stream_end",
+            canonical_region_id=canonical_region_id,
+        )
+        if stream_end < stream_start:
+            raise ValueError(
+                f"Payload traceability stream_end must be greater than or equal to stream_start "
+                f"for canonical_region_id={canonical_region_id!r}."
+            )
+        canonical_length = stream_end - stream_start
         ownership = canonical_region.get("ownership")
         if not isinstance(ownership, dict):
             raise ValueError(f"Canonical payload region {canonical_region_id!r} lacks ownership metadata.")
@@ -331,6 +369,41 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
                     f"Payload target {region_id!r} does not match its canonical_region_id "
                     f"{canonical_region_id!r}."
                 )
+            authorized_start = require_non_negative_traceability_integer(
+                region.get("authorized_start_offset_bytes"),
+                field_name="authorized_start_offset_bytes",
+                canonical_region_id=canonical_region_id,
+                region_id=region_id,
+            )
+            authorized_end = require_non_negative_traceability_integer(
+                region.get("authorized_end_offset_bytes"),
+                field_name="authorized_end_offset_bytes",
+                canonical_region_id=canonical_region_id,
+                region_id=region_id,
+            )
+            authorized_length = require_non_negative_traceability_integer(
+                region.get("authorized_length_bytes"),
+                field_name="authorized_length_bytes",
+                canonical_region_id=canonical_region_id,
+                region_id=region_id,
+            )
+            if authorized_end < authorized_start:
+                raise ValueError(
+                    f"Payload authorized_end_offset_bytes must be greater than or equal to "
+                    f"authorized_start_offset_bytes for canonical_region_id={canonical_region_id!r}, "
+                    f"region_id={region_id!r}."
+                )
+            if authorized_end > canonical_length:
+                raise ValueError(
+                    f"Payload authorized range exceeds the canonical region length for "
+                    f"canonical_region_id={canonical_region_id!r}, region_id={region_id!r}: "
+                    f"authorized_end_offset_bytes={authorized_end}, canonical_length={canonical_length}."
+                )
+            if authorized_length != authorized_end - authorized_start:
+                raise ValueError(
+                    f"Payload authorized_length_bytes does not match the authorized range for "
+                    f"canonical_region_id={canonical_region_id!r}, region_id={region_id!r}."
+                )
             key = (canonical_region_id, region_id)
             if key in region_keys:
                 raise ValueError(f"Duplicate editable region {key!r} in prompt unit {prompt_unit['prompt_unit_id']}")
@@ -343,15 +416,17 @@ def build_editable_region_index(prompt_unit: dict[str, Any]) -> dict[str, Any]:
                     "canonical_region_id": canonical_region_id,
                     "region_id": region_id,
                     "region_type": region_type,
+                    "stream_start": stream_start,
+                    "stream_end": stream_end,
                     "format": region.get("format"),
                     "start_offset_bytes": region.get("start_offset_bytes"),
                     "end_offset_bytes": region.get("end_offset_bytes"),
                     "length_bytes": region.get("length_bytes"),
                     "allowed_operations": region.get("allowed_operations", []),
                     "coordinate_space": region.get("coordinate_space"),
-                    "authorized_start_offset_bytes": region.get("authorized_start_offset_bytes"),
-                    "authorized_end_offset_bytes": region.get("authorized_end_offset_bytes"),
-                    "authorized_length_bytes": region.get("authorized_length_bytes"),
+                    "authorized_start_offset_bytes": authorized_start,
+                    "authorized_end_offset_bytes": authorized_end,
+                    "authorized_length_bytes": authorized_length,
                     "max_replacement_bytes": region.get("max_replacement_bytes"),
                     "max_replacement_hex_chars": region.get("max_replacement_hex_chars"),
                     "replacement_size_policy": region.get("replacement_size_policy"),

@@ -57,7 +57,7 @@ def prompt_unit() -> dict:
         "prompt_unit_id": "group_000001",
         "parent_group_id": "group_000001",
         "source_modification_unit_file": "unit.json",
-        "source_modification_unit_schema_version": "compact_modification_unit_v2",
+        "source_modification_unit_schema_version": "compact_modification_unit_v3",
         "input_traceability": {
             "editable_packet_ids": ["packet_000001"],
             "editable_regions": [
@@ -99,6 +99,45 @@ def prompt_unit() -> dict:
                 },
             ],
         },
+    }
+
+
+def canonical_payload_region() -> dict:
+    return {
+        "identity_type": "canonical_payload_region",
+        "region_type": "canonical_payload_byte_range",
+        "region_id": "canonical_region_000001:range_0001",
+        "canonical_region_id": "canonical_region_000001",
+        "allowed_operations": ["replace_byte_range"],
+        "stream_start": 100,
+        "stream_end": 104,
+        "ownership": {"representative_packet_id": "packet_000010"},
+        "physical_aliases": [
+            {
+                "packet_id": "packet_000010",
+                "representations": [
+                    {
+                        "physical_representation_id": "packet_000010:canonical_region_000001",
+                        "stream_start": 100,
+                        "stream_end": 104,
+                        "packet_payload_offset_start_bytes": 0,
+                        "packet_payload_offset_end_bytes": 4,
+                    }
+                ],
+            },
+            {
+                "packet_id": "packet_000011",
+                "representations": [
+                    {
+                        "physical_representation_id": "packet_000011:canonical_region_000001",
+                        "stream_start": 100,
+                        "stream_end": 104,
+                        "packet_payload_offset_start_bytes": 8,
+                        "packet_payload_offset_end_bytes": 12,
+                    }
+                ],
+            },
+        ],
     }
 
 
@@ -287,6 +326,13 @@ class HeaderOnlyMergeTests(unittest.TestCase):
         prompt["input_traceability"]["editable_packet_ids"] = ["packet_000001"]
         self.assertEqual(["packet_000001"], packet_ids_from_prompt_unit(prompt))
 
+    def test_packet_ids_use_payload_aliases_when_traceability_lists_are_empty(self) -> None:
+        prompt = prompt_unit()
+        prompt["input_traceability"]["packet_ids"] = []
+        prompt["input_traceability"]["editable_packet_ids"] = []
+        prompt["input_traceability"]["editable_regions"] = [canonical_payload_region()]
+        self.assertEqual(["packet_000010", "packet_000011"], packet_ids_from_prompt_unit(prompt))
+
     def test_packet_ids_reject_mismatch_when_both_traceability_lists_exist(self) -> None:
         prompt = prompt_unit()
         prompt["input_traceability"]["packet_ids"] = ["packet_000002"]
@@ -315,7 +361,7 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             "traffic": [packet_record()],
         }
         prompt = prompt_unit()
-        prompt["schema_version"] = "prompt_unit_v1"
+        prompt["schema_version"] = "prompt_unit_v2"
         prompt["input_traceability"]["packet_ids"] = []
         prompt["input_traceability"]["editable_packet_ids"] = ["packet_000001"]
         metadata = {

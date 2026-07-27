@@ -109,6 +109,30 @@ class ModificationStrategyPayloadTests(unittest.TestCase):
         self.assertEqual(2, len(result["derived_payload_projection_changes"]))
         self.assertEqual([], result["no_effect_edits"])
 
+    def test_materializes_canonical_payload_byte_range_without_retyping_as_full_region(self) -> None:
+        result = materialize_payload_edits(
+            original_packets(),
+            [
+                payload_edit(
+                    region_id="canonical_region_000001:range_000001",
+                    region_type="canonical_payload_byte_range",
+                    authorized_canonical_start_offset_bytes=1,
+                    authorized_canonical_length_bytes=2,
+                    canonical_start_offset_bytes=2,
+                    offset_from_region_start_bytes=1,
+                    replaced_length_bytes=1,
+                    replacement="aa",
+                    replacement_hex="aa",
+                    replacement_length_bytes=1,
+                )
+            ],
+        )
+
+        self.assertEqual("canonical_payload_byte_range", result["explicit_edits"][0]["region_type"])
+        self.assertEqual("canonical_region_000001:range_000001", result["explicit_edits"][0]["region_id"])
+        self.assertEqual("001122aa4455", result["materialized_packets_by_id"]["packet_000001"]["payload_hex"])
+        self.assertEqual("991122aa88", result["materialized_packets_by_id"]["packet_000002"]["payload_hex"])
+
     def test_detects_canonical_payload_no_effect(self) -> None:
         result = materialize_payload_edits(original_packets(), [payload_edit(replacement="1122", replacement_hex="1122")])
 

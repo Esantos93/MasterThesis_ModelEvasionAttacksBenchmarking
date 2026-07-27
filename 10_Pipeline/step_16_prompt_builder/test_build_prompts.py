@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import sys
 import unittest
@@ -127,6 +128,8 @@ def build_v3_header_modification_unit() -> dict:
 def build_v3_payload_region() -> dict:
     return {
         "canonical_region_id": "tcp_region_000001",
+        "stream_start": 100,
+        "stream_end": 104,
         "role": "editable_owner",
         "editable": True,
         "payload_length_bytes": 4,
@@ -615,6 +618,10 @@ class Step16V3Test(unittest.TestCase):
         self.assertNotIn('"header_edits": []', prompt_text)
         payload_target = prompt_unit["input_traceability"]["editable_regions"][0]
         self.assertEqual(payload_target["canonical_region_id"], "tcp_region_000001")
+        self.assertEqual(payload_target["identity_type"], "canonical_payload_region")
+        self.assertEqual(payload_target["region_type"], "canonical_payload_byte_range")
+        self.assertEqual(payload_target["stream_start"], 100)
+        self.assertEqual(payload_target["stream_end"], 104)
         self.assertEqual(payload_target["authorized_length_bytes"], 4)
         self.assertEqual(payload_target["max_replacement_bytes"], 10)
         self.assertEqual(
@@ -635,6 +642,112 @@ class Step16V3Test(unittest.TestCase):
                 "packet_payload_offset_start_bytes": 0,
                 "packet_payload_offset_end_bytes": 4,
             },
+        )
+
+    def test_payload_full_region_v3_preserves_canonical_stream_bounds(self) -> None:
+        unit = build_v3_payload_modification_unit()
+        canonical_region = unit["canonical_payload_regions"][0]
+        target = canonical_region["editable_regions"][0]
+        target["region_id"] = "tcp_region_000001"
+        target["region_type"] = "canonical_payload_region"
+        target["allowed_operations"] = ["replace_region"]
+        apply_baseline_token_plan(unit)
+
+        prompt_unit = self.build_prompt_from_unit(unit)
+        payload_target = prompt_unit["input_traceability"]["editable_regions"][0]
+
+        self.assertEqual(payload_target["identity_type"], "canonical_payload_region")
+        self.assertEqual(payload_target["canonical_region_id"], "tcp_region_000001")
+        self.assertEqual(payload_target["region_id"], "tcp_region_000001")
+        self.assertEqual(payload_target["region_type"], "canonical_payload_region")
+        self.assertEqual(payload_target["stream_start"], 100)
+        self.assertEqual(payload_target["stream_end"], 104)
+        self.assertEqual(payload_target["authorized_start_offset_bytes"], 0)
+        self.assertEqual(payload_target["authorized_end_offset_bytes"], 4)
+        self.assertEqual(payload_target["authorized_length_bytes"], 4)
+
+    def test_payload_traceability_rejects_missing_or_invalid_canonical_coordinates(self) -> None:
+        invalid_cases = [
+            ("missing stream_start", lambda region: region.pop("stream_start"), "stream_start"),
+            ("missing stream_end", lambda region: region.pop("stream_end"), "stream_end"),
+            ("negative stream_start", lambda region: region.__setitem__("stream_start", -1), "stream_start"),
+            (
+                "stream end before start",
+                lambda region: region.__setitem__("stream_end", region["stream_start"] - 1),
+                "stream_end",
+            ),
+        ]
+        for label, mutate, expected_error in invalid_cases:
+            with self.subTest(label=label):
+                unit = build_v3_payload_modification_unit()
+                mutate(unit["canonical_payload_regions"][0])
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    self.build_prompt_from_unit(unit)
+
+    def test_payload_traceability_rejects_invalid_authorized_coordinates(self) -> None:
+        invalid_cases = [
+            (
+                "negative authorized start",
+                {"authorized_start_offset_bytes": -1},
+                "authorized_start_offset_bytes",
+            ),
+            (
+                "authorized end before start",
+                {"authorized_start_offset_bytes": 3, "authorized_end_offset_bytes": 2},
+                "authorized_end_offset_bytes",
+            ),
+            (
+                "authorized end beyond canonical region",
+                {"authorized_end_offset_bytes": 5, "authorized_length_bytes": 5},
+                "exceeds the canonical region length",
+            ),
+            (
+                "authorized length mismatch",
+                {"authorized_length_bytes": 3},
+                "authorized_length_bytes does not match",
+            ),
+        ]
+        for label, updates, expected_error in invalid_cases:
+            with self.subTest(label=label):
+                unit = build_v3_payload_modification_unit()
+                unit["canonical_payload_regions"][0]["editable_regions"][0].update(updates)
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    self.build_prompt_from_unit(unit)
+
+    def test_traceability_only_stream_bounds_do_not_change_visible_prompt_or_token_plan(self) -> None:
+        source_unit = build_v3_payload_modification_unit()
+        shifted_unit = deepcopy(source_unit)
+        shifted_region = shifted_unit["canonical_payload_regions"][0]
+        shifted_region["stream_start"] = 500
+        shifted_region["stream_end"] = 504
+
+        original_prompt = self.build_prompt_from_unit(source_unit)
+        shifted_prompt = self.build_prompt_from_unit(shifted_unit)
+
+        self.assertEqual(original_prompt["messages"], shifted_prompt["messages"])
+        self.assertEqual(original_prompt["token_plan"], shifted_prompt["token_plan"])
+        self.assertEqual(
+            original_prompt["input_traceability"]["editable_regions"][0]["stream_start"],
+            100,
+        )
+        self.assertEqual(
+            shifted_prompt["input_traceability"]["editable_regions"][0]["stream_start"],
+            500,
+        )
+
+    def test_header_only_traceability_remains_without_payload_stream_coordinates(self) -> None:
+        source_unit = build_v3_header_modification_unit()
+        prompt_unit = self.build_prompt_from_unit(source_unit)
+
+        self.assertEqual(prompt_unit["messages"], self.build_prompt_from_unit(deepcopy(source_unit))["messages"])
+        self.assertTrue(prompt_unit["input_traceability"]["editable_regions"])
+        self.assertTrue(
+            all(
+                region["identity_type"] == "physical_header_region"
+                and "stream_start" not in region
+                and "stream_end" not in region
+                for region in prompt_unit["input_traceability"]["editable_regions"]
+            )
         )
 
     def test_hybrid_v3_skeleton_contains_both_present_target_branches(self) -> None:

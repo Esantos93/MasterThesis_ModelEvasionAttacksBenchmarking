@@ -81,7 +81,7 @@ def reference_record() -> dict:
 
 
 class HeaderOnlyValidationTests(unittest.TestCase):
-    def v2_merged_from_edits(self, explicit_edits: list[dict]) -> dict:
+    def v4_merged_from_edits(self, explicit_edits: list[dict]) -> dict:
         materialized = materialize_header_edits(reference_record(), explicit_edits)
         return {
             "group_outcomes": {
@@ -125,7 +125,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         explicit_edit = self.explicit_edit("ipv4.ttl", 1)
         explicit_edit["original_value"] = 64
         explicit_edit["constraints"] = {"min": 1, "max": 255}
-        merged = self.v2_merged_from_edits([explicit_edit])
+        merged = self.v4_merged_from_edits([explicit_edit])
         result = validate_merged_traffic(
             merged_json=merged,
             original_by_packet_id={"packet_000001": reference_record()},
@@ -202,7 +202,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         explicit_edit = self.explicit_edit("ipv4.ttl", 1)
         explicit_edit["original_value"] = 64
         explicit_edit["constraints"] = {"min": 1, "max": 255}
-        merged = self.v2_merged_from_edits([explicit_edit])
+        merged = self.v4_merged_from_edits([explicit_edit])
         result = validate_merged_traffic(
             merged_json=merged,
             original_by_packet_id={"packet_000001": reference_record()},
@@ -333,8 +333,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertEqual(1, result["summary"]["reconstruction_packet_count"])
         self.assertEqual([reference], result["reconstruction_packets"])
 
-    def test_v2_accepts_independent_tos_rematerialization(self) -> None:
-        merged = self.v2_merged_from_edits([self.explicit_edit("ipv4.tos", 7)])
+    def test_v4_accepts_independent_tos_rematerialization(self) -> None:
+        merged = self.v4_merged_from_edits([self.explicit_edit("ipv4.tos", 7)])
         result = validate_merged_traffic(
             merged_json=merged,
             original_by_packet_id={"packet_000001": reference_record()},
@@ -348,8 +348,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertEqual(1, result["summary"]["accepted_packet_count"])
         self.assertEqual({"valid": 1}, result["summary"]["authorization_materialization_status_counts"])
 
-    def test_v2_rejects_manipulated_derived_header_change(self) -> None:
-        merged = self.v2_merged_from_edits([self.explicit_edit("ipv4.tos", 7)])
+    def test_v4_rejects_manipulated_derived_header_change(self) -> None:
+        merged = self.v4_merged_from_edits([self.explicit_edit("ipv4.tos", 7)])
         merged["patch_application"]["derived_header_changes"][0]["final_value"] = 99
         result = validate_merged_traffic(
             merged_json=merged,
@@ -363,8 +363,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertIn("derived_header_changes_mismatch", result["summary"]["issue_counts_by_reason"])
         self.assertEqual(1, result["summary"]["invalid_traffic_packet_count"])
 
-    def test_v2_rejects_contradictory_overlap(self) -> None:
-        merged = self.v2_merged_from_edits(
+    def test_v4_rejects_contradictory_overlap(self) -> None:
+        merged = self.v4_merged_from_edits(
             [
                 self.explicit_edit("ipv4.ttl", 1, patch_index=1),
                 self.explicit_edit("ipv4.ttl", 2, patch_index=2),
@@ -382,11 +382,11 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertIn("contradictory_header_overlap", result["summary"]["issue_counts_by_reason"])
         self.assertEqual(1, result["summary"]["invalid_traffic_packet_count"])
 
-    def test_v2_expanded_policy_recognizes_derivatives_but_rejects_fragmentation(self) -> None:
+    def test_v4_expanded_policy_recognizes_derivatives_but_rejects_fragmentation(self) -> None:
         explicit_edit = self.explicit_edit("ipv4.flags_fragment_offset", 0x2001)
         explicit_edit["original_value"] = 0
         explicit_edit["constraints"] = {"min": 0, "max": 65535}
-        merged = self.v2_merged_from_edits([explicit_edit])
+        merged = self.v4_merged_from_edits([explicit_edit])
         merged["patch_application"]["schema_version"] = "patch_application_report_v4"
 
         result = validate_merged_traffic(
@@ -419,8 +419,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             result["reconstruction_packets"][0],
         )
 
-    def test_v2_reports_malformed_explicit_edit_without_crashing(self) -> None:
-        merged = self.v2_merged_from_edits([])
+    def test_v4_reports_malformed_explicit_edit_without_crashing(self) -> None:
+        merged = self.v4_merged_from_edits([])
         merged["patch_application"]["schema_version"] = "patch_application_report_v4"
         malformed = self.explicit_edit("ipv4.ttl", 1)
         malformed["patch_index"] = None
@@ -447,7 +447,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         )
         self.assertEqual(1, result["summary"]["invalid_traffic_packet_count"])
 
-    def test_step18_v2_to_step19_v2_integration_fixture(self) -> None:
+    def test_step18_v4_to_step19_v4_header_integration_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             config_path = temp_dir / "config.json"
@@ -455,7 +455,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             step17_root = temp_dir / "step17"
             prompt_root = temp_dir / "prompts"
             output18 = temp_dir / "08_merged_outputs"
-            output19 = temp_dir / "09_validation" / "fixture-v2"
+            output19 = temp_dir / "09_validation" / "fixture-v4"
             for path in [step17_root / "parsed", step17_root / "metadata", step17_root / "raw", step17_root / "failures", prompt_root]:
                 path.mkdir(parents=True, exist_ok=True)
 
@@ -463,7 +463,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
                 "llm": {"model_name": "fixture-model"},
                 "pipeline": {
-                    "experiment_config_label": "fixture_v2",
+                    "experiment_config_label": "fixture_v4",
                     "modification_strategy": "header_only_strategy_v1",
                     "header_editability_policy": "conservative_header_editability_v1",
                     "post_llm_traffic_validation_policy": "reject_invalid_v1",
@@ -475,11 +475,11 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 "traffic": [reference_record()],
             }
             prompt = {
-                "schema_version": "prompt_unit_v1",
+                "schema_version": "prompt_unit_v2",
                 "prompt_unit_id": "group_000001",
                 "parent_group_id": "group_000001",
                 "source_modification_unit_file": "group_000001.json",
-                "source_modification_unit_schema_version": "compact_modification_unit_v2",
+                "source_modification_unit_schema_version": "compact_modification_unit_v3",
                 "input_traceability": {
                     "editable_packet_ids": ["packet_000001"],
                     "editable_regions": [
@@ -550,7 +550,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         editable_regions: list[dict],
         patches: list[dict],
         payload_hex: str = "001122334455",
-        prompt_schema_version: str = "prompt_unit_v1",
+        prompt_schema_version: str = "prompt_unit_v2",
     ) -> tuple[dict, dict, dict, dict]:
         config_path = temp_dir / "config.json"
         reference_path = temp_dir / "selected_packet_records.json"
@@ -585,7 +585,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             "prompt_unit_id": "group_000001",
             "parent_group_id": "group_000001",
             "source_modification_unit_file": "group_000001.json",
-            "source_modification_unit_schema_version": "compact_modification_unit_v2",
+            "source_modification_unit_schema_version": "compact_modification_unit_v3",
             "input_traceability": {
                 "packet_ids": ["packet_000001"],
                 "editable_packet_ids": ["packet_000001"],
@@ -680,6 +680,53 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 }
             ],
             "allowed_operations": ["replace_region", "replace_byte_range"],
+            "max_replacement_bytes": 8,
+            "max_replacement_hex_chars": 16,
+        }
+
+    def payload_byte_range_region(self) -> dict:
+        return {
+            "identity_type": "canonical_payload_region",
+            "packet_id": "payload_region_000001",
+            "canonical_region_id": "payload_region_000001",
+            "region_id": "payload_region_000001:range_000001",
+            "region_type": "canonical_payload_byte_range",
+            "semantic_element_id": "semantic_000001",
+            "canonical_window_id": "window_000001",
+            "format": "hex",
+            "payload_length_bytes": 6,
+            "stream_start": 100,
+            "stream_end": 106,
+            "ownership": {
+                "policy": "first_physical_alias_capture_order_v1",
+                "representative_packet_id": "packet_000001",
+                "owner_parent_group_id": "group_000001",
+                "anchor_group_fragment_id": "group_000001_fragment_000001",
+            },
+            "authorized_start_offset_bytes": 2,
+            "authorized_end_offset_bytes": 5,
+            "authorized_length_bytes": 3,
+            "length_bytes": 3,
+            "physical_aliases": [
+                {
+                    "packet_id": "packet_000001",
+                    "reduced_packet_index": 1,
+                    "tcp_connection_id": "tcp_conn_fixture",
+                    "tcp_stream_id": "tcp_stream_fixture",
+                    "representations": [
+                        {
+                            "physical_representation_id": "packet_000001:payload_region_000001:repr_000001",
+                            "stream_start": 100,
+                            "stream_end": 106,
+                            "packet_payload_offset_start_bytes": 0,
+                            "packet_payload_offset_end_bytes": 6,
+                        }
+                    ],
+                }
+            ],
+            "allowed_operations": ["replace_byte_range"],
+            "max_replacement_bytes": 3,
+            "max_replacement_hex_chars": 6,
         }
 
     def ttl_patch(self) -> dict:
@@ -704,6 +751,21 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             "replacement_format": "hex",
             "replacement": "aabb",
         }
+
+    def payload_byte_range_patch(self, **overrides) -> dict:
+        patch = {
+            "representative_packet_id": "packet_000001",
+            "canonical_region_id": "payload_region_000001",
+            "region_id": "payload_region_000001:range_000001",
+            "region_type": "canonical_payload_byte_range",
+            "operation": "replace_byte_range",
+            "offset_from_region_start_bytes": 1,
+            "length_bytes": 1,
+            "replacement_format": "hex",
+            "replacement": "aa",
+        }
+        patch.update(overrides)
+        return patch
 
     def test_step18_to_step19_header_only_v3_integration_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -767,6 +829,122 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             manipulated_result["issue_counts_by_reason"],
         )
 
+    def test_step18_accepts_canonical_payload_byte_range_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_byte_range_region()],
+                patches=[self.payload_byte_range_patch()],
+                payload_hex="001122334455",
+            )
+
+        explicit_payload_edit = merged["patch_application"]["explicit_payload_edits"][0]
+        self.assertEqual(1, merge_result["accepted_group_count"])
+        self.assertEqual(0, merge_result["llm_output_failure_group_count"])
+        self.assertEqual(1, report["summary"]["explicit_payload_edit_count"])
+        self.assertEqual("canonical_payload_byte_range", explicit_payload_edit["region_type"])
+        self.assertEqual("payload_region_000001:range_000001", explicit_payload_edit["region_id"])
+        self.assertEqual(3, explicit_payload_edit["canonical_start_offset_bytes"])
+        self.assertEqual(0, validation_result["error_count"])
+        self.assertEqual("001122aa4455", merged["traffic"][0]["payload_hex"])
+
+    def test_step18_accepts_payload_bounds_from_v3_physical_representations(self) -> None:
+        region = self.payload_byte_range_region()
+        region.pop("stream_start")
+        region.pop("stream_end")
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[region],
+                patches=[self.payload_byte_range_patch()],
+                payload_hex="001122334455",
+            )
+
+        explicit_payload_edit = merged["patch_application"]["explicit_payload_edits"][0]
+        self.assertEqual(1, merge_result["accepted_group_count"])
+        self.assertEqual(1, report["summary"]["explicit_payload_edit_count"])
+        self.assertEqual(6, explicit_payload_edit["canonical_region_length_bytes"])
+        self.assertEqual(3, explicit_payload_edit["canonical_start_offset_bytes"])
+        self.assertEqual(0, validation_result["error_count"])
+        self.assertEqual("001122aa4455", merged["traffic"][0]["payload_hex"])
+
+    def test_step18_rejects_payload_patch_region_type_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, _merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_byte_range_region()],
+                patches=[self.payload_byte_range_patch(region_type="canonical_payload_region")],
+                payload_hex="001122334455",
+            )
+
+        self.assertEqual(0, merge_result["accepted_group_count"])
+        self.assertEqual(1, merge_result["llm_output_failure_group_count"])
+        self.assertEqual("region_type_mismatch", report["patch_application"]["errors"][0]["reason"])
+        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+
+    def test_step18_rejects_payload_patch_region_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, _merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_byte_range_region()],
+                patches=[self.payload_byte_range_patch(region_id="payload_region_000001:range_other")],
+                payload_hex="001122334455",
+            )
+
+        self.assertEqual(0, merge_result["accepted_group_count"])
+        self.assertEqual(1, merge_result["llm_output_failure_group_count"])
+        self.assertEqual("patch_references_unknown_region", report["patch_application"]["errors"][0]["reason"])
+        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+
+    def test_step18_rejects_payload_patch_canonical_region_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, _merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_byte_range_region()],
+                patches=[self.payload_byte_range_patch(canonical_region_id="payload_region_other")],
+                payload_hex="001122334455",
+            )
+
+        self.assertEqual(0, merge_result["accepted_group_count"])
+        self.assertEqual(1, merge_result["llm_output_failure_group_count"])
+        self.assertEqual("canonical_payload_region_id_mismatch", report["patch_application"]["errors"][0]["reason"])
+        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+
+    def test_step18_rejects_payload_byte_range_offset_outside_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, _merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_byte_range_region()],
+                patches=[self.payload_byte_range_patch(offset_from_region_start_bytes=3, length_bytes=1)],
+                payload_hex="001122334455",
+            )
+
+        self.assertEqual(0, merge_result["accepted_group_count"])
+        self.assertEqual(1, merge_result["llm_output_failure_group_count"])
+        self.assertEqual("replace_byte_range_exceeds_region", report["patch_application"]["errors"][0]["reason"])
+        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+
+    def test_step18_rejects_payload_replacement_above_declared_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, _merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_byte_range_region()],
+                patches=[self.payload_byte_range_patch(replacement="aabbccdd")],
+                payload_hex="001122334455",
+            )
+
+        self.assertEqual(0, merge_result["accepted_group_count"])
+        self.assertEqual(1, merge_result["llm_output_failure_group_count"])
+        self.assertEqual("replacement_exceeds_max_replacement_bytes", report["patch_application"]["errors"][0]["reason"])
+        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+
     def test_step18_to_step19_hybrid_v3_integration_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             merge_result, validation_result, merged, report = self.run_step18_step19_fixture(
@@ -787,7 +965,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertEqual(1, merged["traffic"][0]["ttl"])
         self.assertEqual("00aabb334455", merged["traffic"][0]["payload_hex"])
 
-    def test_step18_accepts_payload_v3_prompt_unit_v2_traceability(self) -> None:
+    def test_step18_accepts_payload_v3_prompt_unit_traceability(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             merge_result, validation_result, merged, report = self.run_step18_step19_fixture(
                 temp_dir=Path(temp_dir_name),
@@ -803,6 +981,24 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertEqual(1, report["summary"]["explicit_payload_edit_count"])
         self.assertEqual(0, validation_result["error_count"])
         self.assertEqual("00aabb334455", merged["traffic"][0]["payload_hex"])
+
+    def test_step18_rejects_pre_v3_prompt_unit_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            merge_result, validation_result, _merged, report = self.run_step18_step19_fixture(
+                temp_dir=Path(temp_dir_name),
+                strategy="canonical_payload_only_strategy_v1",
+                editable_regions=[self.payload_region()],
+                patches=[self.payload_patch()],
+                payload_hex="001122334455",
+                prompt_schema_version="prompt_unit_v1",
+            )
+
+        self.assertEqual(0, merge_result["accepted_group_count"])
+        self.assertEqual(1, merge_result["llm_output_failure_group_count"])
+        self.assertEqual("prompt_unit_schema_version_invalid", report["group_outcomes"]["llm_output_failure_groups"][0]["failure_reason"])
+        self.assertEqual(0, report["summary"]["explicit_payload_edit_count"])
+        self.assertEqual(0, validation_result["error_count"])
+        self.assertEqual(0, validation_result["llm_output_failure_packet_count"])
 
     def test_step18_rejects_incompatible_payload_in_header_only_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

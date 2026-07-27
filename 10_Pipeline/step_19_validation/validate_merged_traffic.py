@@ -284,7 +284,7 @@ def validate_basic_record_schema(record: Any, record_index: int, required_fields
     return issues
 
 #This function loads an optional original Step 14 reference JSON and indexes it by packet_id.
-#The reference lets Step 19 compare immutable fields against the original packet records when available.
+#It lets Step 19 compare immutable fields against the original packet records when available.
 def build_original_by_packet_id(reference_json_path: str | Path | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     if not reference_json_path:
         return {}, DEFAULT_IMMUTABLE_FIELDS
@@ -349,7 +349,7 @@ def canonical_json_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json_text(value).encode("utf-8")).hexdigest()
 
 
-#This helper groups Step 18 V3 materialization records by packet_id.
+#This helper groups Step 18 V4 materialization records by packet_id.
 def records_by_packet_id(records: list[Any]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     if not isinstance(records, list):
@@ -472,6 +472,7 @@ def llm_output_failure_group_by_packet_id(llm_output_failure_groups: list[Any]) 
     return packet_to_group
 
 
+#This function returns the canonical packet ids serialized for a Step 18 group outcome.
 def stable_group_packet_ids(group: dict[str, Any]) -> list[str]:
     packet_ids = group.get("packet_ids", [])
     editable_packet_ids = group.get("editable_packet_ids", [])
@@ -563,7 +564,7 @@ def validate_payload_preservation_for_record(
     return issues
 
 
-# This function performs explicit protocol-semantic checks that are safe to classify without guessing intent.
+#This function performs explicit protocol-semantic checks that are safe to classify without guessing intent.
 def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) -> list[dict[str, Any]]:
     issues = []
     packet_id = record.get("packet_id")
@@ -601,7 +602,7 @@ def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) 
     return issues
 
 
-#This function independently re-materializes Step 18 V3 header edits and compares the result with the merged packet.
+#This function independently re-materializes Step 18 V4 header edits and compares the result with the merged packet.
 def validate_header_materialization_for_record(
     *,
     record: dict[str, Any],
@@ -783,7 +784,7 @@ def expected_packets_from_explicit_edits(
     return expected_by_packet_id, payload_materialized, None, header_issues_by_packet
 
 #This function compares one modified packet record against the original reference record for the same packet_id.
-#Any immutable-field difference is an error because it breaks PRE/POST traceability.
+#It treats immutable-field differences as errors because they break PRE/POST traceability.
 def validate_against_original(
     *,
     record: dict[str, Any],

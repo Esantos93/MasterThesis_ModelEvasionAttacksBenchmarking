@@ -31,10 +31,11 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
-PROMPT_UNIT_SCHEMA_VERSIONS = {"prompt_unit_v1", "prompt_unit_v2"}
+PROMPT_UNIT_SCHEMA_VERSIONS = {"prompt_unit_v2"}
 MERGED_SCHEMA_VERSION = "patch_applied_traffic_v4"
 REPORT_SCHEMA_VERSION = "patch_application_report_v4"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
+SUPPORTED_PAYLOAD_REGION_TYPES = {"canonical_payload_region", "canonical_payload_byte_range"}
 
 
 #This function returns a lightweight heartbeat printer for long Step 18 runs.
@@ -266,6 +267,21 @@ def stable_unique_strings(values: list[Any]) -> list[str]:
     return list(dict.fromkeys(str(value) for value in values))
 
 
+#This helper resolves affected packet ids directly from editable region traceability.
+def packet_ids_from_editable_regions(editable_regions: list[Any]) -> list[str]:
+    packet_ids = []
+    for region in editable_regions:
+        if not isinstance(region, dict):
+            continue
+        if region.get("identity_type") == "canonical_payload_region":
+            packet_ids.extend(packet_ids_from_region_aliases(region))
+            continue
+        packet_id = region.get("packet_id")
+        if packet_id is not None:
+            packet_ids.append(packet_id)
+    return stable_unique_strings(packet_ids)
+
+
 #This function returns the canonical affected packet ids for one prompt unit.
 def packet_ids_from_prompt_unit(prompt_unit: dict[str, Any] | None) -> list[str]:
     if not prompt_unit:
@@ -273,18 +289,26 @@ def packet_ids_from_prompt_unit(prompt_unit: dict[str, Any] | None) -> list[str]
     traceability = prompt_unit.get("input_traceability", {})
     packet_ids = traceability.get("packet_ids", [])
     editable_packet_ids = traceability.get("editable_packet_ids", [])
+    editable_regions = traceability.get("editable_regions", [])
     if packet_ids is None:
         packet_ids = []
     if editable_packet_ids is None:
         editable_packet_ids = []
+    if editable_regions is None:
+        editable_regions = []
     if not isinstance(packet_ids, list):
         raise ValueError("prompt_unit input_traceability.packet_ids must be a list.")
     if not isinstance(editable_packet_ids, list):
         raise ValueError("prompt_unit input_traceability.editable_packet_ids must be a list.")
-    canonical_packet_ids = stable_unique_strings(editable_packet_ids or packet_ids)
+    if not isinstance(editable_regions, list):
+        raise ValueError("prompt_unit input_traceability.editable_regions must be a list.")
+    region_packet_ids = packet_ids_from_editable_regions(editable_regions)
+    canonical_packet_ids = stable_unique_strings(editable_packet_ids + region_packet_ids)
+    if not canonical_packet_ids:
+        canonical_packet_ids = stable_unique_strings(packet_ids)
     if packet_ids and editable_packet_ids:
         all_packet_ids = set(stable_unique_strings(packet_ids))
-        editable_set = set(canonical_packet_ids)
+        editable_set = set(stable_unique_strings(editable_packet_ids))
         if not editable_set.issubset(all_packet_ids):
             raise ValueError("prompt_unit editable_packet_ids must be contained in packet_ids when both are present.")
     return canonical_packet_ids
@@ -382,6 +406,63 @@ def payload_owner_packet_id_from_region(region: dict[str, Any]) -> tuple[str | N
     return representative_packet_id, None
 
 
+#This helper resolves the complete canonical stream bounds declared by V3 payload traceability.
+def payload_canonical_stream_bounds_from_region(region: dict[str, Any]) -> tuple[int | None, int | None, dict[str, Any] | None]:
+    region_id = region.get("region_id")
+    canonical_region_id = region.get("canonical_region_id")
+    stream_start = region.get("stream_start")
+    stream_end = region.get("stream_end")
+    if is_json_int(stream_start) and is_json_int(stream_end):
+        if stream_start < 0 or stream_end < stream_start:
+            return None, None, {
+                "reason": "canonical_payload_region_stream_bounds_invalid",
+                "region_id": region_id,
+                "canonical_region_id": canonical_region_id,
+            }
+        return stream_start, stream_end, None
+
+    physical_aliases = region.get("physical_aliases")
+    if not isinstance(physical_aliases, list) or not physical_aliases:
+        return None, None, {
+            "reason": "canonical_payload_region_stream_bounds_invalid",
+            "region_id": region_id,
+            "canonical_region_id": canonical_region_id,
+        }
+
+    representation_starts = []
+    representation_ends = []
+    for physical_alias in physical_aliases:
+        if not isinstance(physical_alias, dict):
+            continue
+        representations = physical_alias.get("representations")
+        if not isinstance(representations, list):
+            continue
+        for representation in representations:
+            if not isinstance(representation, dict):
+                continue
+            representation_start = representation.get("stream_start")
+            representation_end = representation.get("stream_end")
+            if is_json_int(representation_start) and is_json_int(representation_end):
+                representation_starts.append(representation_start)
+                representation_ends.append(representation_end)
+
+    if not representation_starts or not representation_ends:
+        return None, None, {
+            "reason": "canonical_payload_region_stream_bounds_invalid",
+            "region_id": region_id,
+            "canonical_region_id": canonical_region_id,
+        }
+    canonical_stream_start = min(representation_starts)
+    canonical_stream_end = max(representation_ends)
+    if canonical_stream_start < 0 or canonical_stream_end < canonical_stream_start:
+        return None, None, {
+            "reason": "canonical_payload_region_stream_bounds_invalid",
+            "region_id": region_id,
+            "canonical_region_id": canonical_region_id,
+        }
+    return canonical_stream_start, canonical_stream_end, None
+
+
 #This helper normalizes Step 15 V3 physical_aliases[].representations[] for common payload materialization.
 def packet_aliases_from_region(region: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     canonical_region_id = region.get("canonical_region_id")
@@ -389,10 +470,9 @@ def packet_aliases_from_region(region: dict[str, Any]) -> tuple[list[dict[str, A
     if not isinstance(canonical_region_id, str) or not canonical_region_id:
         return [], {"reason": "canonical_payload_region_id_missing", "region_id": region_id}
 
-    canonical_stream_start = region.get("stream_start")
-    canonical_stream_end = region.get("stream_end")
-    if not is_json_int(canonical_stream_start) or not is_json_int(canonical_stream_end) or canonical_stream_start < 0 or canonical_stream_end < canonical_stream_start:
-        return [], {"reason": "canonical_payload_region_stream_bounds_invalid", "region_id": region_id, "canonical_region_id": canonical_region_id}
+    canonical_stream_start, canonical_stream_end, bounds_error = payload_canonical_stream_bounds_from_region(region)
+    if bounds_error is not None:
+        return [], bounds_error
 
     physical_aliases = region.get("physical_aliases")
     if not isinstance(physical_aliases, list) or not physical_aliases:
@@ -493,15 +573,24 @@ def build_payload_edit(
     parsed_path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     region_id = patch.get("region_id")
+    expected_region_id = region.get("region_id")
     canonical_region_id = region.get("canonical_region_id")
     if not isinstance(canonical_region_id, str) or not canonical_region_id:
         return None, {"reason": "canonical_payload_region_id_missing", "region_id": region_id, "patch_index": patch_index}
-    if patch.get("canonical_region_id") is not None and patch.get("canonical_region_id") != canonical_region_id:
+    if patch.get("canonical_region_id") != canonical_region_id:
         return None, {
             "reason": "canonical_payload_region_id_mismatch",
             "region_id": region_id,
             "expected_canonical_region_id": canonical_region_id,
             "actual_canonical_region_id": patch.get("canonical_region_id"),
+            "patch_index": patch_index,
+        }
+    if region_id != expected_region_id:
+        return None, {
+            "reason": "payload_region_id_mismatch",
+            "expected_region_id": expected_region_id,
+            "actual_region_id": region_id,
+            "canonical_region_id": canonical_region_id,
             "patch_index": patch_index,
         }
     representative_packet_id_text, owner_error = payload_owner_packet_id_from_region(region)
@@ -525,10 +614,11 @@ def build_payload_edit(
     if operation not in allowed_operations:
         return None, {"reason": "operation_not_allowed_for_region", "packet_id": representative_packet_id_text, "region_id": region_id, "operation": operation, "allowed_operations": allowed_operations, "patch_index": patch_index}
 
-    if region.get("identity_type") != "canonical_payload_region" or region.get("region_type") != "canonical_payload_region":
+    region_type = region.get("region_type")
+    if region.get("identity_type") != "canonical_payload_region" or region_type not in SUPPORTED_PAYLOAD_REGION_TYPES:
         return None, {"reason": "payload_patch_references_non_canonical_region", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
-    if patch.get("region_type") != region.get("region_type"):
-        return None, {"reason": "region_type_mismatch", "packet_id": representative_packet_id_text, "region_id": region_id, "expected_region_type": region.get("region_type"), "actual_region_type": patch.get("region_type"), "patch_index": patch_index}
+    if patch.get("region_type") != region_type:
+        return None, {"reason": "region_type_mismatch", "packet_id": representative_packet_id_text, "region_id": region_id, "expected_region_type": region_type, "actual_region_type": patch.get("region_type"), "patch_index": patch_index}
 
     replacement_format = patch.get("replacement_format")
     replacement = patch.get("replacement")
@@ -570,14 +660,51 @@ def build_payload_edit(
             "replacement_format": replacement_format,
             "patch_index": patch_index,
         }
+    replacement_length_bytes = len(replacement_hex) // 2
+    max_replacement_bytes = region.get("max_replacement_bytes")
+    if max_replacement_bytes is not None:
+        if not is_json_int(max_replacement_bytes) or max_replacement_bytes < 0:
+            return None, {
+                "reason": "max_replacement_bytes_invalid",
+                "packet_id": representative_packet_id_text,
+                "region_id": region_id,
+                "max_replacement_bytes": max_replacement_bytes,
+                "patch_index": patch_index,
+            }
+        if replacement_length_bytes > max_replacement_bytes:
+            return None, {
+                "reason": "replacement_exceeds_max_replacement_bytes",
+                "packet_id": representative_packet_id_text,
+                "region_id": region_id,
+                "replacement_length_bytes": replacement_length_bytes,
+                "max_replacement_bytes": max_replacement_bytes,
+                "patch_index": patch_index,
+            }
+    max_replacement_hex_chars = region.get("max_replacement_hex_chars")
+    if max_replacement_hex_chars is not None:
+        if not is_json_int(max_replacement_hex_chars) or max_replacement_hex_chars < 0:
+            return None, {
+                "reason": "max_replacement_hex_chars_invalid",
+                "packet_id": representative_packet_id_text,
+                "region_id": region_id,
+                "max_replacement_hex_chars": max_replacement_hex_chars,
+                "patch_index": patch_index,
+            }
+        if len(replacement_hex) > max_replacement_hex_chars:
+            return None, {
+                "reason": "replacement_exceeds_max_replacement_hex_chars",
+                "packet_id": representative_packet_id_text,
+                "region_id": region_id,
+                "replacement_hex_chars": len(replacement_hex),
+                "max_replacement_hex_chars": max_replacement_hex_chars,
+                "patch_index": patch_index,
+            }
 
-    stream_start = region.get("stream_start")
-    stream_end = region.get("stream_end")
+    stream_start, stream_end, stream_bounds_error = payload_canonical_stream_bounds_from_region(region)
+    if stream_bounds_error is not None:
+        return None, {**stream_bounds_error, "packet_id": representative_packet_id_text, "patch_index": patch_index}
     canonical_region_start = 0
-    if is_json_int(stream_start) and is_json_int(stream_end):
-        canonical_region_length = stream_end - stream_start
-    else:
-        canonical_region_length = None
+    canonical_region_length = stream_end - stream_start
     if (
         not is_json_int(stream_start)
         or not is_json_int(stream_end)
@@ -629,7 +756,6 @@ def build_payload_edit(
         return None, {**alias_error, "packet_id": representative_packet_id_text, "patch_index": patch_index}
     if not aliases:
         return None, {"reason": "canonical_payload_region_aliases_missing", "packet_id": representative_packet_id_text, "region_id": region_id, "patch_index": patch_index}
-    traceability_packet_ids = set(packet_ids_from_prompt_unit(prompt_unit))
     alias_packet_ids = set()
     for alias in aliases:
         alias_packet_id = alias.get("packet_id")
@@ -642,15 +768,6 @@ def build_payload_edit(
         original_payload_hex = packet_index[alias_packet_id_text].get("payload_hex", "")
         if not isinstance(original_payload_hex, str) or not is_valid_hex(original_payload_hex):
             return None, {"reason": "reference_payload_hex_invalid", "packet_id": alias_packet_id_text, "patch_index": patch_index}
-    if traceability_packet_ids and not alias_packet_ids.issubset(traceability_packet_ids):
-        return None, {
-            "reason": "canonical_payload_alias_not_in_prompt_traceability",
-            "packet_id": representative_packet_id_text,
-            "region_id": region_id,
-            "alias_packet_ids": sorted(alias_packet_ids),
-            "traceability_packet_ids": sorted(traceability_packet_ids),
-            "patch_index": patch_index,
-        }
 
     return {
         "edit_kind": "canonical_payload",
@@ -659,7 +776,7 @@ def build_payload_edit(
         "canonical_region_id": canonical_region_id,
         "region_id": region_id,
         "identity_type": "canonical_payload_region",
-        "region_type": "canonical_payload_region",
+        "region_type": region_type,
         "semantic_element_id": region.get("semantic_element_id"),
         "canonical_window_id": region.get("canonical_window_id"),
         "operation": operation,
@@ -673,8 +790,12 @@ def build_payload_edit(
         "replacement": replacement,
         "replacement_text": replacement if replacement_format == "text" else None,
         "replacement_hex": replacement_hex,
-        "replacement_length_bytes": len(replacement_hex) // 2,
+        "replacement_length_bytes": replacement_length_bytes,
+        "max_replacement_bytes": max_replacement_bytes,
+        "max_replacement_hex_chars": max_replacement_hex_chars,
         "offset_from_region_start_bytes": local_offset,
+        "ownership": copy.deepcopy(region.get("ownership")),
+        "physical_aliases": copy.deepcopy(region.get("physical_aliases")),
         "packet_aliases": aliases,
         "patch_index": patch_index,
         "parsed_file": str(parsed_path),
@@ -957,6 +1078,7 @@ def collect_edits_for_parsed_output(
         elif edit:
             edits.append(edit)
 
+    group_packet_ids = packet_ids_from_prompt_unit(prompt_unit)
     group = {
         "prompt_unit_id": prompt_unit_id,
         "parent_group_id": prompt_unit.get("parent_group_id"),
@@ -967,8 +1089,8 @@ def collect_edits_for_parsed_output(
         "accepted_edit_count": len(edits) if not patch_errors else 0,
         "effective_edit_count": len([edit for edit in edits if not edit.get("no_effect")]) if not patch_errors else 0,
         "no_effect_edit_count": len([edit for edit in edits if edit.get("no_effect")]) if not patch_errors else 0,
-        "packet_ids": packet_ids_from_prompt_unit(prompt_unit),
-        "editable_packet_ids": [str(value) for value in prompt_unit["input_traceability"].get("editable_packet_ids", [])],
+        "packet_ids": group_packet_ids,
+        "editable_packet_ids": group_packet_ids,
         "parsed_file": str(parsed_path),
         "metadata_file": metadata.get("_metadata_file"),
         "prompt_file": prompt_unit.get("_prompt_file"),
@@ -1005,6 +1127,7 @@ def summarize_llm_output_failure(
         "failure_reason": failure_reason or metadata.get("failure_reason") or prompt_error,
         "validation_result": validation_result,
         "packet_ids": packet_ids,
+        "editable_packet_ids": packet_ids,
         "packet_id_resolution_status": packet_id_resolution_status,
         "output_paths": metadata.get("output_paths", {}),
         "parsed_file": parsed_file,

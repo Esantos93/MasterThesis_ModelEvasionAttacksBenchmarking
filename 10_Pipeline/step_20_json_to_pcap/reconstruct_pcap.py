@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# This allows the script to find the folder common/ with shared code, even if the script is run from a different working directory.
+#This allows the script to find the folder common/ with shared code, even if the script is run from a different working directory.
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
@@ -56,9 +56,9 @@ STEP19_V4_COUNT_METADATA_FIELDS = [
 ]
 
 
-# This exception carries a machine-readable reconstruction failure reason.
+#This exception carries a machine-readable reconstruction failure reason.
 class TcpReconstructionError(ValueError):
-    # This initializer stores the reconstruction failure context for later reports.
+    #This initializer stores the reconstruction failure context for later reports.
     def __init__(self, reason: str, message: str, **context: Any):
         super().__init__(message)
         self.detail = {
@@ -68,21 +68,21 @@ class TcpReconstructionError(ValueError):
         }
 
 
-# This function reads a JSON file and returns the parsed Python object.
+#This function reads a JSON file and returns the parsed Python object.
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
-# This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
+#This function builds the root directory for the experiment based on the output_root and experiment_id specified in the config.
 def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
 
-# This function returns the default Step 20 input and output paths for the active experiment configuration.
-# If experiment_root_override is provided, it is used instead of the experiment root stored in the config.
-# This is useful when the VM artifacts are under a different folder than the one currently written in the config file.
+#This function returns the default Step 20 input and output paths for the active experiment configuration.
+#This function uses experiment_root_override when provided instead of the experiment root stored in the config.
+#This is useful when the VM artifacts are under a different folder than the one currently written in the config file.
 def default_paths(config: dict[str, Any], experiment_config_label: str, experiment_root_override: str | Path | None = None) -> dict[str, Path]:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     return {
@@ -92,8 +92,8 @@ def default_paths(config: dict[str, Any], experiment_config_label: str, experime
     }
 
 
-# This function validates the minimum config keys needed by Step 20.
-# Step 20 needs the experiment identity, output root, and pipeline.experiment_config_label because each config maps to one POST branch.
+#This function validates the minimum config keys needed by Step 20.
+#This function checks the experiment identity, output root, and pipeline.experiment_config_label because each config maps to one POST branch.
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
@@ -106,12 +106,12 @@ def validate_config(config: dict[str, Any]) -> None:
     resolve_post_llm_traffic_validation_policy(config)
 
 
-# This function returns the single pipeline.experiment_config_label configured for this run.
+#This function returns the single pipeline.experiment_config_label configured for this run.
 def experiment_config_label_from_config(config: dict[str, Any]) -> str:
     return config["pipeline"]["experiment_config_label"]
 
 
-# This function resolves a path stored in Step 19 metadata and handles relocated experiment roots.
+#This function resolves a path stored in Step 19 metadata and handles relocated experiment roots.
 # Absolute metadata paths are preferred, but the active input location is used as a deterministic fallback when artifacts were moved together.
 def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_json_path: Path) -> Path:
     value = metadata.get(field)
@@ -136,8 +136,8 @@ def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_jso
     return recorded_path
 
 
-# This function enforces the Step 19 V4 artifact contract consumed by Step 20.
-# Step 20 must not silently accept legacy validated traffic schemas.
+#This function enforces the Step 19 V4 artifact contract consumed by Step 20.
+#This function must not silently accept legacy validated traffic schemas.
 def validate_step19_v4_input(
     validated_json: Any,
     input_json_path: Path,
@@ -207,8 +207,8 @@ def validate_step19_v4_input(
     return metadata, traffic
 
 
-# This helper checks the V4 payload projection records that Step 19 already validated.
-# Step 20 summarizes this evidence for auditability; it does not apply these records as patches.
+#This helper checks the V4 payload projection records that Step 19 already validated.
+#This helper summarizes projection evidence for auditability; it does not apply these records as patches.
 def summarize_payload_projection_evidence(
     projections: list[Any],
     source_merged_json_path: Path,
@@ -294,7 +294,7 @@ def summarize_payload_projection_evidence(
     }
 
 
-# This function loads and summarizes the Step 18/19 V4 source evidence when payload-capable reconstruction needs it.
+#This function loads and summarizes the Step 18/19 V4 source evidence when payload-capable reconstruction needs it.
 def step19_v4_source_contract_summary(
     *,
     metadata: dict[str, Any],
@@ -356,8 +356,8 @@ def step19_v4_source_contract_summary(
     }
 
 
-# This function imports Scapy only when PCAP reconstruction actually runs.
-# This keeps --help and syntax checks usable in environments where Scapy is not installed, such as the local Windows Codex runtime.
+#This function imports Scapy only when PCAP reconstruction actually runs.
+#This keeps --help and syntax checks usable in environments where Scapy is not installed, such as the local Windows Codex runtime.
 def import_scapy() -> dict[str, Any]:
     try:
         from scapy.all import Ether, ICMP, IP, IPv6, PcapReader, PcapWriter, Raw, TCP, UDP, raw
@@ -382,8 +382,8 @@ def import_scapy() -> dict[str, Any]:
     }
 
 
-# This helper builds a structured issue entry for the reconstruction report.
-# The report uses these entries to avoid silent repair when a packet is rebuilt with warnings or cannot be rebuilt.
+#This helper builds a structured issue entry for the reconstruction report.
+#This helper builds entries that avoid silent repair when a packet is rebuilt with warnings or cannot be rebuilt.
 def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, Any]:
     return {
         "severity": severity,
@@ -393,15 +393,14 @@ def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, A
     }
 
 
-# This helper checks if a value is a real integer and not a boolean.
-# It is used before assigning JSON values to Scapy header fields.
+#This helper checks if a value is a real integer and not a boolean.
+#This helper is used before assigning JSON values to Scapy header fields.
 def is_int_like(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-# PCAPs normally store Ethernet frames without the four-byte FCS but retain the
-# zero padding required to reach the 60-byte minimum frame size. Padding is
-# appended after serializing IP so it remains outside the IP/TCP lengths.
+#This function appends Ethernet minimum-frame padding after Scapy has serialized the packet.
+#This keeps the padding outside the IP/TCP lengths while preserving PCAP frame-size rules.
 def apply_ethernet_minimum_padding(packet: Any, scapy: dict[str, Any]) -> tuple[Any, bytes, int]:
     serialized = scapy["raw"](packet)
     padding_length = max(0, ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS - len(serialized))
@@ -415,12 +414,12 @@ def apply_ethernet_minimum_padding(packet: Any, scapy: dict[str, Any]) -> tuple[
     return padded_packet, scapy["raw"](padded_packet), padding_length
 
 
-# This function normalizes an address and port into the endpoint tuple used by TCP connection tracking.
+#This function normalizes an address and port into the endpoint tuple used by TCP connection tracking.
 def tcp_endpoint(address: str, port: int) -> tuple[str, int]:
     return address, port
 
 
-# This function creates an order-independent key for a bidirectional TCP connection.
+#This function creates an order-independent key for a bidirectional TCP connection.
 def canonical_tcp_connection_key(
     source: tuple[str, int],
     destination: tuple[str, int],
@@ -428,12 +427,12 @@ def canonical_tcp_connection_key(
     return tuple(sorted((source, destination)))
 
 
-# This function converts a wrapped TCP sequence number into a relative number from an anchor.
+#This function converts a wrapped TCP sequence number into a relative number from an anchor.
 def tcp_relative_number(value: int, anchor: int) -> int:
     return (value - anchor) & TCP_SEQUENCE_MASK
 
 
-# This function creates the mutable state record used while assigning packets to TCP connections.
+#This function creates the mutable state record used while assigning packets to TCP connections.
 def new_tcp_connection(
     *,
     connection_key: tuple[tuple[str, int], tuple[str, int]],
@@ -454,7 +453,7 @@ def new_tcp_connection(
     }
 
 
-# This function assigns one reference packet descriptor to the active TCP connection state.
+#This function assigns one reference packet descriptor to the active TCP connection state.
 def assign_tcp_connection(
     descriptor: dict[str, Any],
     current_connections: dict[tuple[tuple[str, int], tuple[str, int]], dict[str, Any]],
@@ -507,7 +506,7 @@ def assign_tcp_connection(
     return current
 
 
-# This function extracts the TCP/IP fields needed to track reference-packet stream state.
+#This function extracts the TCP/IP fields needed to track reference-packet stream state.
 def reference_tcp_descriptor(
     packet: Any,
     reduced_packet_index: int,
@@ -547,7 +546,7 @@ def reference_tcp_descriptor(
     }
 
 
-# This function loads the reference PCAP packets required by the validated Step 19 traffic.
+#This function loads the reference PCAP packets required by the validated Step 19 traffic.
 def load_reference_pcap_context(
     *,
     reference_pcap_path: Path,
@@ -595,7 +594,7 @@ def load_reference_pcap_context(
     }
 
 
-# This function verifies that a Step 19 record still matches the immutable reference packet identity.
+#This function verifies that a Step 19 record still matches the immutable reference packet identity.
 def validate_record_against_reference(
     record: dict[str, Any],
     descriptor: dict[str, Any] | None,
@@ -624,7 +623,7 @@ def validate_record_against_reference(
         )
 
 
-# This function decodes payload_hex and fails closed when the JSON payload is malformed.
+#This function decodes payload_hex and fails closed when the JSON payload is malformed.
 def decode_payload_hex_strict(record: dict[str, Any]) -> bytes:
     payload_hex = record.get("payload_hex", "")
     if not isinstance(payload_hex, str):
@@ -635,7 +634,7 @@ def decode_payload_hex_strict(record: dict[str, Any]) -> bytes:
         raise ValueError(f"Record {record.get('packet_id')} has invalid payload_hex: {error}") from error
 
 
-# This function detects modified TCP overlaps that would make stream reconstruction ambiguous.
+#This function detects modified TCP overlaps that would make stream reconstruction ambiguous.
 def validate_overlapping_tcp_segments(segments: list[dict[str, Any]]) -> dict[str, int]:
     ordered = sorted(segments, key=lambda item: (item["start"], item["end"], item["packet_id"]))
     active = []
@@ -699,7 +698,7 @@ def validate_overlapping_tcp_segments(segments: list[dict[str, Any]]) -> dict[st
     }
 
 
-# This function builds the TCP sequence/ack translation plan for one stream direction.
+#This function builds the TCP sequence/ack translation plan for one stream direction.
 def build_tcp_translation(
     *,
     anchor: int,
@@ -752,7 +751,7 @@ def build_tcp_translation(
     }
 
 
-# This function translates one TCP sequence-space value through a prepared resize plan.
+#This function translates one TCP sequence-space value through a prepared resize plan.
 def translate_tcp_number(value: int, translation: dict[str, Any] | None) -> tuple[int, int, bool]:
     if not translation or not translation["positions"]:
         return value, 0, False
@@ -766,12 +765,12 @@ def translate_tcp_number(value: int, translation: dict[str, Any] | None) -> tupl
     return (value + delta) & TCP_SEQUENCE_MASK, delta, inside_resized_interval
 
 
-# This function renders an endpoint tuple as JSON-friendly report data.
+#This function renders an endpoint tuple as JSON-friendly report data.
 def endpoint_report_value(endpoint: tuple[str, int]) -> dict[str, Any]:
     return {"ip": endpoint[0], "port": endpoint[1]}
 
 
-# This function prepares deterministic TCP sequence, acknowledgement and SACK translation for all packets.
+#This function prepares deterministic TCP sequence, acknowledgement and SACK translation for all packets.
 def prepare_tcp_sequence_translation(
     *,
     traffic: list[dict[str, Any]],
@@ -1010,7 +1009,7 @@ def prepare_tcp_sequence_translation(
     }
 
 
-# This function enforces strategy-specific reconstruction constraints before packet materialization.
+#This function enforces strategy-specific reconstruction constraints before packet materialization.
 def enforce_active_reconstruction_contract(capabilities: ModificationCapabilities, translation_plan: dict[str, Any]) -> None:
     if not capabilities.requires_payload_preservation:
         return
@@ -1035,8 +1034,8 @@ def enforce_active_reconstruction_contract(capabilities: ModificationCapabilitie
         )
 
 
-# This function decodes the mutable payload_hex field into bytes.
-# If the payload is not valid hexadecimal content, it records an error so the packet is not silently reconstructed.
+#This function decodes the mutable payload_hex field into bytes.
+#This function records an error when payload_hex is not valid hexadecimal content so the packet is not silently reconstructed.
 def payload_bytes(record: dict[str, Any], packet_issues: list[dict[str, Any]]) -> bytes:
     payload_hex = record.get("payload_hex", "")
     if not isinstance(payload_hex, str):
@@ -1064,7 +1063,7 @@ def payload_bytes(record: dict[str, Any], packet_issues: list[dict[str, Any]]) -
         return b""
 
 
-# This helper coerces integer header values before assigning them to Scapy fields.
+#This helper coerces integer header values before assigning them to Scapy fields.
 def int_header_value(record: dict[str, Any], field: str) -> int | None:
     value = header_field_value(record, field)
     if isinstance(value, bool):
@@ -1074,7 +1073,7 @@ def int_header_value(record: dict[str, Any], field: str) -> int | None:
     return None
 
 
-# This function materializes policy-authorized physical-header edits onto a copied reference packet.
+#This function materializes policy-authorized physical-header edits onto a copied reference packet.
 def apply_editable_header_fields_to_packet(
     *,
     packet: Any,
@@ -1150,7 +1149,7 @@ def apply_editable_header_fields_to_packet(
             tcp_layer.flags = raw_flags
 
 
-# This function rebuilds one packet from the reference frame plus validated JSON/header changes.
+#This function rebuilds one packet from the reference frame plus validated JSON/header changes.
 def rebuild_from_reference_packet(
     *,
     reference_packet: Any,
@@ -1236,8 +1235,8 @@ def rebuild_from_reference_packet(
     return packet
 
 
-# This function extracts group-level context from the Step 18 merge trace when it is present.
-# The context is stored in packet and group results so later alert comparison can map reconstructed POST packets back to their LLM group.
+#This function extracts group-level context from the Step 18 merge trace when it is present.
+#This function stores context in packet and group results so later alert comparison can map reconstructed POST packets back to their LLM group.
 def group_context_for_record(record: dict[str, Any], record_index: int) -> dict[str, Any]:
     merge_trace = record.get("_merge_trace")
     if isinstance(merge_trace, dict):
@@ -1254,8 +1253,8 @@ def group_context_for_record(record: dict[str, Any], record_index: int) -> dict[
     return {"condition": None, "model_name": None, "group_id": None, "group_key": f"unassigned_record_{record_index}"}
 
 
-# This function reconstructs one packet and returns both the Scapy packet object and its report entry.
-# If a packet has any error-level issue, the Scapy packet is not returned and the packet is classified as Invalid Traffic.
+#This function reconstructs one packet and returns both the Scapy packet object and its report entry.
+#This function withholds the Scapy packet when a packet has any error-level issue, classifying it as Invalid Traffic.
 def reconstruct_one_packet(
     record: Any,
     record_index: int,
@@ -1293,7 +1292,7 @@ def reconstruct_one_packet(
         packet_issues=packet_issues,
     )
 
-    # PCAP timestamps are preserved when Step 19 kept a numeric timestamp_epoch_pcap value.
+    #This function preserves PCAP timestamps when Step 19 kept a numeric timestamp_epoch_pcap value.
     if packet is not None and isinstance(record.get("timestamp_epoch_pcap"), (int, float)):
         packet.time = float(record["timestamp_epoch_pcap"])
     elif packet is not None:
@@ -1306,7 +1305,7 @@ def reconstruct_one_packet(
             )
         )
 
-    # These checks do not block reconstruction. They record differences caused by Scapy rebuilding the packet from structured fields.
+    #These checks do not block reconstruction. They record differences caused by Scapy rebuilding the packet from structured fields.
     if packet is not None:
         try:
             packet, rebuilt_bytes, ethernet_padding_length = apply_ethernet_minimum_padding(packet, scapy)
@@ -1377,8 +1376,8 @@ def reconstruct_one_packet(
     return {"packet": None if has_error else packet, "result": result}
 
 
-# This function writes the reconstructed Scapy packets to a PCAP file.
-# The linktype is Ethernet because Step 14 exports Ethernet-layer records and Step 20 rebuilds Ether frames.
+#This function writes the reconstructed Scapy packets to a PCAP file.
+#This function writes Ethernet linktype PCAPs because Step 14 exports Ethernet-layer records and Step 20 rebuilds Ether frames.
 def write_packets(output_pcap_path: Path, packets: list[Any], scapy: dict[str, Any]) -> None:
     output_pcap_path.parent.mkdir(parents=True, exist_ok=True)
     PcapWriter = scapy["PcapWriter"]
@@ -1390,7 +1389,7 @@ def write_packets(output_pcap_path: Path, packets: list[Any], scapy: dict[str, A
         writer.close()
 
 
-# This function independently verifies an Internet checksum over serialized bytes.
+#This function independently verifies an Internet checksum over serialized bytes.
 def internet_checksum_is_valid(data: bytes) -> bool:
     if len(data) % 2:
         data += b"\x00"
@@ -1402,7 +1401,7 @@ def internet_checksum_is_valid(data: bytes) -> bool:
     return total == 0xFFFF
 
 
-# This function parses TCP option kinds from raw option bytes for independent validation.
+#This function parses TCP option kinds from raw option bytes for independent validation.
 def tcp_option_kinds_from_bytes(option_bytes: bytes) -> tuple[list[int], str | None]:
     kinds = []
     offset = 0
@@ -1425,7 +1424,7 @@ def tcp_option_kinds_from_bytes(option_bytes: bytes) -> tuple[list[int], str | N
     return kinds, None
 
 
-# This function finds inconsistent overlaps in reassembled TCP byte intervals.
+#This function finds inconsistent overlaps in reassembled TCP byte intervals.
 def tcp_overlap_conflicts(
     segments_by_direction: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]]
 ) -> set[tuple[str, str]]:
@@ -1452,7 +1451,7 @@ def tcp_overlap_conflicts(
     return conflicts
 
 
-# This function summarizes TCP connection handshake and closure evidence in the POST subset.
+#This function summarizes TCP connection handshake and closure evidence in the POST subset.
 def tcp_connection_state_inventory(
     traffic: list[dict[str, Any]],
     reference_context: dict[str, Any],
@@ -1555,7 +1554,7 @@ def tcp_connection_state_inventory(
     }
 
 
-# This function independently audits the reconstructed PCAP against protocol and policy invariants.
+#This function independently audits the reconstructed PCAP against protocol and policy invariants.
 def audit_reconstructed_pcap(
     *,
     output_pcap_path: Path,
@@ -1573,7 +1572,7 @@ def audit_reconstructed_pcap(
     original_segments: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
     reconstructed_segments: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
 
-    # This function records bounded per-packet audit issues and aggregate reason counts.
+    #This function records bounded per-packet audit issues and aggregate reason counts.
     def record_issue(record_index: int, reason: str, message: str, **extra: Any) -> None:
         issue_counts[reason] += 1
         if len(issues_by_record_index[record_index]) < 20:
@@ -1826,9 +1825,9 @@ def audit_reconstructed_pcap(
     }
 
 
-# This function aggregates packet-level reconstruction results into group-level results.
-# It keeps the same group validity principle used in Step 19: if any packet in a group fails, the group is marked as Invalid Traffic.
-# It does not copy the full packet issue objects into the group result, because those details already live in packet_results.
+#This function aggregates packet-level reconstruction results into group-level results.
+#This function keeps the same group validity principle used in Step 19: if any packet in a group fails, the group is marked as Invalid Traffic.
+#This function does not copy full packet issue objects into the group result because those details already live in packet_results.
 def summarize_groups(packet_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
     for result in packet_results:
@@ -1878,8 +1877,8 @@ def summarize_groups(packet_results: list[dict[str, Any]]) -> list[dict[str, Any
     return sorted(group_results, key=lambda item: item["group_key"])
 
 
-# This function runs the core Step 20 reconstruction logic.
-# It reads Step 19 validated traffic, reconstructs accepted POST packets, writes the PCAP, and writes a detailed reconstruction report.
+#This function runs the core Step 20 reconstruction logic.
+#This function reads Step 19 validated traffic, reconstructs accepted POST packets, writes the PCAP, and writes a detailed reconstruction report.
 def reconstruct_validated_traffic(
     *,
     config: dict[str, Any],
@@ -2088,7 +2087,7 @@ def reconstruct_validated_traffic(
     ]
 
     now = datetime.now(timezone.utc).isoformat()
-    # The report stores both the policy and the packet results so later alert comparison can distinguish real evasion from reconstruction problems.
+    #This function stores both the policy and the packet results so later alert comparison can distinguish real evasion from reconstruction problems.
     report = {
         "metadata": {
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -2172,8 +2171,8 @@ def reconstruct_validated_traffic(
     }
 
 
-# This function is the public Python entry point for Step 20.
-# It loads the config, resolves the active experiment_config_label paths, and delegates the actual reconstruction work.
+#This function is the public Python entry point for Step 20.
+#This function loads the config, resolves the active experiment_config_label paths, and delegates the actual reconstruction work.
 def run_reconstruction(
     *,
     config_path: str | Path,
@@ -2202,7 +2201,7 @@ def run_reconstruction(
     )
 
 
-# This function resolves the terminal log path for Step 20.
+#This function resolves the terminal log path for Step 20.
 # By default, logs are written under the active experiment root and branch label so Ubuntu runs keep their terminal evidence next to the artifacts.
 def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
@@ -2220,8 +2219,8 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     )
 
 
-# This function parses command-line arguments for Step 20.
-# The --experiment-root override is available because the active VM artifact folder may differ from experiment.output_root in the config.
+#This function parses command-line arguments for Step 20.
+#This function exposes --experiment-root because the active VM artifact folder may differ from experiment.output_root in the config.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Reconstruct Step 20 modified PCAP from Step 19 validated JSON.")
     add = parser.add_argument
@@ -2244,7 +2243,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# This function is the command-line entry point. It prints the reconstruction summary and output paths.
+#This function is the command-line entry point. It prints the reconstruction summary and output paths.
 def main() -> None:
     args = parse_cli_args()
     log_path = resolve_log_path(args)

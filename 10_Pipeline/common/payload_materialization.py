@@ -8,6 +8,7 @@ from typing import Any
 PAYLOAD_MATERIALIZATION_SCHEMA_VERSION = "canonical_payload_materialization_result_v1"
 SUPPORTED_REPLACEMENT_FORMATS = {"hex", "text"}
 SUPPORTED_PAYLOAD_OPERATIONS = {"replace_region", "replace_byte_range"}
+SUPPORTED_PAYLOAD_REGION_TYPES = {"canonical_payload_region", "canonical_payload_byte_range"}
 
 
 #This function checks whether a value is valid even-length hexadecimal content.
@@ -201,8 +202,11 @@ def validate_payload_edit(
         raise ValueError(f"explicit_payload_edits[{edit_position}].edit_kind must be canonical_payload.")
     if edit.get("identity_type") != "canonical_payload_region":
         raise ValueError(f"explicit_payload_edits[{edit_position}].identity_type must be canonical_payload_region.")
-    if edit.get("region_type") != "canonical_payload_region":
-        raise ValueError(f"explicit_payload_edits[{edit_position}].region_type must be canonical_payload_region.")
+    region_type = edit.get("region_type")
+    if region_type not in SUPPORTED_PAYLOAD_REGION_TYPES:
+        raise ValueError(
+            f"explicit_payload_edits[{edit_position}].region_type must be one of {sorted(SUPPORTED_PAYLOAD_REGION_TYPES)}."
+        )
     operation = edit.get("operation")
     if operation not in SUPPORTED_PAYLOAD_OPERATIONS:
         raise ValueError(f"Unsupported payload operation {operation!r}.")
@@ -276,7 +280,7 @@ def validate_payload_edit(
         {
             "edit_kind": "canonical_payload",
             "identity_type": "canonical_payload_region",
-            "region_type": "canonical_payload_region",
+            "region_type": region_type,
             "packet_id": representative_packet_id,
             "representative_packet_id": representative_packet_id,
             "canonical_region_id": canonical_region_id,
