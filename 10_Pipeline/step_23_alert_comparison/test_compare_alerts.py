@@ -74,7 +74,7 @@ class PacketMatchingComparisonTests(unittest.TestCase):
         self.assertEqual(result["summary"]["induced_alert_count"], 0)
         self.assertEqual(result["records"][0]["classification"], "Failed Evasion")
 
-    def test_different_signature_on_same_packet_is_alert_mutation(self) -> None:
+    def test_different_signature_on_same_packet_is_alert_signature_mutation(self) -> None:
         result = self.compare(
             [alert("pre", 1, 10, "1:100:1")],
             [alert("post", 1, 10, "1:200:1")],
@@ -83,7 +83,7 @@ class PacketMatchingComparisonTests(unittest.TestCase):
         self.assertEqual(result["summary"]["alert_mutation_count"], 1)
         self.assertEqual(result["summary"]["successful_evasion_count"], 0)
         self.assertEqual(result["summary"]["induced_alert_count"], 0)
-        self.assertEqual(result["records"][0]["classification"], "Alert Mutation")
+        self.assertEqual(result["records"][0]["classification"], "Alert-Signature Mutation")
         self.assertEqual(result["records"][0]["match_type"], "same_packet_same_tcp_conversation_different_signature")
 
     def test_same_signature_on_different_packet_same_connection_is_displaced_detection(self) -> None:
@@ -99,7 +99,7 @@ class PacketMatchingComparisonTests(unittest.TestCase):
         self.assertEqual(result["records"][0]["classification"], "TCP-Conversation Displaced Detection")
         self.assertEqual(result["records"][0]["match_type"], "same_tcp_conversation_same_signature_different_packet")
 
-    def test_strict_delayed_emission_different_packet_and_apparent_connection_is_packet_anchor_shift(self) -> None:
+    def test_strict_delayed_emission_different_packet_and_apparent_connection_is_packet_anchor_shifted(self) -> None:
         result = self.compare(
             [alert("pre", 1, 40080, "1:18757:8", "tcp_conn_pre", timestamp="07/06-17:19:02.802509", src_port=53966, dst_port=444)],
             [
@@ -123,7 +123,7 @@ class PacketMatchingComparisonTests(unittest.TestCase):
         self.assertEqual(result["summary"]["successful_evasion_count"], 0)
         self.assertEqual(result["summary"]["alert_mutation_count"], 0)
         self.assertEqual(result["summary"]["induced_alert_count"], 0)
-        self.assertEqual(result["records"][0]["classification"], "Snort Event Packet-Anchor Shift")
+        self.assertEqual(result["records"][0]["classification"], "Packet-Anchor shifted")
         self.assertEqual(result["records"][0]["matching_phase"], 2)
         self.assertEqual(result["records"][0]["delayed_emission_match"]["timestamp_policy"], "exact_string_equality_no_tolerance")
         self.assertFalse(result["records"][0]["delayed_emission_match"]["post_packet_anchor_matches_alert_event_tuple"])
@@ -165,7 +165,7 @@ class PacketMatchingComparisonTests(unittest.TestCase):
         self.assertEqual(result["summary"]["successful_evasion_count"], 0)
         self.assertEqual(result["summary"]["alert_mutation_count"], 0)
         self.assertEqual(result["summary"]["induced_alert_count"], 2)
-        self.assertTrue(all(record["classification"] == "Snort Event Packet-Anchor Shift" for record in result["records"]))
+        self.assertTrue(all(record["classification"] == "Packet-Anchor shifted" for record in result["records"]))
 
     def test_strict_delayed_emission_does_not_match_signature_only(self) -> None:
         result = self.compare(

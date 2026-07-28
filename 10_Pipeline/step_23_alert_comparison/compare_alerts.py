@@ -34,7 +34,8 @@ STRICT_DELAYED_EMISSION_FIELDS = (
 )
 STRICT_DELAYED_EMISSION_IDENTITY_VERSION = "strict_delayed_emission_event_v1"
 STRICT_DELAYED_EMISSION_MATCH_TYPE = "strict_delayed_emission_same_signature_exact_timestamp_directed_tuple_different_packet"
-SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL = "Snort Event Packet-Anchor Shift"
+ALERT_SIGNATURE_MUTATION_LABEL = "Alert-Signature Mutation"
+PACKET_ANCHOR_SHIFTED_LABEL = "Packet-Anchor shifted"
 SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE = "strict_event_identity_packet_anchor_tuple_mismatch"
 
 
@@ -498,7 +499,7 @@ def compare_alerts_by_comparable_unit(
             consumed_post_ids.add(alert_consumption_id(matching_post))
             post_anchor_matches_event = packet_anchor_matches_alert_event_tuple(matching_post)
             same_packet_anchor_conversation = same_tcp_conversation(pre_alert, matching_post)
-            classification = "TCP-Conversation Displaced Detection" if same_packet_anchor_conversation else SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL
+            classification = "TCP-Conversation Displaced Detection" if same_packet_anchor_conversation else PACKET_ANCHOR_SHIFTED_LABEL
             match_type = STRICT_DELAYED_EMISSION_MATCH_TYPE if same_packet_anchor_conversation else SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE
             if same_packet_anchor_conversation:
                 reason = "The same Snort event identity reappeared on a different packet anchor inside the same packet-anchor TCP conversation."
@@ -547,7 +548,7 @@ def compare_alerts_by_comparable_unit(
             next_remaining_pre.append(pre_alert)
             continue
         append_record(
-            "Alert Mutation",
+            ALERT_SIGNATURE_MUTATION_LABEL,
             "same_packet_same_tcp_conversation_different_signature",
             3,
             pre_alert,
@@ -615,7 +616,7 @@ def compare_alerts_by_comparable_unit(
     pre_unit_keys = {comparable_unit_key(alert, "pre", matching_policy) for alert in pre_alerts}
     post_unit_keys = {comparable_unit_key(alert, "post", matching_policy) for alert in post_alerts}
     tcp_displaced_count = sum(record["classification"] == "TCP-Conversation Displaced Detection" for record in comparison_records)
-    snort_event_packet_anchor_shift_count = sum(record["classification"] == SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL for record in comparison_records)
+    snort_event_packet_anchor_shift_count = sum(record["classification"] == PACKET_ANCHOR_SHIFTED_LABEL for record in comparison_records)
     strict_delayed_emission_displaced_count = sum(
         record["match_type"] == STRICT_DELAYED_EMISSION_MATCH_TYPE
         for record in comparison_records
@@ -624,7 +625,7 @@ def compare_alerts_by_comparable_unit(
         record["match_type"] in {STRICT_DELAYED_EMISSION_MATCH_TYPE, SNORT_EVENT_PACKET_ANCHOR_SHIFT_MATCH_TYPE}
         for record in comparison_records
     )
-    alert_mutation_count = sum(record["classification"] == "Alert Mutation" for record in comparison_records)
+    alert_mutation_count = sum(record["classification"] == ALERT_SIGNATURE_MUTATION_LABEL for record in comparison_records)
     failed_evasion_count = sum(record["classification"] == "Failed Evasion" for record in comparison_records)
     successful_evasion_count = sum(record["classification"] == "Successful Evasion" for record in comparison_records)
     return {
@@ -763,7 +764,7 @@ def compare_normalized_alerts(
                 "cardinality_policy": "Only identity groups with exactly one PRE alert and exactly one POST alert are consumed. Any multiplicity on either side is reported as ambiguous_delayed_emission_matches and is not force-matched, even when PRE and POST counts are equal.",
                 "packet_anchor_tuple_policy": "Step 22 v3 exposes the physical Step 14 tuple for the packet referenced by Snort pkt_num. This tuple is distinct from the alert tuple reported by Snort.",
                 "same_packet_anchor_tcp_conversation_category": "TCP-Conversation Displaced Detection",
-                "packet_anchor_tuple_or_connection_mismatch_category": SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL,
+                "packet_anchor_tuple_or_connection_mismatch_category": PACKET_ANCHOR_SHIFTED_LABEL,
                 "packet_anchor_tuple_or_connection_mismatch_definition": "A PRE and POST alert share the same strict Snort event identity (signature_key + exact alert timestamp + directed alert tuple), but Snort uses a different packet emission anchor in PRE and POST, and the POST pkt_num points to a packet anchor whose physical tuple / packet-anchor TCP conversation belongs to another tcp_connection_id or otherwise does not support classifying the detection as a same-conversation packet displacement.",
                 "match_types": [
                     STRICT_DELAYED_EMISSION_MATCH_TYPE,
@@ -772,16 +773,16 @@ def compare_normalized_alerts(
             },
             "classification_labels": [
                 "Failed Evasion",
-                "Alert Mutation",
+                ALERT_SIGNATURE_MUTATION_LABEL,
                 "TCP-Conversation Displaced Detection",
-                SNORT_EVENT_PACKET_ANCHOR_SHIFT_LABEL,
+                PACKET_ANCHOR_SHIFTED_LABEL,
                 "Successful Evasion",
                 "Induced Alert",
             ],
             "phase_order": [
                 "Phase 1: same packet + same TCP conversation + same signature -> Failed Evasion",
-                "Phase 2: strict Snort event identity + different packet -> TCP-Conversation Displaced Detection or Snort Event Packet-Anchor Shift",
-                "Phase 3: same packet + same TCP conversation + different signature -> Alert Mutation",
+                "Phase 2: strict Snort event identity + different packet -> TCP-Conversation Displaced Detection or Packet-Anchor shifted",
+                "Phase 3: same packet + same TCP conversation + different signature -> Alert-Signature Mutation",
                 "Phase 4: same tcp_connection_id + same signature + different packet -> TCP-Conversation Displaced Detection",
                 "Phase 5: unconsumed PRE alerts -> Successful Evasion",
                 "Phase 6: unconsumed POST alerts -> Induced Alert",
@@ -922,9 +923,9 @@ def main() -> None:
         print(f"POST detector sources: {result['post_detector_source_counts']}")
         print(f"Classifications: {result['classification_counts']}")
         print(f"Successful evasion: {result['successful_evasion_count']}")
-        print(f"Alert mutation: {result['alert_mutation_count']}")
+        print(f"Alert-signature mutation: {result['alert_mutation_count']}")
         print(f"TCP-conversation displaced detection: {result['tcp_conversation_displaced_detection_count']}")
-        print(f"Snort event packet-anchor shift: {result['snort_event_packet_anchor_shift_count']}")
+        print(f"Packet-Anchor shifted: {result['snort_event_packet_anchor_shift_count']}")
         print(f"Failed evasion: {result['failed_evasion_count']}")
         print(f"Induced alert: {result['induced_alert_count']}")
         print(f"Alert comparison: {result['alert_comparison']}")
