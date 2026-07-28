@@ -1,5 +1,11 @@
 import unittest
 from copy import deepcopy
+from pathlib import Path
+import sys
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
 
 from step_19_validation.validate_merged_traffic import read_json, validate_merged_traffic
 from common.modification_strategy import resolve_modification_strategy
@@ -8,8 +14,10 @@ from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
 
 HEADER_POLICY = read_json(
-    "step_15_grouping/01_editability_policies/"
-    "conservative_header_editability_v1.json"
+    PIPELINE_ROOT
+    / "step_15_grouping"
+    / "01_editability_policies"
+    / "conservative_header_editability_v1.json"
 )
 HEADER_ONLY_CAPABILITIES = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 PAYLOAD_ONLY_CAPABILITIES = resolve_modification_strategy(
@@ -74,6 +82,8 @@ def payload_patch_application(originals: dict[str, dict], edits: list[dict]) -> 
     return (
         {
             "schema_version": "patch_application_report_v4",
+            "execution_status": "completed",
+            "materialization_success": True,
             "explicit_header_edits": [],
             "explicit_payload_edits": materialized["explicit_edits"],
             "applied_patches": materialized["applied_patches"],
@@ -93,10 +103,16 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
     def validate(self, merged_record: dict, reference_record: dict, group_outcomes: dict | None = None) -> dict:
         return validate_merged_traffic(
             merged_json={
+                "metadata": {
+                    "execution_status": "completed",
+                    "materialization_success": True,
+                },
                 "traffic": [merged_record],
                 "group_outcomes": group_outcomes or {},
                 "patch_application": {
                     "schema_version": "patch_application_report_v4",
+                    "execution_status": "completed",
+                    "materialization_success": True,
                     "explicit_header_edits": [],
                     "explicit_payload_edits": [],
                     "applied_patches": [],
@@ -144,9 +160,17 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             validate_merged_traffic(
                 merged_json={
+                    "metadata": {
+                        "execution_status": "completed",
+                        "materialization_success": True,
+                    },
                     "traffic": [dict(reference)],
                     "group_outcomes": {},
-                    "patch_application": {"schema_version": "patch_application_report_v4"},
+                    "patch_application": {
+                        "schema_version": "patch_application_report_v4",
+                        "execution_status": "completed",
+                        "materialization_success": True,
+                    },
                 },
                 original_by_packet_id={"packet_004": reference},
                 header_policy=HEADER_POLICY,
@@ -231,6 +255,46 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
 
         self.assertIn("group_packet_ids_editable_packet_ids_mismatch", result["summary"]["issue_counts_by_reason"])
 
+    def test_rejects_incomplete_step18_artifact_before_packet_validation(self):
+        reference = packet("packet_009", "")
+        with self.assertRaises(ValueError) as context:
+            validate_merged_traffic(
+                merged_json={
+                    "metadata": {
+                        "execution_status": "failed",
+                        "materialization_success": False,
+                    },
+                    "traffic": [dict(reference)],
+                    "group_outcomes": {},
+                    "patch_application": {
+                        "schema_version": "patch_application_report_v4",
+                        "execution_status": "failed",
+                        "materialization_success": False,
+                        "explicit_header_edits": [],
+                        "explicit_payload_edits": [],
+                        "applied_patches": [],
+                        "derived_header_changes": [],
+                        "explicit_edit_relationships": [],
+                        "payload_edit_relationships": [],
+                        "header_materialization_issues": [],
+                        "payload_materialization_issues": [
+                            {
+                                "severity": "error",
+                                "reason": "payload_materialization_failed",
+                            }
+                        ],
+                    },
+                },
+                original_by_packet_id={"packet_009": reference},
+                header_policy=HEADER_POLICY,
+                capabilities=PAYLOAD_ONLY_CAPABILITIES,
+                validation_policy=VALIDATION_POLICY,
+                immutable_fields=[],
+                required_fields=[],
+            )
+
+        self.assertIn("Step 19 refuses to validate", str(context.exception))
+
 
 class LlmOutputFailureRollbackTests(unittest.TestCase):
     def validate_payload_case(
@@ -243,6 +307,10 @@ class LlmOutputFailureRollbackTests(unittest.TestCase):
     ) -> dict:
         return validate_merged_traffic(
             merged_json={
+                "metadata": {
+                    "execution_status": "completed",
+                    "materialization_success": True,
+                },
                 "traffic": traffic,
                 "group_outcomes": group_outcomes,
                 "patch_application": patch_application,
@@ -299,6 +367,8 @@ class LlmOutputFailureRollbackTests(unittest.TestCase):
             originals={"packet_011": original},
             patch_application={
                 "schema_version": "patch_application_report_v4",
+                "execution_status": "completed",
+                "materialization_success": True,
                 "explicit_header_edits": [],
                 "explicit_payload_edits": [],
                 "applied_patches": [],

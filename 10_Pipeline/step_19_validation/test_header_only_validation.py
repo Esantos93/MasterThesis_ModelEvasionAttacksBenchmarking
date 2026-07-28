@@ -84,12 +84,18 @@ class HeaderOnlyValidationTests(unittest.TestCase):
     def v4_merged_from_edits(self, explicit_edits: list[dict]) -> dict:
         materialized = materialize_header_edits(reference_record(), explicit_edits)
         return {
+            "metadata": {
+                "execution_status": "completed",
+                "materialization_success": True,
+            },
             "group_outcomes": {
                 "accepted_groups": [{"prompt_unit_id": "group_000001", "packet_ids": ["packet_000001"]}],
                 "llm_output_failure_groups": [],
             },
             "patch_application": {
                 "schema_version": "patch_application_report_v4",
+                "execution_status": "completed",
+                "materialization_success": True,
                 "explicit_header_edits": materialized["explicit_edits"],
                 "applied_patches": materialized["applied_patches"],
                 "effective_header_edits": materialized["applied_patches"],
@@ -173,9 +179,15 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             "prompt_unit_id": "group_000001",
         }
         merged = {
+            "metadata": {
+                "execution_status": "completed",
+                "materialization_success": True,
+            },
             "group_outcomes": {"accepted_groups": [{"prompt_unit_id": "group_000001", "packet_ids": ["packet_000001"]}], "llm_output_failure_groups": []},
             "patch_application": {
                 "schema_version": "patch_application_report_v4",
+                "execution_status": "completed",
+                "materialization_success": True,
                 "explicit_header_edits": [],
                 "explicit_payload_edits": [payload_edit],
                 "applied_patches": [payload_edit],
@@ -262,12 +274,18 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             [payload_edit],
         )
         merged = {
+            "metadata": {
+                "execution_status": "completed",
+                "materialization_success": True,
+            },
             "group_outcomes": {
                 "accepted_groups": [{"prompt_unit_id": "group_000001", "packet_ids": ["packet_000001"]}],
                 "llm_output_failure_groups": [],
             },
             "patch_application": {
                 "schema_version": "patch_application_report_v4",
+                "execution_status": "completed",
+                "materialization_success": True,
                 "explicit_header_edits": header_materialized["explicit_edits"],
                 "explicit_payload_edits": payload_materialized["explicit_edits"],
                 "applied_patches": header_materialized["applied_patches"] + payload_materialized["applied_patches"],
@@ -298,6 +316,10 @@ class HeaderOnlyValidationTests(unittest.TestCase):
     def test_preserves_llm_output_failure_packet_for_reconstruction(self) -> None:
         reference = reference_record()
         merged = {
+            "metadata": {
+                "execution_status": "completed",
+                "materialization_success": True,
+            },
             "group_outcomes": {
                 "accepted_groups": [],
                 "llm_output_failure_groups": [
@@ -309,6 +331,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             },
             "patch_application": {
                 "schema_version": "patch_application_report_v4",
+                "execution_status": "completed",
+                "materialization_success": True,
                 "explicit_header_edits": [],
                 "applied_patches": [],
                 "derived_header_changes": [],
@@ -551,7 +575,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         patches: list[dict],
         payload_hex: str = "001122334455",
         prompt_schema_version: str = "prompt_unit_v2",
-    ) -> tuple[dict, dict, dict, dict]:
+        expect_step19_failure: bool = False,
+    ) -> tuple[dict, dict | None, dict, dict]:
         config_path = temp_dir / "config.json"
         reference_path = temp_dir / "selected_packet_records.json"
         step17_root = temp_dir / "step17"
@@ -612,12 +637,22 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             reference_json=reference_path,
             output_dir=output18,
         )
-        validation_result = run_validation(
-            config_path=config_path,
-            input_json=merge_result["merged_output"],
-            output_dir=output19,
-            reference_json=reference_path,
-        )
+        validation_result = None
+        if expect_step19_failure:
+            with self.assertRaises(ValueError):
+                run_validation(
+                    config_path=config_path,
+                    input_json=merge_result["merged_output"],
+                    output_dir=output19,
+                    reference_json=reference_path,
+                )
+        else:
+            validation_result = run_validation(
+                config_path=config_path,
+                input_json=merge_result["merged_output"],
+                output_dir=output19,
+                reference_json=reference_path,
+            )
         return (
             merge_result,
             validation_result,
@@ -878,12 +913,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.payload_byte_range_region()],
                 patches=[self.payload_byte_range_patch(region_type="canonical_payload_region")],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("region_type_mismatch", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_rejects_payload_patch_region_id_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -893,12 +929,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.payload_byte_range_region()],
                 patches=[self.payload_byte_range_patch(region_id="payload_region_000001:range_other")],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("patch_references_unknown_region", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_rejects_payload_patch_canonical_region_id_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -908,12 +945,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.payload_byte_range_region()],
                 patches=[self.payload_byte_range_patch(canonical_region_id="payload_region_other")],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("canonical_payload_region_id_mismatch", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_rejects_payload_byte_range_offset_outside_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -923,12 +961,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.payload_byte_range_region()],
                 patches=[self.payload_byte_range_patch(offset_from_region_start_bytes=3, length_bytes=1)],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("replace_byte_range_exceeds_region", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_rejects_payload_replacement_above_declared_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -938,12 +977,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.payload_byte_range_region()],
                 patches=[self.payload_byte_range_patch(replacement="aabbccdd")],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("replacement_exceeds_max_replacement_bytes", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_to_step19_hybrid_v3_integration_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -1008,13 +1048,14 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.payload_region()],
                 patches=[self.payload_patch()],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual(0, report["summary"]["applied_patch_count"])
         self.assertEqual("payload_edits_not_allowed_by_modification_strategy", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_rejects_incompatible_header_in_payload_only_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -1024,13 +1065,14 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[self.ttl_region()],
                 patches=[self.ttl_patch()],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual(0, report["summary"]["applied_patch_count"])
         self.assertEqual("header_edits_not_allowed_by_modification_strategy", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_payload_v3_requires_ownership_representative_packet_id(self) -> None:
         region = self.payload_region()
@@ -1042,12 +1084,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[region],
                 patches=[self.payload_patch()],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("canonical_payload_region_ownership_missing", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
     def test_step18_payload_v3_rejects_legacy_packet_alias_shape(self) -> None:
         region = self.payload_region()
@@ -1069,12 +1112,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 editable_regions=[region],
                 patches=[self.payload_patch()],
                 payload_hex="001122334455",
+                expect_step19_failure=True,
             )
 
         self.assertEqual(0, merge_result["accepted_group_count"])
         self.assertEqual(1, merge_result["llm_output_failure_group_count"])
         self.assertEqual("canonical_payload_region_physical_aliases_missing", report["patch_application"]["errors"][0]["reason"])
-        self.assertEqual(1, validation_result["llm_output_failure_packet_count"])
+        self.assertIsNone(validation_result)
 
 
 if __name__ == "__main__":

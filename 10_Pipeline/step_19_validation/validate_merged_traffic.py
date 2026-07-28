@@ -443,6 +443,54 @@ def build_materialization_indexes(merged_json: dict[str, Any]) -> tuple[
     )
 
 
+#This function enforces the Step 18 completion contract before Step 19 trusts any merged packet.
+def validate_step18_completion_contract(
+    *,
+    merged_json: dict[str, Any],
+    capabilities: ModificationCapabilities,
+) -> None:
+    metadata = merged_json.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    patch_application = merged_json.get("patch_application", {})
+    if not isinstance(patch_application, dict):
+        patch_application = {}
+    issues = []
+    metadata_status = metadata.get("execution_status")
+    patch_status = patch_application.get("execution_status")
+    metadata_success = metadata.get("materialization_success")
+    patch_success = patch_application.get("materialization_success")
+    if metadata_status != "completed":
+        issues.append(f"metadata.execution_status={metadata_status!r}")
+    if patch_status != "completed":
+        issues.append(f"patch_application.execution_status={patch_status!r}")
+    if metadata_success is not True:
+        issues.append(f"metadata.materialization_success={metadata_success!r}")
+    if patch_success is not True:
+        issues.append(f"patch_application.materialization_success={patch_success!r}")
+
+    errors = patch_application.get("errors", [])
+    if isinstance(errors, list) and errors:
+        issues.append(f"patch_application.errors_count={len(errors)}")
+    payload_issues = patch_application.get("payload_materialization_issues", [])
+    if isinstance(payload_issues, list):
+        payload_error_count = sum(
+            1
+            for payload_issue in payload_issues
+            if isinstance(payload_issue, dict) and payload_issue.get("severity") == "error"
+        )
+        if payload_error_count:
+            issues.append(f"payload_materialization_error_count={payload_error_count}")
+    if capabilities.allows_payload_edits and patch_application.get("payload_materialization_aborted") is True:
+        issues.append("payload_materialization_aborted=True")
+
+    if issues:
+        raise ValueError(
+            "Step 19 refuses to validate an incomplete or failed Step 18 artifact: "
+            + "; ".join(issues)
+        )
+
+
 #This helper returns records in the same stable order used by materialization outputs.
 def canonical_record_list(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=lambda item: canonical_json_text(item))
@@ -898,6 +946,7 @@ def validate_merged_traffic(
             "llm_output_failure_groups": [],
             "summary": {"accepted_packet_count": 0, "rejected_packet_count": 0, "error_count": 1, "warning_count": 0},
         }
+    validate_step18_completion_contract(merged_json=merged_json, capabilities=capabilities)
 
     group_outcomes = merged_json.get("group_outcomes", {})
     if not isinstance(group_outcomes, dict):
