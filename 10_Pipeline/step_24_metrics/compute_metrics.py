@@ -371,9 +371,9 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"| POST alerts | {metrics['post_alert_count']} |",
         f"| Failed Evasion | {metrics['failed_evasion_count']} |",
         f"| Successful Evasion | {metrics['successful_evasion_count']} |",
-        f"| Alert Mutation | {metrics['alert_mutation_count']} |",
+        f"| Alert-Signature Mutation | {metrics['alert_mutation_count']} |",
         f"| TCP-Conversation Displaced Detection | {metrics['tcp_conversation_displaced_detection_count']} |",
-        f"| Snort Event Packet-Anchor Shift | {metrics['snort_event_packet_anchor_shift_count']} |",
+        f"| Packet-Anchor shifted | {metrics['snort_event_packet_anchor_shift_count']} |",
         f"| Induced Alert | {metrics['induced_alert_count']} |",
         "",
         "## Supporting Rates",
@@ -382,9 +382,9 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         "| --- | ---: |",
         f"| Successful evasion rate raw | {percentage(metrics['successful_evasion_rate_raw'])} |",
         f"| Failed evasion rate | {percentage(metrics['failed_evasion_rate'])} |",
-        f"| Alert mutation rate raw | {percentage(metrics['alert_mutation_rate_raw'])} |",
+        f"| Alert-signature mutation rate raw | {percentage(metrics['alert_mutation_rate_raw'])} |",
         f"| TCP-conversation displaced detection rate | {percentage(metrics['tcp_conversation_displaced_detection_rate'])} |",
-        f"| Snort event packet-anchor shift rate | {percentage(metrics['snort_event_packet_anchor_shift_rate'])} |",
+        f"| Packet-anchor shifted rate | {percentage(metrics['snort_event_packet_anchor_shift_rate'])} |",
         f"| Induced alert rate vs PRE | {percentage(metrics['induced_alert_rate_vs_pre'])} |",
         f"| POST alert retention rate | {percentage(metrics['post_alert_retention_rate'])} |",
         "",
@@ -477,7 +477,7 @@ def compute_metrics(
         "metric_policy": {
             "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * (alert_mutation_count + tcp_conversation_displaced_detection_count + snort_event_packet_anchor_shift_count)) / pre_alert_count",
             "current_policy": "With signature_mutation_weight = 0, only successful_evasion_count contributes to SER.",
-            "partial_credit_candidate_policy": "If partial credit is enabled later, Alert Mutation, TCP-Conversation Displaced Detection, and Snort Event Packet-Anchor Shift are the weighted candidate categories.",
+            "partial_credit_candidate_policy": "If partial credit is enabled later, Alert-Signature Mutation, TCP-Conversation Displaced Detection, and Packet-Anchor shifted are the weighted candidate categories.",
             "signature_mutation_weight_source": "pipeline.signature_mutation_weight",
             "zero_pre_alert_policy": "fail clearly because SER is undefined without PRE detections.",
             "tcp_conversation_displaced_detection_policy": "reported separately and not counted as evasion.",
@@ -558,9 +558,9 @@ def main() -> None:
         print(f"PRE alerts: {metrics['pre_alert_count']}")
         print(f"POST alerts: {metrics['post_alert_count']}")
         print(f"Successful evasion: {metrics['successful_evasion_count']}")
-        print(f"Alert mutation: {metrics['alert_mutation_count']}")
+        print(f"Alert-signature mutation: {metrics['alert_mutation_count']}")
         print(f"TCP-conversation displaced detection: {metrics['tcp_conversation_displaced_detection_count']}")
-        print(f"Snort event packet-anchor shift: {metrics['snort_event_packet_anchor_shift_count']}")
+        print(f"Packet-anchor shifted: {metrics['snort_event_packet_anchor_shift_count']}")
         print(f"Failed evasion: {metrics['failed_evasion_count']}")
         print(f"Induced alert: {metrics['induced_alert_count']}")
         print(f"Signature mutation weight: {metrics['signature_mutation_weight']}")
