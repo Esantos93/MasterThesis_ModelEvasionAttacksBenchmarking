@@ -207,6 +207,26 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         generation_response_metadata = metadata.get("llama_response_metadata")
     if not isinstance(generation_response_metadata, dict):
         generation_response_metadata = {}
+    generation_response_metadata_present = bool(generation_response_metadata)
+    generated_token_count = generation_response_metadata.get("generated_token_count")
+    if isinstance(generated_token_count, bool) or not isinstance(generated_token_count, int):
+        generated_token_count = None
+    requested_max_tokens = generation_response_metadata.get("requested_max_tokens")
+    if isinstance(requested_max_tokens, bool) or not isinstance(requested_max_tokens, int):
+        requested_max_tokens = None
+    remaining_output_tokens = generation_response_metadata.get("remaining_output_tokens")
+    if isinstance(remaining_output_tokens, bool) or not isinstance(remaining_output_tokens, int):
+        remaining_output_tokens = None
+    reached_max_tokens = generation_response_metadata.get("reached_max_tokens")
+    if not isinstance(reached_max_tokens, bool):
+        reached_max_tokens = None
+    generated_to_requested_ratio = (
+        generated_token_count / requested_max_tokens
+        if generated_token_count is not None
+        and requested_max_tokens is not None
+        and requested_max_tokens > 0
+        else None
+    )
     capabilities = metadata.get("capabilities")
     if not isinstance(capabilities, dict):
         capabilities = {}
@@ -253,6 +273,14 @@ def build_prompt_row(metadata_path: Path, metadata: dict[str, Any], prompt_dirs:
         "generation_batch_size": generation_response_metadata.get("batch_size"),
         "generation_batch_limit": generation_response_metadata.get("batch_limit"),
         "generation_batch_runtime_seconds": generation_response_metadata.get("batch_runtime_seconds"),
+        "generation_response_metadata_present": generation_response_metadata_present,
+        "finish_reason": generation_response_metadata.get("finish_reason"),
+        "stop_reason": generation_response_metadata.get("stop_reason"),
+        "generated_token_count": generated_token_count,
+        "requested_max_tokens": requested_max_tokens,
+        "remaining_output_tokens": remaining_output_tokens,
+        "reached_max_tokens": reached_max_tokens,
+        "generated_to_requested_ratio": generated_to_requested_ratio,
         **counts,
     }
     row["seconds_per_packet"] = safe_rate(runtime_seconds, row["packet_count"])
@@ -292,6 +320,58 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "tokens_per_prompt": safe_rate(sum(real_input_tokens), len(rows)),
         "tokens_per_packet": safe_rate(sum(real_input_tokens), total_packets),
         "tokens_per_editable_region": safe_rate(sum(real_input_tokens), total_editable_regions),
+    }
+
+
+# This function summarizes backend-reported completion lengths and termination reasons.
+def generation_completion_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    response_rows = [
+        row
+        for row in rows
+        if row.get("generation_response_metadata_present") is True
+    ]
+    generated_counts = [
+        float(value)
+        for row in rows
+        if isinstance((value := row.get("generated_token_count")), int)
+        and not isinstance(value, bool)
+    ]
+    requested_counts = [
+        float(value)
+        for row in rows
+        if isinstance((value := row.get("requested_max_tokens")), int)
+        and not isinstance(value, bool)
+    ]
+    remaining_counts = [
+        float(value)
+        for row in rows
+        if isinstance((value := row.get("remaining_output_tokens")), int)
+        and not isinstance(value, bool)
+    ]
+    generated_ratios = [
+        float(value)
+        for row in rows
+        if isinstance((value := row.get("generated_to_requested_ratio")), (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ]
+    finish_reason_counts = Counter(
+        str(row["finish_reason"])
+        for row in rows
+        if row.get("finish_reason") is not None
+    )
+    return {
+        "response_metadata_record_count": len(response_rows),
+        "metadata_available_count": len(generated_counts),
+        "without_finish_reason_count": sum(
+            1 for row in response_rows if row.get("finish_reason") is None
+        ),
+        "reached_max_tokens_count": sum(row.get("reached_max_tokens") is True for row in rows),
+        "by_finish_reason": dict(sorted(finish_reason_counts.items())),
+        "generated_token_count": summarize_numbers(generated_counts),
+        "requested_max_tokens": summarize_numbers(requested_counts),
+        "remaining_output_tokens": summarize_numbers(remaining_counts),
+        "generated_to_requested_ratio": summarize_numbers(generated_ratios),
     }
 
 
@@ -417,6 +497,7 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
     failure_counts = summary["counts"]["by_failure_reason"]
     output_decision_counts = summary["counts"]["by_output_decision"]
     generation_batches = summary["generation_batches"]
+    generation_completions = summary["generation_completions"]
     all_wall_clock = as_float(runtime_total_all.get("observed_metadata_wall_clock_seconds"))
     llm_wall_clock = as_float(runtime_total_llm.get("observed_metadata_wall_clock_seconds"))
 
@@ -465,6 +546,30 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
             lines.append(f"| {decision} | {count} |")
     else:
         lines.append("No output-decision metadata recorded.")
+
+    lines.extend(
+        [
+            "",
+            "## Generation Completion Metadata",
+            "",
+            f"- Generation response records: `{generation_completions['response_metadata_record_count']}`",
+            f"- Generations with token-count metadata: `{generation_completions['metadata_available_count']}`",
+            f"- Generations without finish reason: `{generation_completions['without_finish_reason_count']}`",
+            f"- Generations reaching max tokens: `{generation_completions['reached_max_tokens_count']}`",
+            f"- Mean generated tokens: `{fmt(generation_completions['generated_token_count']['avg'])}`",
+            f"- Median generated tokens: `{fmt(generation_completions['generated_token_count']['median'])}`",
+            f"- P95 generated tokens: `{fmt(generation_completions['generated_token_count']['p95'])}`",
+            f"- Mean generated/requested ratio: `{fmt(generation_completions['generated_to_requested_ratio']['avg'], 4)}`",
+            "",
+            "| Finish reason | Count |",
+            "|---|---:|",
+        ]
+    )
+    if generation_completions["by_finish_reason"]:
+        for finish_reason, count in generation_completions["by_finish_reason"].items():
+            lines.append(f"| {finish_reason} | {count} |")
+    else:
+        lines.append("No finish-reason metadata recorded.")
 
     lines.extend(
         [
@@ -620,6 +725,14 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "generation_batch_size",
         "generation_batch_limit",
         "generation_batch_runtime_seconds",
+        "generation_response_metadata_present",
+        "finish_reason",
+        "stop_reason",
+        "generated_token_count",
+        "requested_max_tokens",
+        "remaining_output_tokens",
+        "reached_max_tokens",
+        "generated_to_requested_ratio",
     ]
     with path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=fieldnames, extrasaction="ignore")
@@ -714,6 +827,7 @@ def summarize_run(
     ]
     accepted_rows = [row for row in rows if row.get("status") in ACCEPTED_STATUSES]
     failed_rows = [row for row in rows if row.get("status") not in ACCEPTED_STATUSES]
+    generation_completions = generation_completion_summary(rows)
     summary = {
         "schema_version": "llm_runtime_summary_v2",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -729,6 +843,9 @@ def summarize_run(
             "by_failure_reason": dict(sorted(failure_counts.items())),
             "by_output_decision": dict(sorted(output_decision_counts.items())),
             "by_abstention_reason": dict(sorted(abstention_reason_counts.items())),
+            "by_finish_reason": generation_completions["by_finish_reason"],
+            "reached_max_tokens": generation_completions["reached_max_tokens_count"],
+            "without_finish_reason": generation_completions["without_finish_reason_count"],
         },
         "aggregates": {
             "all_metadata": aggregate_rows(rows),
@@ -743,6 +860,7 @@ def summarize_run(
             "failed_only": runtime_totals(failed_rows),
         },
         "generation_batches": generation_batch_summary(rows),
+        "generation_completions": generation_completions,
         "per_prompt": rows,
     }
 

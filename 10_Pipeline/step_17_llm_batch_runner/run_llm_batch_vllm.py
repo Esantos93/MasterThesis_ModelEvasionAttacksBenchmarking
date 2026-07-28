@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -22,6 +23,56 @@ VLLM_DTYPE: str = "auto"
 VLLM_GPU_MEMORY_UTILIZATION: float = 0.90
 VLLM_TRUST_REMOTE_CODE: bool = False
 VLLM_CHAT_TEMPLATE_KWARGS: dict[str, Any] | None = None
+MAX_TOKEN_FINISH_REASONS = {"length", "max_tokens", "max_length"}
+
+
+#This function preserves vLLM stop reasons in a JSON-serializable form.
+def json_safe_stop_reason(stop_reason: Any) -> Any:
+    if stop_reason is None or isinstance(stop_reason, (str, int, float, bool)):
+        return stop_reason
+    try:
+        json.dumps(stop_reason)
+    except (TypeError, ValueError):
+        return str(stop_reason)
+    return stop_reason
+
+
+#This function converts one vLLM request output into the shared structured generation result.
+def build_vllm_generation_result(output: Any, generation_params: dict[str, Any]) -> dict[str, Any]:
+    requested_max_tokens = int(generation_params["max_tokens"])
+    completion = output.outputs[0] if output is not None and getattr(output, "outputs", None) else None
+    text = str(getattr(completion, "text", "") or "")
+    token_ids = getattr(completion, "token_ids", None) if completion is not None else None
+    generated_token_count = len(token_ids or [])
+    finish_reason = getattr(completion, "finish_reason", None) if completion is not None else None
+    stop_reason = getattr(completion, "stop_reason", None) if completion is not None else None
+    return {
+        "text": text,
+        "response_metadata": {
+            "finish_reason": finish_reason,
+            "stop_reason": json_safe_stop_reason(stop_reason),
+            "generated_token_count": generated_token_count,
+            "requested_max_tokens": requested_max_tokens,
+            "remaining_output_tokens": max(0, requested_max_tokens - generated_token_count),
+            "reached_max_tokens": finish_reason in MAX_TOKEN_FINISH_REASONS,
+        },
+    }
+
+
+#This function preserves positional association between vLLM outputs and per-request generation parameters.
+def build_vllm_generation_results(
+    outputs: list[Any],
+    generation_params_batch: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if len(outputs) != len(generation_params_batch):
+        raise ValueError(
+            "vLLM returned a different number of request outputs than generation parameter sets: "
+            f"outputs={len(outputs)}, generation_params={len(generation_params_batch)}."
+        )
+    return [
+        build_vllm_generation_result(output, generation_params)
+        for output, generation_params in zip(outputs, generation_params_batch)
+    ]
 
 
 #This function checks whether a local directory looks like a vLLM-loadable model directory.
@@ -106,10 +157,26 @@ class VllmChatCompletionAdapter:
         if VLLM_CHAT_TEMPLATE_KWARGS:
             chat_kwargs["chat_template_kwargs"] = VLLM_CHAT_TEMPLATE_KWARGS
         outputs = self.llm.chat(**chat_kwargs)
-        text = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
+        request_output = outputs[0] if outputs else None
+        generation_result = build_vllm_generation_result(
+            request_output,
+            {"max_tokens": max_tokens},
+        )
+        text = generation_result["text"]
+        response_metadata = generation_result["response_metadata"]
         if not stream:
-            return {"choices": [{"message": {"content": text}}]}
-        return iter([{"choices": [{"delta": {"content": text}}]}])
+            return {
+                "choices": [{"message": {"content": text}}],
+                "response_metadata": response_metadata,
+            }
+        return iter(
+            [
+                {
+                    "choices": [{"delta": {"content": text}}],
+                    "response_metadata": response_metadata,
+                }
+            ]
+        )
 
     #This method runs a batch of chat completions with per-prompt generation parameters.
     def create_chat_completions_batch(
@@ -117,7 +184,7 @@ class VllmChatCompletionAdapter:
         *,
         messages_batch: list[list[dict[str, str]]],
         generation_params_batch: list[dict[str, Any]],
-    ) -> list[str]:
+    ) -> list[dict[str, Any]]:
         from vllm import SamplingParams
 
         sampling_params_batch = [
@@ -136,7 +203,7 @@ class VllmChatCompletionAdapter:
         if VLLM_CHAT_TEMPLATE_KWARGS:
             chat_kwargs["chat_template_kwargs"] = VLLM_CHAT_TEMPLATE_KWARGS
         outputs = self.llm.chat(**chat_kwargs)
-        return [output.outputs[0].text if output.outputs else "" for output in outputs]
+        return build_vllm_generation_results(outputs, generation_params_batch)
 
 
 #This function selects vLLM model paths or Hugging Face model ids for the current run.

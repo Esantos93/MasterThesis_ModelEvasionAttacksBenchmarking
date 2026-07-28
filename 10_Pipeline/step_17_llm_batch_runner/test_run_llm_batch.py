@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1389,6 +1390,58 @@ class StaticRawSyntheticLlm(SyntheticLlm):
         return [self.raw_outputs[prompt_unit_id] for prompt_unit_id in prompt_unit_ids]
 
 
+#This backend returns vLLM-shaped structured results with caller-controlled termination metadata.
+class StructuredRawSyntheticLlm(StaticRawSyntheticLlm):
+    def __init__(
+        self,
+        token_counts: dict[str, int],
+        raw_outputs: dict[str, str],
+        completion_specs: dict[str, dict],
+    ) -> None:
+        super().__init__(token_counts, raw_outputs)
+        self.completion_specs = completion_specs
+
+    def build_result(self, prompt_unit_id: str, requested_max_tokens: int) -> dict:
+        spec = self.completion_specs[prompt_unit_id]
+        completion = SimpleNamespace(
+            text=self.raw_outputs[prompt_unit_id],
+            finish_reason=spec.get("finish_reason"),
+            stop_reason=spec.get("stop_reason"),
+            token_ids=list(range(int(spec.get("generated_token_count", 0)))),
+        )
+        return run_llm_batch_vllm.build_vllm_generation_result(
+            SimpleNamespace(outputs=[completion]),
+            {"max_tokens": requested_max_tokens},
+        )
+
+    def create_chat_completion(self, *, messages: list[dict], max_tokens: int, **_kwargs: object):
+        self.single_generation_calls += 1
+        prompt_unit_id = str(messages[0]["content"])
+        result = self.build_result(prompt_unit_id, max_tokens)
+        return iter(
+            [
+                {
+                    "choices": [{"delta": {"content": result["text"]}}],
+                    "response_metadata": result["response_metadata"],
+                }
+            ]
+        )
+
+    def create_chat_completions_batch(
+        self,
+        *,
+        messages_batch: list[list[dict]],
+        generation_params_batch: list[dict],
+    ) -> list[dict]:
+        prompt_unit_ids = [str(messages[0]["content"]) for messages in messages_batch]
+        self.batch_generation_calls.append(prompt_unit_ids)
+        self.batch_max_tokens.append([int(params["max_tokens"]) for params in generation_params_batch])
+        return [
+            self.build_result(prompt_unit_id, int(generation_params["max_tokens"]))
+            for prompt_unit_id, generation_params in zip(prompt_unit_ids, generation_params_batch)
+        ]
+
+
 def build_runtime_generation_params(runtime_max_model_len: int) -> dict:
     return {
         "temperature": 0.0,
@@ -1434,6 +1487,165 @@ def build_runtime_prompt(
 
 #This test case covers direct runtime consumption of compact_patch_token_budget_v2.
 class TokenPlanRuntimeTest(unittest.TestCase):
+    def test_structured_generation_metadata_persists_for_accepted_and_failed_batch_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            valid_output = json.dumps(
+                {
+                    "schema_version": "patch_output_v1",
+                    "parent_group_id": "parent_001",
+                    "prompt_unit_id": "accepted_generation",
+                    "header_edits": [],
+                }
+            )
+            raw_outputs = {
+                "accepted_generation": valid_output,
+                "failed_generation": '{"schema_version":"patch_output_v1"',
+            }
+            llm = StructuredRawSyntheticLlm(
+                {"accepted_generation": 10, "failed_generation": 10},
+                raw_outputs,
+                {
+                    "accepted_generation": {
+                        "finish_reason": "stop",
+                        "stop_reason": 128009,
+                        "generated_token_count": 12,
+                    },
+                    "failed_generation": {
+                        "finish_reason": "length",
+                        "stop_reason": None,
+                        "generated_token_count": 21,
+                    },
+                },
+            )
+            prompt_paths = []
+            for prompt_unit_id, planned_output_tokens in [
+                ("accepted_generation", 20),
+                ("failed_generation", 21),
+            ]:
+                prompt_path = root / f"{prompt_unit_id}.prompt.json"
+                prompt_path.write_text(
+                    json.dumps(build_runtime_prompt(prompt_unit_id, planned_output_tokens)),
+                    encoding="utf-8",
+                )
+                prompt_paths.append(prompt_path)
+
+            with patch.object(run_llm_batch, "load_model", return_value=llm):
+                run_llm_batch.run_model_batch(
+                    model_path=Path("synthetic"),
+                    prompt_paths=prompt_paths,
+                    output_root=root / "outputs",
+                    run_id="run",
+                    generation_params=build_runtime_generation_params(100),
+                    progress_every=0,
+                    heartbeat_seconds=0,
+                    llm_batch_size=2,
+                )
+
+            metadata_dir = root / "outputs" / "synthetic" / "run" / "metadata"
+            accepted_metadata = json.loads(
+                (metadata_dir / "accepted_generation.metadata.json").read_text(encoding="utf-8")
+            )
+            failed_metadata = json.loads(
+                (metadata_dir / "failed_generation.metadata.json").read_text(encoding="utf-8")
+            )
+            accepted_response = accepted_metadata["generation_response_metadata"]
+            failed_response = failed_metadata["generation_response_metadata"]
+
+            self.assertEqual(accepted_metadata["status"], "accepted")
+            self.assertEqual(accepted_response["finish_reason"], "stop")
+            self.assertEqual(accepted_response["stop_reason"], 128009)
+            self.assertEqual(accepted_response["generated_token_count"], 12)
+            self.assertEqual(accepted_response["requested_max_tokens"], 20)
+            self.assertEqual(accepted_response["remaining_output_tokens"], 8)
+            self.assertFalse(accepted_response["reached_max_tokens"])
+
+            self.assertEqual(failed_metadata["status"], "failed")
+            self.assertEqual(failed_metadata["failure_reason"], "JSONDecodeError")
+            self.assertEqual(failed_response["finish_reason"], "length")
+            self.assertIsNone(failed_response["stop_reason"])
+            self.assertEqual(failed_response["generated_token_count"], 21)
+            self.assertEqual(failed_response["requested_max_tokens"], 21)
+            self.assertEqual(failed_response["remaining_output_tokens"], 0)
+            self.assertTrue(failed_response["reached_max_tokens"])
+            self.assertEqual(llm.batch_max_tokens, [[20, 21]])
+            self.assertEqual(
+                (root / "outputs" / "synthetic" / "run" / "raw" / "failed_generation.raw.txt")
+                .read_text(encoding="utf-8")
+                .rstrip("\n"),
+                raw_outputs["failed_generation"],
+            )
+
+            summary_paths = summarize_llm_runtime.summarize_run(
+                run_dir=root / "outputs" / "synthetic" / "run",
+                prompt_dirs=[root],
+            )
+            summary = json.loads(summary_paths["json"].read_text(encoding="utf-8"))
+            self.assertEqual(summary["counts"]["by_finish_reason"], {"length": 1, "stop": 1})
+            self.assertEqual(summary["counts"]["reached_max_tokens"], 1)
+            self.assertEqual(summary["counts"]["without_finish_reason"], 0)
+            self.assertEqual(summary["generation_completions"]["metadata_available_count"], 2)
+            self.assertEqual(
+                summary["generation_completions"]["generated_to_requested_ratio"]["max"],
+                1.0,
+            )
+
+    def test_structured_generation_metadata_persists_in_single_prompt_mode(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prompt_unit_id = "single_generation"
+            raw_output = json.dumps(
+                {
+                    "schema_version": "patch_output_v1",
+                    "parent_group_id": "parent_001",
+                    "prompt_unit_id": prompt_unit_id,
+                    "header_edits": [],
+                }
+            )
+            llm = StructuredRawSyntheticLlm(
+                {prompt_unit_id: 10},
+                {prompt_unit_id: raw_output},
+                {
+                    prompt_unit_id: {
+                        "finish_reason": "stop",
+                        "stop_reason": "</s>",
+                        "generated_token_count": 7,
+                    }
+                },
+            )
+            prompt_path = root / f"{prompt_unit_id}.prompt.json"
+            prompt_path.write_text(
+                json.dumps(build_runtime_prompt(prompt_unit_id, 20)),
+                encoding="utf-8",
+            )
+            output_dirs = run_llm_batch.prepare_model_output_dirs(
+                root / "outputs",
+                "synthetic",
+                "run",
+            )
+
+            metadata = run_llm_batch.run_single_prompt(
+                llm=llm,
+                prompt_path=prompt_path,
+                model_path=Path("synthetic"),
+                model_name="synthetic",
+                output_dirs=output_dirs,
+                generation_params=build_runtime_generation_params(100),
+                heartbeat_seconds=0,
+                prompt_index=1,
+                total_prompts=1,
+            )
+
+            response_metadata = metadata["generation_response_metadata"]
+            self.assertEqual(metadata["status"], "accepted")
+            self.assertTrue(response_metadata["stream"])
+            self.assertEqual(response_metadata["finish_reason"], "stop")
+            self.assertEqual(response_metadata["stop_reason"], "</s>")
+            self.assertEqual(response_metadata["generated_token_count"], 7)
+            self.assertEqual(response_metadata["requested_max_tokens"], 20)
+            self.assertEqual(response_metadata["remaining_output_tokens"], 13)
+            self.assertFalse(response_metadata["reached_max_tokens"])
+
     def test_last_complete_json_recovery_is_recorded_in_single_and_batch_modes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1733,6 +1945,116 @@ class TokenPlanRuntimeTest(unittest.TestCase):
 
 #This test case covers vLLM model-discovery behavior.
 class VllmModelDiscoveryTest(unittest.TestCase):
+    def test_vllm_generation_result_records_length_termination_deterministically(self) -> None:
+        completion = SimpleNamespace(
+            text='{"partial":true',
+            finish_reason="length",
+            stop_reason=None,
+            token_ids=[10, 11, 12, 13],
+        )
+        output = SimpleNamespace(outputs=[completion])
+
+        first = run_llm_batch_vllm.build_vllm_generation_result(output, {"max_tokens": 4})
+        second = run_llm_batch_vllm.build_vllm_generation_result(output, {"max_tokens": 4})
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["text"], completion.text)
+        self.assertEqual(
+            first["response_metadata"],
+            {
+                "finish_reason": "length",
+                "stop_reason": None,
+                "generated_token_count": 4,
+                "requested_max_tokens": 4,
+                "remaining_output_tokens": 0,
+                "reached_max_tokens": True,
+            },
+        )
+
+    def test_vllm_generation_result_records_stop_with_remaining_tokens(self) -> None:
+        for stop_reason in (None, "</s>", 128009):
+            with self.subTest(stop_reason=stop_reason):
+                completion = SimpleNamespace(
+                    text="complete",
+                    finish_reason="stop",
+                    stop_reason=stop_reason,
+                    token_ids=[1, 2, 3],
+                )
+
+                result = run_llm_batch_vllm.build_vllm_generation_result(
+                    SimpleNamespace(outputs=[completion]),
+                    {"max_tokens": 8},
+                )
+
+                self.assertEqual(result["response_metadata"]["stop_reason"], stop_reason)
+                self.assertEqual(result["response_metadata"]["generated_token_count"], 3)
+                self.assertEqual(result["response_metadata"]["requested_max_tokens"], 8)
+                self.assertEqual(result["response_metadata"]["remaining_output_tokens"], 5)
+                self.assertFalse(result["response_metadata"]["reached_max_tokens"])
+
+    def test_vllm_generation_result_handles_request_without_completion_outputs(self) -> None:
+        result = run_llm_batch_vllm.build_vllm_generation_result(
+            SimpleNamespace(outputs=[]),
+            {"max_tokens": 9},
+        )
+
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["response_metadata"]["generated_token_count"], 0)
+        self.assertEqual(result["response_metadata"]["requested_max_tokens"], 9)
+        self.assertEqual(result["response_metadata"]["remaining_output_tokens"], 9)
+        self.assertIsNone(result["response_metadata"]["finish_reason"])
+        self.assertIsNone(result["response_metadata"]["stop_reason"])
+        self.assertFalse(result["response_metadata"]["reached_max_tokens"])
+
+    def test_vllm_batch_result_preserves_per_request_max_token_association(self) -> None:
+        outputs = [
+            SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        text="first",
+                        finish_reason="stop",
+                        stop_reason="eos",
+                        token_ids=[1, 2],
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        text="second",
+                        finish_reason="length",
+                        stop_reason=None,
+                        token_ids=[1, 2, 3, 4, 5],
+                    )
+                ]
+            ),
+        ]
+
+        results = run_llm_batch_vllm.build_vllm_generation_results(
+            outputs,
+            [{"max_tokens": 7}, {"max_tokens": 5}],
+        )
+
+        self.assertEqual([result["text"] for result in results], ["first", "second"])
+        self.assertEqual(
+            [result["response_metadata"]["requested_max_tokens"] for result in results],
+            [7, 5],
+        )
+        self.assertEqual(
+            [result["response_metadata"]["remaining_output_tokens"] for result in results],
+            [5, 0],
+        )
+        self.assertEqual(
+            [result["response_metadata"]["reached_max_tokens"] for result in results],
+            [False, True],
+        )
+
+    def test_legacy_string_backend_result_remains_compatible(self) -> None:
+        text, response_metadata = run_llm_batch.normalize_backend_generation_result("legacy text")
+
+        self.assertEqual(text, "legacy text")
+        self.assertEqual(response_metadata, {})
+
     def test_vllm_model_discovery_ignores_hidden_checkpoint_directories(self) -> None:
         with TemporaryDirectory() as temp_dir:
             model_root = Path(temp_dir)

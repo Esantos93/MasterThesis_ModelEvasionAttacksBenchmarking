@@ -491,6 +491,27 @@ def extract_stream_chunk_text(chunk: dict[str, Any]) -> str:
     return ""
 
 
+#This function extracts optional backend termination metadata from one response object or stream chunk.
+def extract_generation_response_metadata(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        return {}
+    response_metadata = response.get("response_metadata")
+    if not isinstance(response_metadata, dict):
+        return {}
+    return deepcopy(response_metadata)
+
+
+#This function accepts both historical string results and structured backend generation results.
+def normalize_backend_generation_result(result: Any) -> tuple[str, dict[str, Any]]:
+    if isinstance(result, str):
+        return result, {}
+    if isinstance(result, dict) and isinstance(result.get("text"), str):
+        return result["text"], extract_generation_response_metadata(result)
+    raise TypeError(
+        "Model backend generation result must be a string or an object containing string field 'text'."
+    )
+
+
 #This function reads the packet ids expected in the output from the Step 16 traceability block (heartbeat).
 def expected_packet_ids_from_traceability(prompt_package: dict[str, Any]) -> list[str]:
     traceability = prompt_package.get("input_traceability", {})
@@ -1665,6 +1686,7 @@ def run_single_prompt(
                 stream=True,
             )
             raw_parts = []
+            backend_response_metadata: dict[str, Any] = {}
             for chunk in response_chunks:
                 chunk_text = extract_stream_chunk_text(chunk)
                 if chunk_text:
@@ -1675,6 +1697,9 @@ def run_single_prompt(
                             raw_text_so_far,
                             expected_packet_ids,
                         )
+                chunk_response_metadata = extract_generation_response_metadata(chunk)
+                if chunk_response_metadata:
+                    backend_response_metadata.update(chunk_response_metadata)
             raw_text = "".join(raw_parts)
         finally:
             heartbeat_stop.set()
@@ -1687,6 +1712,7 @@ def run_single_prompt(
             "stream": True,
             "stream_visible_packet_ids": progress_state["visible_packet_count"],
             "stream_expected_packet_ids": progress_state["total_packet_count"],
+            **backend_response_metadata,
         }
 
         parsed_output, output_recovery = parse_model_json_with_recovery(raw_text)
@@ -1809,6 +1835,7 @@ def write_generated_prompt_outputs(
     batch_size: int,
     batch_limit: int,
     batch_runtime_seconds: float,
+    backend_response_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = build_prompt_output_context(
         prompt_package=prompt_package,
@@ -1889,6 +1916,7 @@ def write_generated_prompt_outputs(
         "batch_runtime_seconds": batch_runtime_seconds,
         "stream_visible_packet_ids": count_visible_packet_ids(raw_text, context["expected_packet_ids"]),
         "stream_expected_packet_ids": len(context["expected_packet_ids"]),
+        **deepcopy(backend_response_metadata or {}),
     }
     metadata = build_run_metadata(
         status=status,
@@ -1926,12 +1954,12 @@ def run_prompt_generation_batch(
     generation_params_batch = [item["prompt_generation_params"] for item in batch_items]
     batch_started = time.perf_counter()
     if hasattr(llm, "create_chat_completions_batch"):
-        raw_texts = llm.create_chat_completions_batch(
+        backend_results = llm.create_chat_completions_batch(
             messages_batch=messages_batch,
             generation_params_batch=generation_params_batch,
         )
     else:
-        raw_texts = []
+        backend_results = []
         for item in batch_items:
             response_chunks = llm.create_chat_completion(
                 messages=item["prompt_package"]["messages"],
@@ -1940,12 +1968,30 @@ def run_prompt_generation_batch(
                 max_tokens=item["prompt_generation_params"]["max_tokens"],
                 stream=True,
             )
-            raw_texts.append("".join(extract_stream_chunk_text(chunk) for chunk in response_chunks))
+            raw_parts = []
+            backend_response_metadata: dict[str, Any] = {}
+            for chunk in response_chunks:
+                raw_parts.append(extract_stream_chunk_text(chunk))
+                chunk_response_metadata = extract_generation_response_metadata(chunk)
+                if chunk_response_metadata:
+                    backend_response_metadata.update(chunk_response_metadata)
+            backend_results.append(
+                {
+                    "text": "".join(raw_parts),
+                    "response_metadata": backend_response_metadata,
+                }
+            )
     batch_runtime_seconds = time.perf_counter() - batch_started
+    if len(backend_results) != len(batch_items):
+        raise ValueError(
+            "Model backend returned a different number of generation results than Prompt Units: "
+            f"results={len(backend_results)}, prompts={len(batch_items)}."
+        )
 
     metadata_rows = []
     batch_size = len(batch_items)
-    for item, raw_text in zip(batch_items, raw_texts):
+    for item, backend_result in zip(batch_items, backend_results):
+        raw_text, backend_response_metadata = normalize_backend_generation_result(backend_result)
         metadata_rows.append(
             write_generated_prompt_outputs(
                 prompt_package=item["prompt_package"],
@@ -1962,6 +2008,7 @@ def run_prompt_generation_batch(
                 batch_size=batch_size,
                 batch_limit=batch_limit,
                 batch_runtime_seconds=batch_runtime_seconds,
+                backend_response_metadata=backend_response_metadata,
             )
         )
     return metadata_rows
