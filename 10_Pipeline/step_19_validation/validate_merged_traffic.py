@@ -1501,11 +1501,12 @@ def run_validation(
             "classification_mapping_note": {
                 "validation_errors_map_to": "Invalid Traffic",
                 "evaluation_categories": [
-                    "Succesful Evasion",
-                    "Alert Mutation",
+                    "Successful Evasion",
+                    "Alert-Signature Mutation",
                     "Failed Evasion",
                     "Invalid Traffic",
                     "LLM Output Failure",
+                    "Induced Alert",
                 ],
                 "llm_output_failure_source": "Step 18 maps rejected Step 17 groups to LLM Output Failure.",
                 "invalid_traffic_source": "Step 19 maps validation errors in accepted Step 18 groups to Invalid Traffic.",
@@ -1526,8 +1527,9 @@ def run_validation(
                 ),
                 "validity_unit": "group",
                 "induced_alert_policy": (
-                    "No standalone Induced Alert category. New POST alerts are handled as Alert Mutation "
-                    "only when the original alert disappears; otherwise they remain Failed Evasion."
+                    "Step 19 does not classify detector alerts. Step 23 reports unconsumed POST-only alerts "
+                    "as Induced Alert, while same-packet and same-conversation different-signature matches "
+                    "are reported as Alert-Signature Mutation."
                 ),
             },
         },
