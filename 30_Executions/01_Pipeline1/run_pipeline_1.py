@@ -11,10 +11,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shlex
-import subprocess
 import sys
 from pathlib import Path
+
+
+EXECUTIONS_ROOT = Path(__file__).resolve().parents[1]
+if str(EXECUTIONS_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXECUTIONS_ROOT))
+
+from pipeline_subprocess_runner import (
+    PipelineCommandError,
+    exit_after_pipeline_failure,
+    pipeline_runner_log,
+    run_checked_command,
+)
 
 
 # =============================================================================
@@ -128,16 +138,12 @@ def preflight_pre_snort_context(
 
 
 def run_command(label: str, command: list[str]) -> None:
-    print(f"\n{'=' * 80}")
-    print(label)
-    print(f"{'=' * 80}")
-    print(shlex.join(command), flush=True)
-
-    if DRY_RUN:
-        return
-
-    subprocess.run(command, cwd=PIPELINE_ROOT, check=True)
-    print(f"{label} completed.", flush=True)
+    run_checked_command(
+        label=label,
+        command=command,
+        cwd=PIPELINE_ROOT,
+        dry_run=DRY_RUN,
+    )
 
 
 def maybe_run_step(step: int, command: list[str]) -> None:
@@ -278,4 +284,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    configured_experiment = load_pipeline_config()["experiment"]
+    configured_experiment_root = (
+        Path(configured_experiment["output_root"]) / configured_experiment["experiment_id"]
+    )
+    with pipeline_runner_log(
+        experiment_root=configured_experiment_root,
+        runner_name="pipeline_1",
+    ):
+        try:
+            main()
+        except PipelineCommandError as error:
+            exit_after_pipeline_failure(error)

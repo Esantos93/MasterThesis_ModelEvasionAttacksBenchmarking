@@ -9,10 +9,20 @@ Ubuntu VM, not as a polished public CLI.
 from __future__ import annotations
 
 import re
-import shlex
-import subprocess
 import sys
 from pathlib import Path
+
+
+EXECUTIONS_ROOT = Path(__file__).resolve().parents[1]
+if str(EXECUTIONS_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXECUTIONS_ROOT))
+
+from pipeline_subprocess_runner import (
+    PipelineCommandError,
+    exit_after_pipeline_failure,
+    pipeline_runner_log,
+    run_checked_command,
+)
 
 
 # =============================================================================
@@ -172,37 +182,22 @@ def grouping_output_label(config: dict) -> str:
 
 
 def run_command(step: int, command: list[str], capture_post_run_label: bool = False) -> str | None:
-    print(f"\n{'=' * 80}")
-    print(f"STEP {step}")
-    print(f"{'=' * 80}")
-    print(shlex.join(command), flush=True)
-
-    if DRY_RUN:
-        return None
-
-    process = subprocess.Popen(
-        command,
-        cwd=PIPELINE_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
     captured_post_run_label = None
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line, end="", flush=True)
+
+    def capture_output_metadata(line: str) -> None:
+        nonlocal captured_post_run_label
         if capture_post_run_label:
             match = POST_RUN_PATTERN.search(line)
             if match:
                 captured_post_run_label = match.group(1)
 
-    return_code = process.wait()
-    if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, command)
-
-    print(f"Step {step} completed.", flush=True)
+    run_checked_command(
+        label=f"STEP {step}",
+        command=command,
+        cwd=PIPELINE_ROOT,
+        dry_run=DRY_RUN,
+        on_output_line=capture_output_metadata if capture_post_run_label else None,
+    )
     return captured_post_run_label
 
 
@@ -378,4 +373,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    configured_experiment = load_pipeline_config()["experiment"]
+    configured_experiment_root = (
+        Path(configured_experiment["output_root"]) / configured_experiment["experiment_id"]
+    )
+    with pipeline_runner_log(
+        experiment_root=configured_experiment_root,
+        runner_name="pipeline_2",
+    ):
+        try:
+            main()
+        except PipelineCommandError as error:
+            exit_after_pipeline_failure(error)
