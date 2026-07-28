@@ -26,7 +26,7 @@ from common.header_policy import (
 )
 from common.io_utils import write_json
 from common.modification_strategy import ModificationCapabilities, resolve_modification_strategy
-from common.payload_materialization import materialize_payload_edits
+from common.payload_materialization import materialize_payload_edits, ordered_payload_edits
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
@@ -36,6 +36,22 @@ MERGED_SCHEMA_VERSION = "patch_applied_traffic_v4"
 REPORT_SCHEMA_VERSION = "patch_application_report_v4"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
 SUPPORTED_PAYLOAD_REGION_TYPES = {"canonical_payload_region", "canonical_payload_byte_range"}
+
+
+#This exception carries Step 18 materialization diagnostics that must fail the whole step.
+class Step18MaterializationFailure(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        issues: list[dict[str, Any]],
+        summary: dict[str, Any] | None = None,
+        group_outcomes: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.issues = issues
+        self.summary = summary or {}
+        self.group_outcomes = group_outcomes or {"accepted_groups": [], "llm_output_failure_groups": []}
 
 
 #This function returns a lightweight heartbeat printer for long Step 18 runs.
@@ -925,6 +941,104 @@ def partition_overlapping_edits(
     return safe_edits, conflicting_prompt_unit_ids, issues
 
 
+#This helper extracts the edit position reported by common payload materialization errors.
+def payload_error_edit_position(error_text: str) -> int | None:
+    match = re.search(r"Payload edit (\d+)", error_text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+#This helper extracts the alias identifier reported by common payload materialization errors.
+def payload_error_alias_id(error_text: str) -> str | None:
+    match = re.search(r"alias '([^']+)'", error_text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+#This helper keeps failed payload diagnostics compact but traceable to Step 16/17 provenance.
+def compact_payload_edit_diagnostic(edit: dict[str, Any] | None, *, alias_id: str | None) -> dict[str, Any]:
+    if not isinstance(edit, dict):
+        return {}
+    diagnostic_keys = [
+        "prompt_unit_id",
+        "parent_group_id",
+        "patch_index",
+        "operation",
+        "identity_type",
+        "region_type",
+        "region_id",
+        "canonical_region_id",
+        "representative_packet_id",
+        "canonical_region_start_offset_bytes",
+        "canonical_region_length_bytes",
+        "authorized_canonical_start_offset_bytes",
+        "authorized_canonical_length_bytes",
+        "canonical_start_offset_bytes",
+        "offset_from_region_start_bytes",
+        "replaced_length_bytes",
+        "replacement_length_bytes",
+        "replacement_format",
+        "source_parsed_file",
+        "source_prompt_file",
+    ]
+    diagnostic = {key: copy.deepcopy(edit.get(key)) for key in diagnostic_keys if key in edit}
+    aliases = edit.get("packet_aliases", [])
+    if isinstance(aliases, list):
+        matching_aliases = [
+            copy.deepcopy(alias)
+            for alias in aliases
+            if isinstance(alias, dict)
+            and (
+                alias_id is None
+                or alias.get("alias_id") == alias_id
+                or alias.get("physical_representation_id") == alias_id
+            )
+        ]
+        diagnostic["matching_packet_aliases"] = matching_aliases[:5]
+        diagnostic["packet_alias_count"] = len(aliases)
+    return diagnostic
+
+
+#This helper converts a payload materialization exception into a fail-fast Step 18 issue.
+def payload_materialization_failure_issue(error: ValueError, payload_edits: list[dict[str, Any]]) -> dict[str, Any]:
+    detail = str(error)
+    edit_position = payload_error_edit_position(detail)
+    alias_id = payload_error_alias_id(detail)
+    failing_edit = None
+    if edit_position is not None:
+        ordered_edits = ordered_payload_edits(payload_edits)
+        if 1 <= edit_position <= len(ordered_edits):
+            failing_edit = ordered_edits[edit_position - 1]
+    issue = {
+        "severity": "error",
+        "reason": "payload_materialization_failed",
+        "detail": detail,
+        "candidate_payload_edit_count": len(payload_edits),
+    }
+    if edit_position is not None:
+        issue["materialization_edit_position"] = edit_position
+    if alias_id is not None:
+        issue["alias_id"] = alias_id
+    issue.update(compact_payload_edit_diagnostic(failing_edit, alias_id=alias_id))
+    return issue
+
+
+#This function writes JSON through a temporary sibling path before publishing the final artifact.
+def write_json_atomic(path: Path, data: Any) -> None:
+    temp_path = path.with_name(f"{path.name}.tmp")
+    write_json(temp_path, data)
+    temp_path.replace(path)
+
+
+#This helper removes final Step 18 artifacts so failed runs cannot look complete.
+def remove_final_step18_artifacts(*paths: Path) -> None:
+    for path in paths:
+        if path.exists():
+            path.unlink()
+
+
 #This function applies validated edits to copied Step 14 records.
 def apply_validated_edits(
     *,
@@ -975,13 +1089,12 @@ def apply_validated_edits(
         try:
             materialization = materialize_payload_edits(output_by_packet_id, payload_edits)
         except ValueError as error:
-            payload_materialization_issues.append(
-                {
-                    "severity": "error",
-                    "reason": "payload_materialization_failed",
-                    "detail": str(error),
-                }
-            )
+            issue = payload_materialization_failure_issue(error, payload_edits)
+            payload_materialization_issues.append(issue)
+            raise Step18MaterializationFailure(
+                "Step 18 canonical payload materialization failed.",
+                issues=payload_materialization_issues,
+            ) from error
         else:
             for packet_id, materialized_packet in materialization["materialized_packets_by_id"].items():
                 if packet_id in output_by_packet_id:
@@ -1222,7 +1335,28 @@ def apply_model_patches(
 
     if heartbeat:
         heartbeat(f"Collected {len(candidate_edits)} candidate edits from accepted outputs.", force=True)
-    materialized = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits, heartbeat=heartbeat)
+    try:
+        materialized = apply_validated_edits(traffic_records=reference_records, edits=candidate_edits, heartbeat=heartbeat)
+    except Step18MaterializationFailure as failure:
+        failure.summary.update(
+            {
+                "reference_packet_count": len(reference_records),
+                "parsed_file_count": len(parsed_paths),
+                "metadata_count": len(metadata_by_unit),
+                "accepted_group_count": len(accepted_groups),
+                "llm_output_failure_group_count": len(llm_output_failure_groups),
+                "candidate_edit_count": len(candidate_edits),
+                "candidate_header_edit_count": len([edit for edit in candidate_edits if edit.get("edit_kind") == "physical_header"]),
+                "candidate_payload_edit_count": len([edit for edit in candidate_edits if edit.get("edit_kind") == "canonical_payload"]),
+                "patch_application_error_count": len(patch_application_errors) + len(failure.issues),
+                "payload_materialization_issue_count": len(failure.issues),
+            }
+        )
+        failure.group_outcomes = {
+            "accepted_groups": accepted_groups,
+            "llm_output_failure_groups": llm_output_failure_groups,
+        }
+        raise
     modified_records = materialized["traffic"]
     applied_patches = materialized["applied_patches"]
     no_effect_edits = materialized["no_effect_edits"]
@@ -1350,25 +1484,64 @@ def merge_model_outputs(
     heartbeat("Loading header editability policy.", force=True)
     header_policy = load_header_editability_policy(config, config.get("_config_path", ""))
     capabilities = resolve_modification_strategy(config)
-    model_report = apply_model_patches(
-        model_root=model_root,
-        prompt_root=prompt_root,
-        header_policy=header_policy,
-        capabilities=capabilities,
-        reference_records=reference_records,
-        heartbeat=heartbeat,
-    )
-    heartbeat("Assembling Step 18 output objects.", force=True)
-    traffic = model_report.pop("traffic")
     output_root = output_dir / experiment_config_label
     merged_path = output_root / "merged_modified_traffic.json"
     report_path = output_root / "merge_report.json"
+    failed_report_path = output_root / "merge_failed_report.json"
     now = datetime.now(timezone.utc).isoformat()
+    try:
+        model_report = apply_model_patches(
+            model_root=model_root,
+            prompt_root=prompt_root,
+            header_policy=header_policy,
+            capabilities=capabilities,
+            reference_records=reference_records,
+            heartbeat=heartbeat,
+        )
+    except Step18MaterializationFailure as failure:
+        output_root.mkdir(parents=True, exist_ok=True)
+        remove_final_step18_artifacts(merged_path, report_path)
+        failed_report = {
+            "metadata": {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "generated_at_utc": now,
+                "execution_status": "failed",
+                "materialization_success": False,
+                "failure_stage": "payload_materialization",
+                "experiment_id": config["experiment"]["experiment_id"],
+                "experiment_config_label": experiment_config_label,
+                "model_name": model_root.name,
+                "model_output_root": str(model_root),
+                "reference_json": str(reference_json),
+            },
+            "summary": {
+                **failure.summary,
+                "execution_status": "failed",
+                "materialization_success": False,
+            },
+            "group_outcomes": failure.group_outcomes,
+            "patch_application": {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "execution_status": "failed",
+                "materialization_success": False,
+                "payload_materialization_issues": failure.issues,
+                "errors": failure.issues,
+            },
+        }
+        write_json_atomic(failed_report_path, failed_report)
+        heartbeat(f"Step 18 failed diagnostic written to {failed_report_path}.", force=True)
+        raise RuntimeError(
+            f"Step 18 payload materialization failed; diagnostic report: {failed_report_path}"
+        ) from failure
+    heartbeat("Assembling Step 18 output objects.", force=True)
+    traffic = model_report.pop("traffic")
 
     merged = {
         "metadata": {
             "schema_version": MERGED_SCHEMA_VERSION,
             "generated_at_utc": now,
+            "execution_status": "completed",
+            "materialization_success": True,
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
             "experiment_config_label": experiment_config_label,
@@ -1399,6 +1572,8 @@ def merge_model_outputs(
         },
         "patch_application": {
             "schema_version": REPORT_SCHEMA_VERSION,
+            "execution_status": "completed",
+            "materialization_success": True,
             "explicit_header_edits": model_report["explicit_header_edits"],
             "explicit_payload_edits": model_report["explicit_payload_edits"],
             "applied_patches": model_report["applied_patches"],
@@ -1421,6 +1596,8 @@ def merge_model_outputs(
         "metadata": {
             "schema_version": REPORT_SCHEMA_VERSION,
             "generated_at_utc": now,
+            "execution_status": "completed",
+            "materialization_success": True,
             "experiment_id": config["experiment"]["experiment_id"],
             "experiment_config_label": experiment_config_label,
             "merged_output": str(merged_path),
@@ -1428,16 +1605,21 @@ def merge_model_outputs(
             "model_output_root": str(model_root),
             "reference_json": str(reference_json),
         },
-        "summary": model_report["summary"],
+        "summary": {
+            **model_report["summary"],
+            "execution_status": "completed",
+            "materialization_success": True,
+        },
         "group_outcomes": merged["group_outcomes"],
         "patch_application": merged["patch_application"],
         "model_output": model_report,
     }
+    remove_final_step18_artifacts(failed_report_path)
     heartbeat(f"Writing merged traffic JSON to {merged_path}.", force=True)
-    write_json(merged_path, merged)
+    write_json_atomic(merged_path, merged)
     heartbeat(f"Finished writing merged traffic JSON to {merged_path}.", force=True)
     heartbeat(f"Writing merge report JSON to {report_path}.", force=True)
-    write_json(report_path, report)
+    write_json_atomic(report_path, report)
     heartbeat(f"Finished writing merge report JSON to {report_path}.", force=True)
     return {
         "merged_output": str(merged_path),

@@ -13,6 +13,7 @@ for path in [PIPELINE_ROOT, STEP_ROOT]:
         sys.path.insert(0, str(path))
 
 from merge_llm_outputs import (
+    Step18MaterializationFailure,
     apply_validated_edits,
     build_editable_region_lookup,
     build_patch_edit,
@@ -49,6 +50,57 @@ def packet_record() -> dict:
         },
         "tcp_header": {"window": 8192},
         "payload_hex": "",
+    }
+
+
+def payload_packet_record() -> dict:
+    record = packet_record()
+    record.update(
+        {
+            "payload_hex": "001122334455",
+            "payload_length_bytes": 6,
+            "packet_length_bytes": 60,
+        }
+    )
+    return record
+
+
+def payload_edit_with_uncovered_alias() -> dict:
+    return {
+        "edit_kind": "canonical_payload",
+        "identity_type": "canonical_payload_region",
+        "packet_id": "packet_000001",
+        "representative_packet_id": "packet_000001",
+        "canonical_region_id": "payload_region_000001",
+        "region_id": "payload_region_000001",
+        "region_type": "canonical_payload_region",
+        "semantic_element_id": "semantic_000001",
+        "canonical_window_id": "window_000001",
+        "operation": "replace_region",
+        "canonical_region_start_offset_bytes": 0,
+        "canonical_region_length_bytes": 6,
+        "authorized_canonical_start_offset_bytes": 0,
+        "authorized_canonical_length_bytes": 6,
+        "canonical_start_offset_bytes": 0,
+        "offset_from_region_start_bytes": 0,
+        "replaced_length_bytes": 6,
+        "replacement_format": "hex",
+        "replacement": "aabbccddeeff",
+        "replacement_hex": "aabbccddeeff",
+        "replacement_length_bytes": 6,
+        "packet_aliases": [
+            {
+                "packet_id": "packet_000001",
+                "alias_id": "tcp_repr_uncovered",
+                "canonical_region_id": "payload_region_000001",
+                "canonical_start_offset_bytes": 0,
+                "payload_start_offset_bytes": 0,
+                "length_bytes": 2,
+            }
+        ],
+        "patch_index": 1,
+        "prompt_unit_id": "group_000001",
+        "parent_group_id": "group_000001",
     }
 
 
@@ -415,6 +467,126 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             group = report["group_outcomes"]["llm_output_failure_groups"][0]
             self.assertEqual(["packet_000001"], group["packet_ids"])
             self.assertEqual("metadata_accepted_without_parsed_output", group["failure_reason"])
+
+    def test_payload_materialization_error_fails_apply_validated_edits(self) -> None:
+        with self.assertRaises(Step18MaterializationFailure) as context:
+            apply_validated_edits(
+                traffic_records=[payload_packet_record()],
+                edits=[payload_edit_with_uncovered_alias()],
+            )
+
+        issue = context.exception.issues[0]
+        self.assertEqual("payload_materialization_failed", issue["reason"])
+        self.assertEqual("tcp_repr_uncovered", issue["alias_id"])
+        self.assertEqual("payload_region_000001", issue["canonical_region_id"])
+
+    def test_payload_materialization_error_writes_failed_report_without_final_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config_path = temp_dir / "config.json"
+            reference_path = temp_dir / "selected_packet_records.json"
+            step17_root = temp_dir / "step17"
+            prompt_root = temp_dir / "prompts"
+            for path in [step17_root / "parsed", step17_root / "metadata", step17_root / "raw", step17_root / "failures", prompt_root]:
+                path.mkdir(parents=True, exist_ok=True)
+            config = {
+                "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
+                "llm": {"model_name": "fixture-model"},
+                "pipeline": {
+                    "experiment_config_label": "fixture_v3",
+                    "modification_strategy": "canonical_payload_only_strategy_v1",
+                    "header_editability_policy": "conservative_header_editability_v1",
+                },
+            }
+            region = {
+                "identity_type": "canonical_payload_region",
+                "packet_id": "payload_region_000001",
+                "canonical_region_id": "payload_region_000001",
+                "region_id": "payload_region_000001",
+                "region_type": "canonical_payload_region",
+                "stream_start": 100,
+                "stream_end": 106,
+                "ownership": {"representative_packet_id": "packet_000001"},
+                "authorized_start_offset_bytes": 0,
+                "authorized_end_offset_bytes": 6,
+                "authorized_length_bytes": 6,
+                "length_bytes": 6,
+                "physical_aliases": [
+                    {
+                        "packet_id": "packet_000001",
+                        "representations": [
+                            {
+                                "physical_representation_id": "tcp_repr_uncovered",
+                                "stream_start": 100,
+                                "stream_end": 102,
+                                "packet_payload_offset_start_bytes": 0,
+                                "packet_payload_offset_end_bytes": 2,
+                            }
+                        ],
+                    }
+                ],
+                "allowed_operations": ["replace_region"],
+                "max_replacement_bytes": 6,
+                "max_replacement_hex_chars": 12,
+            }
+            prompt = {
+                "schema_version": "prompt_unit_v2",
+                "prompt_unit_id": "group_000001",
+                "parent_group_id": "group_000001",
+                "source_modification_unit_file": "group_000001.json",
+                "source_modification_unit_schema_version": "compact_modification_unit_v3",
+                "input_traceability": {
+                    "packet_ids": ["packet_000001"],
+                    "editable_packet_ids": ["packet_000001"],
+                    "editable_regions": [region],
+                },
+            }
+            parsed = {
+                "schema_version": "patch_output_v1",
+                "patches": [
+                    {
+                        "representative_packet_id": "packet_000001",
+                        "canonical_region_id": "payload_region_000001",
+                        "region_id": "payload_region_000001",
+                        "region_type": "canonical_payload_region",
+                        "operation": "replace_region",
+                        "replacement_format": "hex",
+                        "replacement": "aabbccddeeff",
+                    }
+                ],
+            }
+            metadata = {
+                "prompt_unit_id": "group_000001",
+                "parent_group_id": "group_000001",
+                "status": "accepted",
+                "prompt_file": str(prompt_root / "group_000001.prompt.json"),
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            reference_path.write_text(
+                json.dumps({"metadata": {"schema_version": "packet_json_v4"}, "traffic": [payload_packet_record()]}),
+                encoding="utf-8",
+            )
+            (prompt_root / "group_000001.prompt.json").write_text(json.dumps(prompt), encoding="utf-8")
+            (step17_root / "parsed" / "group_000001.parsed.json").write_text(json.dumps(parsed), encoding="utf-8")
+            (step17_root / "metadata" / "group_000001.metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaises(RuntimeError):
+                run_merge(
+                    config_path=config_path,
+                    input_root=step17_root,
+                    prompt_root=prompt_root,
+                    reference_json=reference_path,
+                    output_dir=temp_dir / "08_merged_outputs",
+                )
+
+            output_root = temp_dir / "08_merged_outputs" / "fixture-v3"
+            failed_report = read_json(output_root / "merge_failed_report.json")
+            self.assertFalse((output_root / "merged_modified_traffic.json").exists())
+            self.assertFalse((output_root / "merge_report.json").exists())
+            self.assertEqual("failed", failed_report["metadata"]["execution_status"])
+            self.assertIs(False, failed_report["metadata"]["materialization_success"])
+            self.assertEqual(1, failed_report["summary"]["payload_materialization_issue_count"])
+            self.assertEqual("tcp_repr_uncovered", failed_report["patch_application"]["payload_materialization_issues"][0]["alias_id"])
 
 
 if __name__ == "__main__":
