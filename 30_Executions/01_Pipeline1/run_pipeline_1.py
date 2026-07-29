@@ -34,7 +34,7 @@ from pipeline_subprocess_runner import (
 PIPELINE_ROOT = Path("/home/santos/Desktop/Code_Files/10_Pipeline")
 PYTHON = "python3"
 
-CONFIG = "step_11_experiment_setup/config_LLM_baseline_004.json"
+CONFIG = "step_11_experiment_setup/07_ExpPayloadInvolved_FlowContextAware/config_.json"
 
 PROGRESS_EVERY_STEP13 = 250000
 HEARTBEAT_SECONDS_STEP15 = 30

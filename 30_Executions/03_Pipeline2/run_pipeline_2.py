@@ -32,7 +32,7 @@ from pipeline_subprocess_runner import (
 PIPELINE_ROOT = Path("/home/santos/Desktop/Code_Files/10_Pipeline")
 PYTHON = "python3"
 
-CONFIG = "step_11_experiment_setup/config_LLM_baseline_004.json"
+CONFIG = "step_11_experiment_setup/07_ExpPayloadInvolved_FlowContextAware/config_.json"
 
 STEP16_RUN_ID = "step16_prompts_run_20260701_082006_baseline004_full"
 STEP17_RUN_ID = "step17_llm_outputs_run_20260701_084630_baseline004_full"
