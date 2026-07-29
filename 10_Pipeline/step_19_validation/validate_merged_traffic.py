@@ -27,9 +27,9 @@ from common.validation_policy import (
 )
 
 
-VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v4"
-VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v4"
-PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v4"
+VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v5"
+VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v5"
+PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v5"
 DEFAULT_IMMUTABLE_FIELDS = [
     "packet_id",
     "original_packet_number",
@@ -300,7 +300,7 @@ def build_original_by_packet_id(reference_json_path: str | Path | None) -> tuple
             original_by_packet_id[str(record["packet_id"])] = record
     return original_by_packet_id, [str(field) for field in immutable_fields]
 
-#This function builds the active packet-to-patch indexes from Step 18 V4 metadata.
+#This function builds the active packet-to-patch indexes from Step 18 V5 metadata.
 def build_patch_application_indexes(merged_json: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], set[str]]:
     patch_application = merged_json.get("patch_application", {})
     if not isinstance(patch_application, dict):
@@ -349,7 +349,7 @@ def canonical_json_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json_text(value).encode("utf-8")).hexdigest()
 
 
-#This helper groups Step 18 V4 materialization records by packet_id.
+#This helper groups Step 18 V5 materialization records by packet_id.
 def records_by_packet_id(records: list[Any]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     if not isinstance(records, list):
@@ -409,7 +409,7 @@ def payload_relationships_by_affected_packet_id(
     return grouped
 
 
-#This function indexes Step 18 V4 explicit edits, derivatives, relationships, and materialization issues.
+#This function indexes Step 18 V5 explicit edits, derivatives, relationships, and materialization issues.
 def build_materialization_indexes(merged_json: dict[str, Any]) -> tuple[
     dict[str, list[dict[str, Any]]],
     dict[str, list[dict[str, Any]]],
@@ -650,7 +650,7 @@ def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) 
     return issues
 
 
-#This function independently re-materializes Step 18 V4 header edits and compares the result with the merged packet.
+#This function independently re-materializes Step 18 V5 header edits and compares the result with the merged packet.
 def validate_header_materialization_for_record(
     *,
     record: dict[str, Any],

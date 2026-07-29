@@ -13,8 +13,8 @@ if str(PIPELINE_ROOT) not in sys.path:
 from common.naming import sanitize_name_component
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v5"
-EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION = "validated_modified_traffic_v4"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v6"
+EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION = "validated_modified_traffic_v5"
 DEFAULT_EXPERIMENT_ROOT = Path("/home/santos/Experiments/exp_cicids2017_baseline_004")
 DEFAULT_EXPERIMENT_CONFIG_LABEL = "baseline-004-headers-only-fixed-size-6"
 DEFAULT_EXPECTED_PACKET_COUNT = 99831

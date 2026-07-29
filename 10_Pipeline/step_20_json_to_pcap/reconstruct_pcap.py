@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import binascii
-import bisect
 import json
 import sys
 import traceback
@@ -25,14 +24,14 @@ from common.terminal_logging import default_step_log_path, terminal_log
 from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v5"
-EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v4"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v6"
+EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v5"
 STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD = "validated_effective_payload_projection_changes"
 STEP19_FULL_POST_RECONSTRUCTION_POLICY = "full_packet_universe_with_original_noop_for_invalid_and_failure_only_packets"
 ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = COMMON_ETHERNET_MINIMUM_FRAME_BYTES
 TCP_SEQUENCE_MODULUS = 1 << 32
 TCP_SEQUENCE_MASK = TCP_SEQUENCE_MODULUS - 1
-STEP19_V4_REQUIRED_METADATA_FIELDS = [
+STEP19_V5_REQUIRED_METADATA_FIELDS = [
     "experiment_id",
     "experiment_config_label",
     "source_merged_json",
@@ -47,7 +46,7 @@ STEP19_V4_REQUIRED_METADATA_FIELDS = [
     "post_reconstruction_policy",
     "post_llm_traffic_validation_policy",
 ]
-STEP19_V4_COUNT_METADATA_FIELDS = [
+STEP19_V5_COUNT_METADATA_FIELDS = [
     "accepted_packet_count",
     "reconstruction_packet_count",
     "rejected_packet_count",
@@ -118,7 +117,7 @@ def experiment_config_label_from_config(config: dict[str, Any]) -> str:
 def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_json_path: Path) -> Path:
     value = metadata.get(field)
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"Step 19 V4 metadata field {field!r} must be a non-empty path string: {input_json_path}")
+        raise ValueError(f"Step 19 V5 metadata field {field!r} must be a non-empty path string: {input_json_path}")
     recorded_path = Path(value).expanduser()
     if not recorded_path.is_absolute():
         recorded_path = input_json_path.parent / recorded_path
@@ -138,9 +137,9 @@ def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_jso
     return recorded_path
 
 
-#This function enforces the Step 19 V4 artifact contract consumed by Step 20.
+#This function enforces the Step 19 V5 artifact contract consumed by Step 20.
 #This function must not silently accept legacy validated traffic schemas.
-def validate_step19_v4_input(
+def validate_step19_v5_input(
     validated_json: Any,
     input_json_path: Path,
     capabilities: ModificationCapabilities,
@@ -154,7 +153,7 @@ def validate_step19_v4_input(
     schema_version = metadata.get("schema_version")
     if schema_version != EXPECTED_INPUT_SCHEMA_VERSION:
         raise ValueError(
-            "Step 20 V4 requires Step 19 validated traffic schema "
+            "Step 20 V6 requires Step 19 validated traffic schema "
             f"{EXPECTED_INPUT_SCHEMA_VERSION!r}; found {schema_version!r}: {input_json_path}"
         )
     traffic = validated_json.get("traffic")
@@ -163,45 +162,45 @@ def validate_step19_v4_input(
 
     missing_fields = [
         field
-        for field in STEP19_V4_REQUIRED_METADATA_FIELDS
+        for field in STEP19_V5_REQUIRED_METADATA_FIELDS
         if field not in metadata
     ]
     if missing_fields:
         raise ValueError(
-            "Step 19 V4 validated traffic metadata is missing required fields "
+            "Step 19 V5 validated traffic metadata is missing required fields "
             f"{missing_fields}: {input_json_path}"
         )
-    for field in STEP19_V4_COUNT_METADATA_FIELDS:
+    for field in STEP19_V5_COUNT_METADATA_FIELDS:
         value = metadata.get(field)
         if not is_int_like(value) or int(value) < 0:
             raise ValueError(
-                f"Step 19 V4 metadata field {field!r} must be a non-negative integer; "
+                f"Step 19 V5 metadata field {field!r} must be a non-negative integer; "
                 f"found {value!r}: {input_json_path}"
             )
     reconstruction_packet_count = int(metadata["reconstruction_packet_count"])
     if reconstruction_packet_count != len(traffic):
         raise ValueError(
-            "Step 19 V4 reconstruction_packet_count must equal the emitted traffic list length; "
+            "Step 19 V5 reconstruction_packet_count must equal the emitted traffic list length; "
             f"metadata={reconstruction_packet_count}, traffic={len(traffic)}: {input_json_path}"
         )
     if metadata.get("post_reconstruction_policy") != STEP19_FULL_POST_RECONSTRUCTION_POLICY:
         raise ValueError(
-            "Step 20 V4 requires Step 19 full POST reconstruction policy "
+            "Step 20 V6 requires Step 19 full POST reconstruction policy "
             f"{STEP19_FULL_POST_RECONSTRUCTION_POLICY!r}; "
             f"found {metadata.get('post_reconstruction_policy')!r}: {input_json_path}"
         )
     policy_metadata = metadata.get("post_llm_traffic_validation_policy")
     if not isinstance(policy_metadata, dict):
         raise ValueError(
-            f"Step 19 V4 metadata.post_llm_traffic_validation_policy must be an object: {input_json_path}"
+            f"Step 19 V5 metadata.post_llm_traffic_validation_policy must be an object: {input_json_path}"
         )
     if policy_metadata.get("policy_id") != validation_policy.policy_id:
         raise ValueError(
-            "Step 19 V4 validation policy metadata does not match the active Step 20 config; "
+            "Step 19 V5 validation policy metadata does not match the active Step 20 config; "
             f"metadata={policy_metadata.get('policy_id')!r}, config={validation_policy.policy_id!r}: {input_json_path}"
         )
     if not isinstance(metadata.get("validation_report"), str) or not metadata["validation_report"].strip():
-        raise ValueError(f"Step 20 V4 reconstruction requires metadata.validation_report: {input_json_path}")
+        raise ValueError(f"Step 20 V6 reconstruction requires metadata.validation_report: {input_json_path}")
     projections = validated_json.get(STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD)
     projection_contract = validate_step19_effective_payload_projection_contract(
         projections=projections,
@@ -222,8 +221,8 @@ def record_is_preserved_invalid_or_failure_only(record: dict[str, Any]) -> bool:
     return evaluation_status in {"Invalid Traffic", "LLM Output Failure"}
 
 
-#This helper checks the V4 effective payload projection records that Step 19 already validated.
-#This helper summarizes projection evidence for auditability; it does not apply these records as patches.
+#This helper checks the V5 effective payload projection records that Step 19 already validated.
+#This helper summarizes projection evidence before the independent packet-level replay performed during the PCAP audit.
 def summarize_payload_projection_evidence(
     projections: list[Any],
     input_json_path: Path,
@@ -236,6 +235,15 @@ def summarize_payload_projection_evidence(
         "replaced_length_bytes",
         "replacement_length_bytes",
         "payload_length_delta_bytes",
+        "canonical_edit_start_offset_bytes",
+        "canonical_edit_end_offset_bytes",
+        "canonical_replaced_length_bytes",
+        "canonical_replacement_length_bytes",
+        "canonical_payload_length_delta_bytes",
+        "alias_canonical_start_offset_bytes",
+        "alias_canonical_end_offset_bytes",
+        "projection_reaches_canonical_edit_end",
+        "canonical_edit_end_packet_payload_offset_bytes",
         "original_segment_hex",
         "replacement_hex",
         "requires_pipeline_recalculation",
@@ -247,15 +255,16 @@ def summarize_payload_projection_evidence(
     growth = 0
     shrinkage = 0
     length_delta_projection_count = 0
+    canonical_edits: dict[tuple[str, int, str, str], dict[str, Any]] = {}
     for index, projection in enumerate(projections, start=1):
         if not isinstance(projection, dict):
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} is not an object: {input_json_path}"
+                f"Step 19 V5 effective payload projection record {index} is not an object: {input_json_path}"
             )
         missing_fields = [field for field in required_projection_fields if field not in projection]
         if missing_fields:
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} is missing fields "
+                f"Step 19 V5 effective payload projection record {index} is missing fields "
                 f"{missing_fields}: {input_json_path}"
             )
         replaced_length = projection.get("replaced_length_bytes")
@@ -263,36 +272,61 @@ def summarize_payload_projection_evidence(
         payload_delta = projection.get("payload_length_delta_bytes")
         if not is_int_like(replaced_length) or not is_int_like(replacement_length) or not is_int_like(payload_delta):
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} has non-integer length metadata: {input_json_path}"
+                f"Step 19 V5 effective payload projection record {index} has non-integer length metadata: {input_json_path}"
             )
         replaced_length = int(replaced_length)
         replacement_length = int(replacement_length)
         payload_delta = int(payload_delta)
         if payload_delta != replacement_length - replaced_length:
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} has inconsistent length delta metadata: {input_json_path}"
+                f"Step 19 V5 effective payload projection record {index} has inconsistent length delta metadata: {input_json_path}"
+            )
+        canonical_start = projection.get("canonical_edit_start_offset_bytes")
+        canonical_end = projection.get("canonical_edit_end_offset_bytes")
+        canonical_replaced_length = projection.get("canonical_replaced_length_bytes")
+        canonical_replacement_length = projection.get("canonical_replacement_length_bytes")
+        canonical_delta = projection.get("canonical_payload_length_delta_bytes")
+        if not all(
+            is_int_like(value)
+            for value in [
+                canonical_start,
+                canonical_end,
+                canonical_replaced_length,
+                canonical_replacement_length,
+                canonical_delta,
+            ]
+        ):
+            raise ValueError(
+                f"Step 19 V5 effective payload projection record {index} has invalid canonical edit lengths: {input_json_path}"
+            )
+        if (
+            int(canonical_end) - int(canonical_start) != int(canonical_replaced_length)
+            or int(canonical_replacement_length) - int(canonical_replaced_length) != int(canonical_delta)
+        ):
+            raise ValueError(
+                f"Step 19 V5 effective payload projection record {index} has inconsistent canonical edit bounds: {input_json_path}"
             )
         original_segment_hex = projection.get("original_segment_hex")
         replacement_hex = projection.get("replacement_hex")
         if not isinstance(original_segment_hex, str) or not isinstance(replacement_hex, str):
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} has non-string payload hex evidence: {input_json_path}"
+                f"Step 19 V5 effective payload projection record {index} has non-string payload hex evidence: {input_json_path}"
             )
         try:
             original_segment = binascii.unhexlify(original_segment_hex)
             replacement_segment = binascii.unhexlify(replacement_hex)
         except (binascii.Error, ValueError) as error:
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} contains invalid hex evidence: {error}"
+                f"Step 19 V5 effective payload projection record {index} contains invalid hex evidence: {error}"
             ) from error
         if len(original_segment) != replaced_length or len(replacement_segment) != replacement_length:
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} has hex evidence lengths inconsistent with metadata: {input_json_path}"
+                f"Step 19 V5 effective payload projection record {index} has hex evidence lengths inconsistent with metadata: {input_json_path}"
             )
         recalculation = projection.get("requires_pipeline_recalculation")
         if not isinstance(recalculation, list):
             raise ValueError(
-                f"Step 19 V4 effective payload projection record {index} has invalid requires_pipeline_recalculation: {input_json_path}"
+                f"Step 19 V5 effective payload projection record {index} has invalid requires_pipeline_recalculation: {input_json_path}"
             )
         for field in recalculation:
             recalculation_fields[str(field)] += 1
@@ -307,10 +341,70 @@ def summarize_payload_projection_evidence(
         previous = seen_identity_keys.get(identity_key)
         if previous is not None:
             raise ValueError(
-                "Step 19 V4 effective payload projection records contain a duplicate deterministic identity key: "
+                "Step 19 V5 effective payload projection records contain a duplicate deterministic identity key: "
                 f"{identity_key}: {input_json_path}"
             )
         seen_identity_keys[identity_key] = projection
+        canonical_identity = (
+            str(projection.get("prompt_unit_id")),
+            int(projection.get("patch_index")),
+            str(projection.get("canonical_region_id")),
+            str(projection.get("region_id")),
+        )
+        canonical_evidence = {
+            "prompt_unit_id": canonical_identity[0],
+            "patch_index": canonical_identity[1],
+            "canonical_region_id": canonical_identity[2],
+            "region_id": canonical_identity[3],
+            "canonical_edit_start_offset_bytes": int(canonical_start),
+            "canonical_edit_end_offset_bytes": int(canonical_end),
+            "canonical_replaced_length_bytes": int(canonical_replaced_length),
+            "canonical_replacement_length_bytes": int(canonical_replacement_length),
+            "canonical_payload_length_delta_bytes": int(canonical_delta),
+            "end_boundary_anchors": [],
+        }
+        previous_canonical_evidence = canonical_edits.get(canonical_identity)
+        if previous_canonical_evidence is not None:
+            comparable_fields = {
+                key: value
+                for key, value in canonical_evidence.items()
+                if key != "end_boundary_anchors"
+            }
+            previous_comparable_fields = {
+                key: value
+                for key, value in previous_canonical_evidence.items()
+                if key != "end_boundary_anchors"
+            }
+            if comparable_fields != previous_comparable_fields:
+                raise ValueError(
+                    "Step 19 V5 payload projections disagree about one canonical edit: "
+                    f"{canonical_identity}: {input_json_path}"
+                )
+        else:
+            canonical_edits[canonical_identity] = canonical_evidence
+            previous_canonical_evidence = canonical_evidence
+        reaches_end = projection.get("projection_reaches_canonical_edit_end")
+        if not isinstance(reaches_end, bool):
+            raise ValueError(
+                f"Step 19 V5 effective payload projection record {index} has invalid end-boundary evidence: {input_json_path}"
+            )
+        end_packet_offset = projection.get("canonical_edit_end_packet_payload_offset_bytes")
+        if reaches_end:
+            if not is_int_like(end_packet_offset):
+                raise ValueError(
+                    f"Step 19 V5 effective payload projection record {index} reaches the canonical edit end without a packet offset: {input_json_path}"
+                )
+            previous_canonical_evidence["end_boundary_anchors"].append(
+                {
+                    "packet_id": str(projection.get("packet_id")),
+                    "physical_representation_id": str(projection.get("physical_representation_id")),
+                    "canonical_edit_end_packet_payload_offset_bytes": int(end_packet_offset),
+                }
+            )
+        elif end_packet_offset is not None:
+            raise ValueError(
+                f"Step 19 V5 effective payload projection record {index} declares an end offset without covering the edit end: {input_json_path}"
+            )
         projected_packet_ids.add(str(projection.get("packet_id")))
         net_delta += payload_delta
         if payload_delta > 0:
@@ -318,6 +412,32 @@ def summarize_payload_projection_evidence(
         elif payload_delta < 0:
             shrinkage += abs(payload_delta)
         length_delta_projection_count += int(payload_delta != 0)
+    canonical_resize_events = []
+    for canonical_evidence in canonical_edits.values():
+        anchors = sorted(
+            canonical_evidence["end_boundary_anchors"],
+            key=lambda item: (
+                item["packet_id"],
+                item["physical_representation_id"],
+                item["canonical_edit_end_packet_payload_offset_bytes"],
+            ),
+        )
+        canonical_evidence["end_boundary_anchors"] = anchors
+        if canonical_evidence["canonical_payload_length_delta_bytes"] != 0:
+            if not anchors:
+                raise ValueError(
+                    "Step 19 V5 length-changing canonical payload edit has no physical representation "
+                    f"covering its end boundary: {canonical_evidence}"
+                )
+            canonical_resize_events.append(canonical_evidence)
+    canonical_resize_events.sort(
+        key=lambda item: (
+            item["canonical_region_id"],
+            item["canonical_edit_start_offset_bytes"],
+            item["prompt_unit_id"],
+            item["patch_index"],
+        )
+    )
     return {
         "projection_change_count": len(projections),
         "projected_packet_count": len(projected_packet_ids),
@@ -325,6 +445,13 @@ def summarize_payload_projection_evidence(
         "payload_growth_bytes": growth,
         "payload_shrinkage_bytes": shrinkage,
         "net_payload_delta_bytes": net_delta,
+        "canonical_effective_edit_count": len(canonical_edits),
+        "canonical_resize_event_count": len(canonical_resize_events),
+        "canonical_stream_net_payload_delta_bytes": sum(
+            event["canonical_payload_length_delta_bytes"]
+            for event in canonical_resize_events
+        ),
+        "canonical_resize_events": canonical_resize_events,
         "requires_pipeline_recalculation_counts": dict(sorted(recalculation_fields.items())),
     }
 
@@ -341,7 +468,7 @@ def validate_step19_effective_payload_projection_contract(
 ) -> dict[str, Any]:
     validation_report_path = resolve_step19_metadata_path(metadata, "validation_report", input_json_path)
     summary = {
-        "schema_version": "step19_v4_effective_payload_projection_contract_v1",
+        "schema_version": "step19_v5_effective_payload_projection_contract_v1",
         "validated_traffic_schema_version": metadata.get("schema_version"),
         "full_post_reconstruction_policy": metadata.get("post_reconstruction_policy"),
         "validation_report": str(validation_report_path),
@@ -350,16 +477,16 @@ def validate_step19_effective_payload_projection_contract(
     if not projection_collection_present:
         if capabilities.allows_payload_edits:
             raise ValueError(
-                f"Step 20 V4 payload-capable reconstruction requires {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}: {input_json_path}"
+                f"Step 20 V6 payload-capable reconstruction requires {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}: {input_json_path}"
             )
         projections = []
     elif not isinstance(projections, list):
         raise ValueError(
-            f"Step 19 V4 {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD} must be a list: {input_json_path}"
+            f"Step 19 V5 {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD} must be a list: {input_json_path}"
         )
     if not capabilities.allows_payload_edits and projections:
         raise ValueError(
-            "Step 19 V4 header-only reconstruction must not contain effective payload projection changes: "
+            "Step 19 V5 header-only reconstruction must not contain effective payload projection changes: "
             f"{input_json_path}"
         )
     if not capabilities.allows_payload_edits:
@@ -381,13 +508,13 @@ def validate_step19_effective_payload_projection_contract(
         traffic_by_packet_id[packet_id] = record
     if duplicate_packet_ids:
         raise ValueError(
-            f"Step 19 V4 traffic contains duplicate packet_id values before Step 20 reconstruction: {sorted(duplicate_packet_ids)}"
+            f"Step 19 V5 traffic contains duplicate packet_id values before Step 20 reconstruction: {sorted(duplicate_packet_ids)}"
         )
     projected_packet_ids = {str(projection.get("packet_id")) for projection in projections if isinstance(projection, dict)}
     unknown_packet_ids = sorted(projected_packet_ids - set(traffic_by_packet_id))
     if unknown_packet_ids:
         raise ValueError(
-            "Step 19 V4 effective payload projections reference packet_id values outside the validated traffic universe: "
+            "Step 19 V5 effective payload projections reference packet_id values outside the validated traffic universe: "
             f"{unknown_packet_ids}: {input_json_path}"
         )
     preserved_projected_packet_ids = sorted(
@@ -397,13 +524,13 @@ def validate_step19_effective_payload_projection_contract(
     )
     if preserved_projected_packet_ids:
         raise ValueError(
-            "Step 19 V4 effective payload projections must not target Invalid Traffic or LLM Output Failure-only packets: "
+            "Step 19 V5 effective payload projections must not target Invalid Traffic or LLM Output Failure-only packets: "
             f"{preserved_projected_packet_ids}: {input_json_path}"
         )
     expected_count = metadata.get("validated_effective_payload_projection_change_count")
     if not is_int_like(expected_count) or int(expected_count) != len(projections):
         raise ValueError(
-            "Step 19 V4 metadata.validated_effective_payload_projection_change_count must match "
+            "Step 19 V5 metadata.validated_effective_payload_projection_change_count must match "
             f"{STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}; metadata={expected_count!r}, actual={len(projections)}: {input_json_path}"
         )
     projection_summary = summarize_payload_projection_evidence(projections, input_json_path)
@@ -416,7 +543,7 @@ def validate_step19_effective_payload_projection_contract(
             value = metadata[optional_delta_field]
             if not is_int_like(value) or int(value) != projection_summary["net_payload_delta_bytes"]:
                 raise ValueError(
-                    f"Step 19 V4 metadata.{optional_delta_field} must match the effective payload projection net delta; "
+                    f"Step 19 V5 metadata.{optional_delta_field} must match the effective payload projection net delta; "
                     f"metadata={value!r}, computed={projection_summary['net_payload_delta_bytes']}: {input_json_path}"
                 )
 
@@ -425,8 +552,49 @@ def validate_step19_effective_payload_projection_contract(
         "payload_projection_evidence_status": "loaded_from_step19_validated_effective_payload_projection_changes_v1",
         "payload_projection_source": f"Step 19 {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}",
         "projected_packet_ids": sorted(projected_packet_ids),
+        "_projections_by_packet_id": {
+            packet_id: sorted(
+                [
+                    projection
+                    for projection in projections
+                    if isinstance(projection, dict) and str(projection.get("packet_id")) == packet_id
+                ],
+                key=lambda projection: (
+                    int(projection["payload_start_offset_bytes"]),
+                    int(projection["replaced_length_bytes"]),
+                    str(projection["prompt_unit_id"]),
+                    int(projection["patch_index"]),
+                ),
+                reverse=True,
+            )
+            for packet_id in sorted(projected_packet_ids)
+        },
         **projection_summary,
     }
+
+
+#This helper independently applies Step 19 physical payload projections to one immutable Step 13 payload.
+def materialize_projected_packet_payload(
+    reference_payload: bytes,
+    projections: list[dict[str, Any]],
+) -> bytes:
+    materialized = reference_payload
+    for projection in projections:
+        start = int(projection["payload_start_offset_bytes"])
+        replaced_length = int(projection["replaced_length_bytes"])
+        end = start + replaced_length
+        original_segment = binascii.unhexlify(projection["original_segment_hex"])
+        replacement_segment = binascii.unhexlify(projection["replacement_hex"])
+        if start < 0 or end > len(reference_payload):
+            raise ValueError(
+                f"Payload projection range [{start}, {end}) exceeds the immutable Step 13 payload length {len(reference_payload)}."
+            )
+        if reference_payload[start:end] != original_segment:
+            raise ValueError(
+                f"Payload projection original_segment_hex does not match immutable Step 13 bytes at [{start}, {end})."
+            )
+        materialized = materialized[:start] + replacement_segment + materialized[end:]
+    return materialized
 
 
 #This function imports Scapy only when PCAP reconstruction actually runs.
@@ -707,18 +875,77 @@ def decode_payload_hex_strict(record: dict[str, Any]) -> bytes:
         raise ValueError(f"Record {record.get('packet_id')} has invalid payload_hex: {error}") from error
 
 
-#This function detects modified TCP overlaps that would make stream reconstruction ambiguous.
-def validate_overlapping_tcp_segments(segments: list[dict[str, Any]]) -> dict[str, int]:
-    ordered = sorted(segments, key=lambda item: (item["start"], item["end"], item["packet_id"]))
+#This helper maps one original stream boundary through deterministic prefix-stable canonical resize events.
+def translate_relative_stream_boundary(
+    boundary: int,
+    resize_events: list[dict[str, Any]],
+) -> int:
+    cumulative_delta = 0
+    for event in resize_events:
+        event_start = int(event["start"])
+        event_end = int(event["end"])
+        replacement_length = int(event["replacement_length_bytes"])
+        if boundary <= event_start:
+            return boundary + cumulative_delta
+        if boundary < event_end:
+            return (
+                event_start
+                + cumulative_delta
+                + min(boundary - event_start, replacement_length)
+            )
+        cumulative_delta += int(event["delta"])
+    return boundary + cumulative_delta
+
+
+#This function verifies that overlapping physical packets represent one coherent transformed TCP stream.
+def validate_overlapping_tcp_segments(
+    segments: list[dict[str, Any]],
+    resize_events: list[dict[str, Any]],
+) -> dict[str, int]:
+    projected_segments = []
+    for segment in segments:
+        projected_start = translate_relative_stream_boundary(segment["start"], resize_events)
+        projected_end = translate_relative_stream_boundary(segment["end"], resize_events)
+        if projected_end - projected_start != len(segment["new_payload"]):
+            raise TcpReconstructionError(
+                "canonical_projection_length_mismatch",
+                "A projected TCP payload length does not match the canonical boundary transformation.",
+                packet_id=segment["packet_id"],
+                original_sequence_range=[segment["start"], segment["end"]],
+                projected_sequence_range=[projected_start, projected_end],
+                projected_payload_length_bytes=len(segment["new_payload"]),
+            )
+        projected_segments.append(
+            {
+                **segment,
+                "projected_start": projected_start,
+                "projected_end": projected_end,
+            }
+        )
+    ordered = sorted(
+        projected_segments,
+        key=lambda item: (
+            item["projected_start"],
+            item["projected_end"],
+            item["packet_id"],
+        ),
+    )
     active = []
     retransmission_count = 0
     modified_retransmission_count = 0
     overlapping_segment_pair_count = 0
     modified_overlapping_segment_pair_count = 0
     for segment in ordered:
-        active = [candidate for candidate in active if candidate["end"] > segment["start"]]
+        active = [
+            candidate
+            for candidate in active
+            if candidate["projected_end"] > segment["projected_start"]
+        ]
         for candidate in active:
-            if candidate["start"] == segment["start"] and candidate["end"] == segment["end"]:
+            if (
+                candidate["projected_start"] == segment["projected_start"]
+                and candidate["projected_end"] == segment["projected_end"]
+            ):
                 retransmission_count += 1
                 modified_retransmission_count += int(candidate["changed"] or segment["changed"])
                 if candidate["new_payload"] != segment["new_payload"] and (
@@ -729,30 +956,27 @@ def validate_overlapping_tcp_segments(segments: list[dict[str, Any]]) -> dict[st
                         "Modified TCP retransmissions disagree for the same original sequence range.",
                         previous_packet_id=candidate["packet_id"],
                         packet_id=segment["packet_id"],
-                        original_sequence_start=segment["start"],
-                        original_sequence_end=segment["end"],
+                        projected_sequence_start=segment["projected_start"],
+                        projected_sequence_end=segment["projected_end"],
                     )
                 continue
             overlapping_segment_pair_count += 1
             modified_overlapping_segment_pair_count += int(candidate["changed"] or segment["changed"])
             if not (candidate["changed"] or segment["changed"]):
                 continue
-            if candidate["delta"] or segment["delta"]:
-                raise TcpReconstructionError(
-                    "resized_overlapping_tcp_segments",
-                    "A length-changing TCP patch intersects an overlapping original segment and cannot be translated unambiguously.",
-                    previous_packet_id=candidate["packet_id"],
-                    packet_id=segment["packet_id"],
-                    previous_sequence_range=[candidate["start"], candidate["end"]],
-                    sequence_range=[segment["start"], segment["end"]],
-                )
-            overlap_start = max(candidate["start"], segment["start"])
-            overlap_end = min(candidate["end"], segment["end"])
+            overlap_start = max(
+                candidate["projected_start"],
+                segment["projected_start"],
+            )
+            overlap_end = min(
+                candidate["projected_end"],
+                segment["projected_end"],
+            )
             candidate_slice = candidate["new_payload"][
-                overlap_start - candidate["start"] : overlap_end - candidate["start"]
+                overlap_start - candidate["projected_start"] : overlap_end - candidate["projected_start"]
             ]
             segment_slice = segment["new_payload"][
-                overlap_start - segment["start"] : overlap_end - segment["start"]
+                overlap_start - segment["projected_start"] : overlap_end - segment["projected_start"]
             ]
             if candidate_slice != segment_slice:
                 raise TcpReconstructionError(
@@ -776,46 +1000,59 @@ def build_tcp_translation(
     *,
     anchor: int,
     segments: list[dict[str, Any]],
+    resize_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    overlap_metrics = validate_overlapping_tcp_segments(segments)
-    unique_ranges = {}
-    for segment in segments:
-        range_key = (segment["start"], segment["end"])
-        previous = unique_ranges.get(range_key)
-        if previous is None or (not previous["changed"] and segment["changed"]):
-            unique_ranges[range_key] = segment
-
-    delta_by_position: Counter = Counter()
-    resized_intervals = []
-    for segment in unique_ranges.values():
-        if segment["delta"] == 0:
-            continue
-        if segment["start"] == segment["end"]:
+    ordered_resize_events = sorted(
+        resize_events,
+        key=lambda item: (
+            int(item["start"]),
+            int(item["end"]),
+            str(item["canonical_region_id"]),
+            str(item["prompt_unit_id"]),
+            int(item["patch_index"]),
+        ),
+    )
+    previous_end = None
+    for event in ordered_resize_events:
+        if int(event["start"]) >= int(event["end"]):
             raise TcpReconstructionError(
-                "zero_length_tcp_insertion",
-                "A zero-length TCP insertion cannot be placed unambiguously in the original sequence space.",
-                packet_id=segment["packet_id"],
-                original_sequence_position=segment["start"],
+                "invalid_canonical_resize_event",
+                "A canonical resize event must replace a non-empty original interval.",
+                canonical_resize_event=event,
             )
-        delta_by_position[segment["end"]] += segment["delta"]
-        resized_intervals.append((segment["start"], segment["end"], segment["packet_id"]))
-
-    positions = sorted(delta_by_position)
+        if previous_end is not None and int(event["start"]) < previous_end:
+            raise TcpReconstructionError(
+                "overlapping_canonical_resize_events",
+                "Canonical resize events overlap in original TCP sequence space.",
+                canonical_resize_event=event,
+            )
+        previous_end = int(event["end"])
+    overlap_metrics = validate_overlapping_tcp_segments(
+        segments,
+        ordered_resize_events,
+    )
+    positions = [int(event["end"]) for event in ordered_resize_events]
     cumulative_deltas = []
     cumulative = 0
-    for position in positions:
-        cumulative += delta_by_position[position]
+    for event in ordered_resize_events:
+        cumulative += int(event["delta"])
         cumulative_deltas.append(cumulative)
     return {
         "anchor": anchor,
         "positions": positions,
         "cumulative_deltas": cumulative_deltas,
-        "resized_intervals": sorted(resized_intervals),
+        "resize_events": ordered_resize_events,
+        "resized_intervals": [
+            (int(event["start"]), int(event["end"]), str(event["canonical_region_id"]))
+            for event in ordered_resize_events
+        ],
         "total_delta_bytes": cumulative,
         "segment_count": len(segments),
-        "unique_sequence_range_count": len(unique_ranges),
-        "payload_growth_bytes": sum(max(0, segment["delta"]) for segment in unique_ranges.values()),
-        "payload_shrinkage_bytes": sum(max(0, -segment["delta"]) for segment in unique_ranges.values()),
+        "unique_sequence_range_count": len(
+            {(segment["start"], segment["end"]) for segment in segments}
+        ),
+        "payload_growth_bytes": sum(max(0, int(event["delta"])) for event in ordered_resize_events),
+        "payload_shrinkage_bytes": sum(max(0, -int(event["delta"])) for event in ordered_resize_events),
         "adjusted_sequence_packet_count": 0,
         "adjusted_acknowledgement_packet_count": 0,
         "unresolved_sequence_reference_count": 0,
@@ -826,16 +1063,15 @@ def build_tcp_translation(
 
 #This function translates one TCP sequence-space value through a prepared resize plan.
 def translate_tcp_number(value: int, translation: dict[str, Any] | None) -> tuple[int, int, bool]:
-    if not translation or not translation["positions"]:
+    if not translation or not translation["resize_events"]:
         return value, 0, False
     relative = tcp_relative_number(value, translation["anchor"])
-    inside_resized_interval = any(
-        start < relative < end
-        for start, end, _packet_id in translation["resized_intervals"]
+    translated_relative = translate_relative_stream_boundary(
+        relative,
+        translation["resize_events"],
     )
-    position_index = bisect.bisect_right(translation["positions"], relative) - 1
-    delta = translation["cumulative_deltas"][position_index] if position_index >= 0 else 0
-    return (value + delta) & TCP_SEQUENCE_MASK, delta, inside_resized_interval
+    delta = translated_relative - relative
+    return (value + delta) & TCP_SEQUENCE_MASK, delta, False
 
 
 #This function renders an endpoint tuple as JSON-friendly report data.
@@ -848,11 +1084,13 @@ def prepare_tcp_sequence_translation(
     *,
     traffic: list[dict[str, Any]],
     reference_context: dict[str, Any],
+    payload_projection_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prepared_by_index = {}
     segments_by_direction: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
     payload_content_changed_packet_count = 0
     payload_length_changed_packet_count = 0
+    packet_stream_context: dict[str, dict[str, Any]] = {}
 
     for record in traffic:
         reduced_packet_index = record.get("reduced_packet_index")
@@ -891,13 +1129,94 @@ def prepare_tcp_sequence_translation(
         }
         if original_payload or final_payload:
             segments_by_direction[(descriptor["connection_id"], source)].append(segment)
+        packet_stream_context[str(record.get("packet_id"))] = {
+            "direction_key": (descriptor["connection_id"], source),
+            "payload_sequence_start": payload_start,
+            "payload_length_bytes": len(original_payload),
+        }
+
+    resize_events_by_direction: dict[
+        tuple[Any, tuple[str, int]],
+        list[dict[str, Any]],
+    ] = defaultdict(list)
+    canonical_resize_events = (
+        payload_projection_contract.get("canonical_resize_events", [])
+        if isinstance(payload_projection_contract, dict)
+        else []
+    )
+    if not isinstance(canonical_resize_events, list):
+        raise ValueError("Step 19 canonical_resize_events must be a list.")
+    for event in canonical_resize_events:
+        if not isinstance(event, dict):
+            raise ValueError("Step 19 canonical resize event must be an object.")
+        event_positions = []
+        direction_key = None
+        for anchor_evidence in event.get("end_boundary_anchors", []):
+            packet_id = str(anchor_evidence.get("packet_id"))
+            packet_context = packet_stream_context.get(packet_id)
+            if packet_context is None:
+                raise TcpReconstructionError(
+                    "canonical_resize_anchor_packet_missing",
+                    "A canonical resize event references a packet outside the Step 20 TCP stream context.",
+                    packet_id=packet_id,
+                    canonical_region_id=event.get("canonical_region_id"),
+                )
+            anchor_direction = packet_context["direction_key"]
+            if direction_key is None:
+                direction_key = anchor_direction
+            elif direction_key != anchor_direction:
+                raise TcpReconstructionError(
+                    "canonical_resize_anchor_direction_mismatch",
+                    "Physical aliases for one canonical edit resolve to different TCP directions.",
+                    canonical_region_id=event.get("canonical_region_id"),
+                )
+            packet_payload_offset = int(
+                anchor_evidence["canonical_edit_end_packet_payload_offset_bytes"]
+            )
+            if not 0 <= packet_payload_offset <= packet_context["payload_length_bytes"]:
+                raise TcpReconstructionError(
+                    "canonical_resize_anchor_offset_invalid",
+                    "A canonical resize end boundary lies outside its original physical packet payload.",
+                    packet_id=packet_id,
+                    packet_payload_offset_bytes=packet_payload_offset,
+                    packet_payload_length_bytes=packet_context["payload_length_bytes"],
+                )
+            event_positions.append(
+                packet_context["payload_sequence_start"] + packet_payload_offset
+            )
+        if not event_positions or len(set(event_positions)) != 1 or direction_key is None:
+            raise TcpReconstructionError(
+                "canonical_resize_anchor_position_mismatch",
+                "Physical aliases do not resolve one canonical resize event to a unique original TCP position.",
+                canonical_region_id=event.get("canonical_region_id"),
+                event_positions=event_positions,
+            )
+        event_end = event_positions[0]
+        event_start = event_end - int(event["canonical_replaced_length_bytes"])
+        resize_events_by_direction[direction_key].append(
+            {
+                **event,
+                "start": event_start,
+                "end": event_end,
+                "replacement_length_bytes": int(
+                    event["canonical_replacement_length_bytes"]
+                ),
+                "delta": int(event["canonical_payload_length_delta_bytes"]),
+            }
+        )
 
     translations = {}
     resized_segment_count = 0
-    for direction_key, segments in segments_by_direction.items():
+    all_direction_keys = set(segments_by_direction) | set(resize_events_by_direction)
+    for direction_key in all_direction_keys:
+        segments = segments_by_direction.get(direction_key, [])
         connection_id, source = direction_key
         anchor = reference_context["connections"][connection_id]["anchors"][source]
-        translation = build_tcp_translation(anchor=anchor, segments=segments)
+        translation = build_tcp_translation(
+            anchor=anchor,
+            segments=segments,
+            resize_events=resize_events_by_direction.get(direction_key, []),
+        )
         translations[direction_key] = translation
         resized_segment_count += len(translation["resized_intervals"])
 
@@ -1646,7 +1965,9 @@ def audit_reconstructed_pcap(
     original_segments: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
     reconstructed_segments: dict[tuple[Any, tuple[str, int]], list[dict[str, Any]]] = defaultdict(list)
     projected_packet_ids = set(payload_projection_contract.get("projected_packet_ids", []))
+    projections_by_packet_id = payload_projection_contract.get("_projections_by_packet_id", {})
     projected_packet_comparison_count = 0
+    projected_packet_aggregate_no_effect_count = 0
     realized_projected_net_payload_delta_bytes = 0
 
     #This function records bounded per-packet audit issues and aggregate reason counts.
@@ -1910,13 +2231,34 @@ def audit_reconstructed_pcap(
             if has_effective_projection:
                 projected_packet_comparison_count += 1
                 realized_projected_net_payload_delta_bytes += len(output_payload) - len(reference_payload)
-                if expected_payload == reference_payload:
+                try:
+                    independently_projected_payload = materialize_projected_packet_payload(
+                        reference_payload,
+                        projections_by_packet_id.get(packet_id, []),
+                    )
+                except (ValueError, binascii.Error) as error:
+                    independently_projected_payload = None
                     record_issue(
                         record_index,
-                        "effective_payload_projection_not_materialized_in_step19_payload",
-                        "Step 19 declared an effective payload projection, but the validated packet payload matches the Step 13 reference payload.",
+                        "effective_payload_projection_evidence_invalid",
+                        "Step 20 could not independently apply the Step 19 payload projection evidence.",
                         packet_id=packet_id,
+                        error=str(error),
                     )
+                if independently_projected_payload is not None and independently_projected_payload != expected_payload:
+                    record_issue(
+                        record_index,
+                        "effective_payload_projection_aggregate_mismatch",
+                        "Independent aggregation of Step 19 payload projections does not match the validated packet payload.",
+                        packet_id=packet_id,
+                        independently_projected_length_bytes=len(independently_projected_payload),
+                        expected_length_bytes=len(expected_payload),
+                    )
+                if independently_projected_payload == reference_payload:
+                    # Multiple individually effective canonical decisions can
+                    # compose back to the original physical payload. The
+                    # aggregate Step 19 packet remains authoritative.
+                    projected_packet_aggregate_no_effect_count += 1
                 if output_payload != expected_payload:
                     reason = (
                         "effective_payload_projection_length_mismatch"
@@ -1987,8 +2329,9 @@ def audit_reconstructed_pcap(
         + issue_counts["tcp_options_changed_unexpectedly"]
     )
     payload_projection_mismatch_reasons = {
-        "effective_payload_projection_not_materialized_in_step19_payload",
+        "effective_payload_projection_aggregate_mismatch",
         "effective_payload_projection_content_mismatch",
+        "effective_payload_projection_evidence_invalid",
         "effective_payload_projection_length_mismatch",
         "effective_payload_projection_packet_count_mismatch",
         "effective_payload_projection_net_delta_mismatch",
@@ -2025,6 +2368,7 @@ def audit_reconstructed_pcap(
             "payload_projection_validated_change_count": int(payload_projection_contract.get("projection_change_count", 0)),
             "payload_projection_validated_packet_count": len(projected_packet_ids),
             "payload_projection_compared_packet_count": projected_packet_comparison_count,
+            "payload_projection_aggregate_no_effect_packet_count": projected_packet_aggregate_no_effect_count,
             "projected_net_payload_delta_bytes": projected_net_payload_delta,
             "realized_net_payload_delta_bytes": realized_projected_net_payload_delta_bytes,
             "payload_changed_without_effective_projection_count": issue_counts["payload_changed_without_effective_projection"],
@@ -2118,12 +2462,17 @@ def reconstruct_validated_traffic(
     capabilities = resolve_modification_strategy(config)
     validation_policy = resolve_post_llm_traffic_validation_policy(config)
     validated_json = read_json(input_json_path)
-    metadata, traffic, source_validation_contract = validate_step19_v4_input(
+    metadata, traffic, source_validation_contract = validate_step19_v5_input(
         validated_json,
         input_json_path,
         capabilities,
         validation_policy,
     )
+    public_source_validation_contract = {
+        key: value
+        for key, value in source_validation_contract.items()
+        if not key.startswith("_")
+    }
 
     required_indices = set()
     for record in traffic:
@@ -2148,6 +2497,7 @@ def reconstruct_validated_traffic(
         translation_plan = prepare_tcp_sequence_translation(
             traffic=traffic,
             reference_context=reference_context,
+            payload_projection_contract=source_validation_contract,
         )
         enforce_active_reconstruction_contract(capabilities, translation_plan)
     except Exception as error:
@@ -2219,7 +2569,7 @@ def reconstruct_validated_traffic(
                     "source_validation_schema_version": metadata.get("schema_version"),
                     "modification_strategy": capabilities.as_metadata(),
                 },
-                "source_validation_contract": source_validation_contract,
+                "source_validation_contract": public_source_validation_contract,
                 "summary": failure_summary,
                 "tcp_reconstruction_summary": tcp_failure_summary,
                 "tcp_direction_results": [],
@@ -2370,7 +2720,7 @@ def reconstruct_validated_traffic(
             **translation_plan["summary"],
         },
         "source_validation_metadata": metadata,
-        "source_validation_contract": source_validation_contract,
+        "source_validation_contract": public_source_validation_contract,
         "tcp_reconstruction_summary": translation_plan["summary"],
         "tcp_direction_results": translation_plan["direction_results"],
         "tcp_reconstruction_errors": [],

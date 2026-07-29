@@ -2,6 +2,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,7 +20,7 @@ from step_20_json_to_pcap.reconstruct_pcap import (
     tcp_option_kinds_from_bytes,
     translate_tcp_number,
     validate_step19_effective_payload_projection_contract,
-    validate_step19_v4_input,
+    validate_step19_v5_input,
 )
 
 
@@ -30,11 +31,11 @@ class FakeValidationPolicy:
     policy_id = "reject_invalid_v1"
 
 
-def step19_v4_metadata(
+def step19_v5_metadata(
     *,
     packet_count: int,
-    experiment_id: str = "test-step20-v4",
-    experiment_config_label: str = "test-step20-v4",
+    experiment_id: str = "test-step20-v5",
+    experiment_config_label: str = "test-step20-v5",
     source_merged_json: str = "merged_modified_traffic.json",
     validation_report: str = "validation_report.json",
 ) -> dict:
@@ -113,6 +114,18 @@ class TcpSequenceTranslationTests(unittest.TestCase):
             "delta": len(replacement) - len(original),
         }
 
+    @staticmethod
+    def resize_event(*, start: int, replaced_length: int, replacement_length: int):
+        return {
+            "start": start,
+            "end": start + replaced_length,
+            "replacement_length_bytes": replacement_length,
+            "delta": replacement_length - replaced_length,
+            "canonical_region_id": "canonical_region_1",
+            "prompt_unit_id": "prompt_1",
+            "patch_index": 1,
+        }
+
     def test_translates_values_after_resized_segment(self):
         translation = build_tcp_translation(
             anchor=1000,
@@ -123,6 +136,9 @@ class TcpSequenceTranslationTests(unittest.TestCase):
                     original=b"a" * 100,
                     replacement=b"b" * 120,
                 )
+            ],
+            resize_events=[
+                self.resize_event(start=1, replaced_length=100, replacement_length=120)
             ],
         )
 
@@ -139,6 +155,18 @@ class TcpSequenceTranslationTests(unittest.TestCase):
                 self.segment(packet_id="packet_1", start=1, original=b"a" * 10, replacement=b"b" * 15),
                 self.segment(packet_id="packet_2", start=11, original=b"c" * 10, replacement=b"d" * 7),
             ],
+            resize_events=[
+                self.resize_event(start=1, replaced_length=10, replacement_length=15),
+                {
+                    **self.resize_event(
+                        start=11,
+                        replaced_length=10,
+                        replacement_length=7,
+                    ),
+                    "canonical_region_id": "canonical_region_2",
+                    "patch_index": 2,
+                },
+            ],
         )
 
         translated, delta, _ = translate_tcp_number(521, translation)
@@ -150,7 +178,13 @@ class TcpSequenceTranslationTests(unittest.TestCase):
         segment = self.segment(packet_id="packet_1", start=1, original=b"a" * 10, replacement=b"b" * 15)
         retransmission = {**segment, "packet_id": "packet_2"}
 
-        translation = build_tcp_translation(anchor=100, segments=[segment, retransmission])
+        translation = build_tcp_translation(
+            anchor=100,
+            segments=[segment, retransmission],
+            resize_events=[
+                self.resize_event(start=1, replaced_length=10, replacement_length=15)
+            ],
+        )
         translated, delta, _ = translate_tcp_number(111, translation)
 
         self.assertEqual(116, translated)
@@ -164,17 +198,34 @@ class TcpSequenceTranslationTests(unittest.TestCase):
                     self.segment(packet_id="packet_1", start=1, original=b"a" * 10, replacement=b"b" * 10),
                     self.segment(packet_id="packet_2", start=1, original=b"a" * 10, replacement=b"c" * 10),
                 ],
+                resize_events=[],
             )
 
-    def test_rejects_resized_overlapping_segments(self):
-        with self.assertRaisesRegex(ValueError, "intersects an overlapping"):
-            build_tcp_translation(
-                anchor=100,
-                segments=[
-                    self.segment(packet_id="packet_1", start=1, original=b"a" * 10, replacement=b"b" * 12),
-                    self.segment(packet_id="packet_2", start=5, original=b"a" * 10, replacement=b"a" * 10),
-                ],
-            )
+    def test_accepts_coherent_resized_overlapping_segments(self):
+        translation = build_tcp_translation(
+            anchor=100,
+            segments=[
+                self.segment(
+                    packet_id="packet_1",
+                    start=1,
+                    original=b"a" * 10,
+                    replacement=b"b" * 12,
+                ),
+                self.segment(
+                    packet_id="packet_2",
+                    start=5,
+                    original=b"a" * 10,
+                    replacement=(b"b" * 8) + (b"a" * 4),
+                ),
+            ],
+            resize_events=[
+                self.resize_event(start=1, replaced_length=10, replacement_length=12)
+            ],
+        )
+
+        translated, delta, _inside = translate_tcp_number(115, translation)
+        self.assertEqual(117, translated)
+        self.assertEqual(2, delta)
 
     def test_accepts_compatible_length_preserving_alternative_segmentation(self):
         translation = build_tcp_translation(
@@ -183,6 +234,7 @@ class TcpSequenceTranslationTests(unittest.TestCase):
                 self.segment(packet_id="packet_1", start=1, original=b"abcdef", replacement=b"abcxef"),
                 self.segment(packet_id="packet_2", start=3, original=b"cd", replacement=b"cx"),
             ],
+            resize_events=[],
         )
 
         translated, delta, inside = translate_tcp_number(107, translation)
@@ -200,6 +252,7 @@ class TcpSequenceTranslationTests(unittest.TestCase):
                     self.segment(packet_id="packet_1", start=1, original=b"abcdef", replacement=b"abcxef"),
                     self.segment(packet_id="packet_2", start=3, original=b"cd", replacement=b"zz"),
                 ],
+                resize_events=[],
             )
 
     def test_length_preserving_payload_change_does_not_adjust_sequence_or_ack(self):
@@ -260,7 +313,10 @@ class TcpSequenceTranslationTests(unittest.TestCase):
             },
         ]
 
-        plan = prepare_tcp_sequence_translation(traffic=traffic, reference_context=context)
+        plan = prepare_tcp_sequence_translation(
+            traffic=traffic,
+            reference_context=context,
+        )
 
         self.assertEqual(1, plan["summary"]["tcp_payload_content_changed_packet_count"])
         self.assertEqual(0, plan["summary"]["tcp_payload_length_changed_packet_count"])
@@ -283,7 +339,10 @@ class TcpSequenceTranslationTests(unittest.TestCase):
             }
         ]
 
-        plan = prepare_tcp_sequence_translation(traffic=traffic, reference_context=context)
+        plan = prepare_tcp_sequence_translation(
+            traffic=traffic,
+            reference_context=context,
+        )
 
         self.assertIsNone(plan["prepared_by_index"][1]["tcp_translation"])
         self.assertEqual(0, plan["summary"]["tcp_reconstruction_error_count"])
@@ -313,6 +372,9 @@ class TcpSequenceTranslationTests(unittest.TestCase):
             anchor=anchor,
             segments=[
                 self.segment(packet_id="packet_1", start=1, original=b"a" * 10, replacement=b"b" * 15)
+            ],
+            resize_events=[
+                self.resize_event(start=1, replaced_length=10, replacement_length=15)
             ],
         )
         original_value = (anchor + 11) & 0xFFFFFFFF
@@ -380,7 +442,30 @@ class TcpSequenceTranslationTests(unittest.TestCase):
             "connection_count": 1,
         }
 
-        plan = prepare_tcp_sequence_translation(traffic=traffic, reference_context=context)
+        plan = prepare_tcp_sequence_translation(
+            traffic=traffic,
+            reference_context=context,
+            payload_projection_contract={
+                "canonical_resize_events": [
+                    {
+                        "prompt_unit_id": "prompt_1",
+                        "patch_index": 1,
+                        "canonical_region_id": "canonical_region_1",
+                        "region_id": "canonical_region_1",
+                        "canonical_replaced_length_bytes": 10,
+                        "canonical_replacement_length_bytes": 15,
+                        "canonical_payload_length_delta_bytes": 5,
+                        "end_boundary_anchors": [
+                            {
+                                "packet_id": "packet_000001",
+                                "physical_representation_id": "repr_1",
+                                "canonical_edit_end_packet_payload_offset_bytes": 10,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
         translated_ack = plan["prepared_by_index"][2]["tcp_translation"]
 
         self.assertEqual(116, translated_ack["reconstructed_acknowledgement_number"])
@@ -473,14 +558,14 @@ class ActiveReconstructionContractTests(unittest.TestCase):
 
 
 class Step19InputSchemaTests(unittest.TestCase):
-    def test_accepts_validated_traffic_v4(self):
+    def test_accepts_validated_traffic_v5(self):
         validated = {
-            "metadata": step19_v4_metadata(packet_count=0),
+            "metadata": step19_v5_metadata(packet_count=0),
             "traffic": [],
         }
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
-        metadata, traffic = validate_step19_v4_input(
+        metadata, traffic = validate_step19_v5_input(
             validated,
             Path("validated_modified_traffic.json"),
             capabilities,
@@ -492,13 +577,13 @@ class Step19InputSchemaTests(unittest.TestCase):
 
     def test_rejects_legacy_validated_traffic_schema(self):
         validated = {
-            "metadata": {**step19_v4_metadata(packet_count=0), "schema_version": "validated_modified_traffic_v3"},
+            "metadata": {**step19_v5_metadata(packet_count=0), "schema_version": "validated_modified_traffic_v3"},
             "traffic": [],
         }
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
         with self.assertRaisesRegex(ValueError, "requires Step 19 validated traffic schema"):
-            validate_step19_v4_input(
+            validate_step19_v5_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
@@ -506,13 +591,13 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_v4_without_full_post_reconstruction_metadata(self):
-        metadata = step19_v4_metadata(packet_count=0)
+        metadata = step19_v5_metadata(packet_count=0)
         metadata.pop("post_reconstruction_policy")
         validated = {"metadata": metadata, "traffic": []}
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
         with self.assertRaisesRegex(ValueError, "missing required fields"):
-            validate_step19_v4_input(
+            validate_step19_v5_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
@@ -522,7 +607,7 @@ class Step19InputSchemaTests(unittest.TestCase):
     def test_rejects_legacy_full_post_reconstruction_policy(self):
         validated = {
             "metadata": {
-                **step19_v4_metadata(packet_count=0),
+                **step19_v5_metadata(packet_count=0),
                 "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_failed_or_invalid_groups",
             },
             "traffic": [],
@@ -531,7 +616,7 @@ class Step19InputSchemaTests(unittest.TestCase):
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
         with self.assertRaisesRegex(ValueError, "full POST reconstruction policy"):
-            validate_step19_v4_input(
+            validate_step19_v5_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
@@ -540,7 +625,7 @@ class Step19InputSchemaTests(unittest.TestCase):
 
     def test_payload_capable_requires_step19_effective_projection_collection(self):
         validated = {
-            "metadata": step19_v4_metadata(packet_count=0),
+            "metadata": step19_v5_metadata(packet_count=0),
             "traffic": [],
         }
         capabilities = resolve_modification_strategy(
@@ -548,7 +633,7 @@ class Step19InputSchemaTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "requires validated_effective_payload_projection_changes"):
-            validate_step19_v4_input(
+            validate_step19_v5_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
@@ -556,7 +641,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_projection_count_mismatch(self):
-        metadata = step19_v4_metadata(packet_count=1)
+        metadata = step19_v5_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 2
         capabilities = resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
@@ -573,7 +658,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_unknown_projection_packet_id(self):
-        metadata = step19_v4_metadata(packet_count=1)
+        metadata = step19_v5_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 1
         capabilities = resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
@@ -590,7 +675,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_projection_for_failure_only_packet(self):
-        metadata = step19_v4_metadata(packet_count=1)
+        metadata = step19_v5_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 1
         capabilities = resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
@@ -607,7 +692,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_header_only_rejects_effective_payload_projection_collection(self):
-        metadata = step19_v4_metadata(packet_count=1)
+        metadata = step19_v5_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 1
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
@@ -621,15 +706,15 @@ class Step19InputSchemaTests(unittest.TestCase):
                 input_json_path=Path("validated_modified_traffic.json"),
             )
 
-    def test_payload_capable_v4_source_contract_summarizes_step19_effective_projection_evidence(self):
+    def test_payload_capable_v5_source_contract_summarizes_step19_effective_projection_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             validation_report = temp_dir / "validation_report.json"
-            validation_report.write_text(json.dumps({"metadata": {"schema_version": "merged_traffic_validation_report_v4"}}), encoding="utf-8")
+            validation_report.write_text(json.dumps({"metadata": {"schema_version": "merged_traffic_validation_report_v5"}}), encoding="utf-8")
             capabilities = resolve_modification_strategy(
                 {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
             )
-            metadata = step19_v4_metadata(
+            metadata = step19_v5_metadata(
                 packet_count=1,
                 validation_report=str(validation_report),
             )
@@ -639,10 +724,22 @@ class Step19InputSchemaTests(unittest.TestCase):
                     "packet_id": "packet_000001",
                     "physical_representation_id": "packet_000001:payload_region_000001:repr_000001",
                     "canonical_region_id": "payload_region_000001",
+                    "region_id": "payload_region_000001",
+                    "prompt_unit_id": "group_000001",
+                    "patch_index": 1,
                     "payload_start_offset_bytes": 0,
                     "replaced_length_bytes": 3,
                     "replacement_length_bytes": 4,
                     "payload_length_delta_bytes": 1,
+                    "canonical_edit_start_offset_bytes": 0,
+                    "canonical_edit_end_offset_bytes": 3,
+                    "canonical_replaced_length_bytes": 3,
+                    "canonical_replacement_length_bytes": 4,
+                    "canonical_payload_length_delta_bytes": 1,
+                    "alias_canonical_start_offset_bytes": 0,
+                    "alias_canonical_end_offset_bytes": 3,
+                    "projection_reaches_canonical_edit_end": True,
+                    "canonical_edit_end_packet_payload_offset_bytes": 3,
                     "original_segment_hex": "616263",
                     "replacement_hex": "61626364",
                     "requires_pipeline_recalculation": [
@@ -675,11 +772,11 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
     def config(strategy: str) -> dict:
         return {
             "experiment": {
-                "experiment_id": "test-step20-v4",
+                "experiment_id": "test-step20-v5",
                 "output_root": ".",
             },
             "pipeline": {
-                "experiment_config_label": "test-step20-v4",
+                "experiment_config_label": "test-step20-v5",
                 "modification_strategy": strategy,
                 "header_editability_policy": "conservative_header_editability_v1",
                 "post_llm_traffic_validation_policy": "reject_invalid_v1",
@@ -804,6 +901,17 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
                 "parent_group_id": "group_000001",
                 "patch_index": 1,
                 "canonical_start_offset_bytes": 0,
+                "canonical_edit_start_offset_bytes": 0,
+                "canonical_edit_end_offset_bytes": len(original_payload),
+                "canonical_replaced_length_bytes": len(original_payload),
+                "canonical_replacement_length_bytes": len(first_payload),
+                "canonical_payload_length_delta_bytes": len(first_payload) - len(original_payload),
+                "alias_canonical_start_offset_bytes": 0,
+                "alias_canonical_end_offset_bytes": len(original_payload),
+                "transformed_alias_canonical_start_offset_bytes": 0,
+                "transformed_alias_canonical_end_offset_bytes": len(first_payload),
+                "projection_reaches_canonical_edit_end": True,
+                "canonical_edit_end_packet_payload_offset_bytes": len(original_payload),
                 "stream_start": 100,
                 "stream_end": 103,
                 "replaced_length_bytes": len(original_payload),
@@ -824,7 +932,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         ]
 
     @classmethod
-    def write_step19_v4_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes, original_payload: bytes = b"abc") -> tuple[Path, list[dict]]:
+    def write_step19_v5_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes, original_payload: bytes = b"abc") -> tuple[Path, list[dict]]:
         validation_report = root / "validation_report.json"
         payload_capable = strategy in {
             "canonical_payload_only_strategy_v1",
@@ -834,7 +942,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         validation_report.write_text(
             json.dumps(
                 {
-                    "metadata": {"schema_version": "merged_traffic_validation_report_v4"},
+                    "metadata": {"schema_version": "merged_traffic_validation_report_v5"},
                     "summary": {
                         "validated_effective_payload_projection_change_count": len(projections),
                     },
@@ -861,7 +969,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         output_pcap = root / "modified_traffic.pcap"
         report_path = root / "reconstruction_report.json"
         self.write_reference_pcap(reference_pcap, first_payload=original_payload)
-        validation_report, projections = self.write_step19_v4_source_artifacts(
+        validation_report, projections = self.write_step19_v5_source_artifacts(
             root=root,
             strategy=strategy,
             first_payload=bytes.fromhex(traffic[0]["payload_hex"]),
@@ -869,7 +977,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         )
         if projections_override is not None:
             projections = projections_override
-        metadata = step19_v4_metadata(
+        metadata = step19_v5_metadata(
             packet_count=len(traffic),
             source_merged_json=str(root / "merged_modified_traffic.json"),
             validation_report=str(validation_report),
@@ -890,7 +998,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
             reference_pcap_path=reference_pcap,
             output_pcap_path=output_pcap,
             report_path=report_path,
-            experiment_config_label="test-step20-v4",
+            experiment_config_label="test-step20-v5",
         )
         with report_path.open("r", encoding="utf-8") as input_file:
             report = json.load(input_file)
@@ -907,7 +1015,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         packets = rdpcap(str(output_pcap))
 
         self.assertEqual("completed", result["report"]["metadata"]["status"])
-        self.assertEqual("pcap_reconstruction_report_v5", result["report"]["metadata"]["schema_version"])
+        self.assertEqual("pcap_reconstruction_report_v6", result["report"]["metadata"]["schema_version"])
         self.assertEqual(EXPECTED_INPUT_SCHEMA_VERSION, result["report"]["metadata"]["source_validation_schema_version"])
         self.assertEqual(
             "not_required_by_modification_strategy",
@@ -958,6 +1066,57 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         self.assertEqual(-1, result["report"]["network_protocol_validation"]["summary"]["projected_net_payload_delta_bytes"])
         self.assertEqual(-1, result["report"]["network_protocol_validation"]["summary"]["realized_net_payload_delta_bytes"])
         self.assertEqual(0, result["report"]["network_protocol_validation"]["summary"]["payload_projection_mismatch_count"])
+
+    def test_effective_projections_may_compose_to_aggregate_no_effect(self):
+        projections = self.payload_projection_changes(b"ab", b"abc")
+        delete_last = projections[0]
+        delete_last.update(
+            {
+                "canonical_edit_start_offset_bytes": 2,
+                "canonical_edit_end_offset_bytes": 3,
+                "canonical_replaced_length_bytes": 1,
+                "canonical_replacement_length_bytes": 0,
+                "canonical_payload_length_delta_bytes": -1,
+                "payload_start_offset_bytes": 2,
+                "replaced_length_bytes": 1,
+                "replacement_length_bytes": 0,
+                "payload_length_delta_bytes": -1,
+                "original_segment_hex": "63",
+                "replacement_hex": "",
+                "transformed_alias_canonical_end_offset_bytes": 2,
+                "canonical_edit_end_packet_payload_offset_bytes": 3,
+            }
+        )
+        restore_last = deepcopy(delete_last)
+        restore_last.update(
+            {
+                "patch_index": 2,
+                "canonical_edit_start_offset_bytes": 0,
+                "canonical_edit_end_offset_bytes": 2,
+                "canonical_replaced_length_bytes": 2,
+                "canonical_replacement_length_bytes": 3,
+                "canonical_payload_length_delta_bytes": 1,
+                "payload_start_offset_bytes": 2,
+                "replaced_length_bytes": 0,
+                "replacement_length_bytes": 1,
+                "payload_length_delta_bytes": 1,
+                "original_segment_hex": "",
+                "replacement_hex": "63",
+                "transformed_alias_canonical_end_offset_bytes": 4,
+                "canonical_edit_end_packet_payload_offset_bytes": 2,
+            }
+        )
+
+        result, _ = self.run_reconstruction_fixture(
+            strategy="canonical_payload_only_strategy_v1",
+            traffic=self.traffic(first_payload=b"abc"),
+            projections_override=[delete_last, restore_last],
+        )
+
+        summary = result["report"]["network_protocol_validation"]["summary"]
+        self.assertEqual("completed", result["report"]["metadata"]["status"])
+        self.assertEqual(1, summary["payload_projection_aggregate_no_effect_packet_count"])
+        self.assertEqual(0, summary["payload_projection_mismatch_count"])
 
     def test_padding_two_growth_one_keeps_minimum_frame_length_metadata(self):
         result, output_pcap = self.run_reconstruction_fixture(

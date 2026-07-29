@@ -184,6 +184,85 @@ class ModificationStrategyPayloadTests(unittest.TestCase):
         self.assertEqual(2, len(result["derived_payload_projection_changes"]))
         self.assertEqual([], result["no_effect_edits"])
 
+    def test_projects_length_growth_to_partial_and_full_aliases(self) -> None:
+        replacement = bytes((index + 1) % 256 for index in range(83))
+        canonical_original = bytes(range(73))
+        full_suffix = bytes((index % 256 for index in range(73, 697)))
+        originals = {
+            "packet_partial": {
+                "packet_id": "packet_partial",
+                "payload_hex": canonical_original[:60].hex(),
+                "payload_length_bytes": 60,
+                "packet_length_bytes": 114,
+            },
+            "packet_full": {
+                "packet_id": "packet_full",
+                "payload_hex": (canonical_original + full_suffix).hex(),
+                "payload_length_bytes": 697,
+                "packet_length_bytes": 751,
+            },
+        }
+        edit = payload_edit(
+            packet_id="packet_partial",
+            representative_packet_id="packet_partial",
+            canonical_region_length_bytes=697,
+            authorized_canonical_length_bytes=73,
+            replaced_length_bytes=73,
+            replacement=replacement.hex(),
+            replacement_hex=replacement.hex(),
+            replacement_length_bytes=83,
+            packet_aliases=[
+                {
+                    "packet_id": "packet_partial",
+                    "alias_id": "tcp_repr_partial",
+                    "physical_representation_id": "tcp_repr_partial",
+                    "canonical_region_id": "canonical_region_000001",
+                    "canonical_start_offset_bytes": 0,
+                    "payload_start_offset_bytes": 0,
+                    "length_bytes": 60,
+                },
+                {
+                    "packet_id": "packet_full",
+                    "alias_id": "tcp_repr_full",
+                    "physical_representation_id": "tcp_repr_full",
+                    "canonical_region_id": "canonical_region_000001",
+                    "canonical_start_offset_bytes": 0,
+                    "payload_start_offset_bytes": 0,
+                    "length_bytes": 697,
+                },
+            ],
+        )
+
+        result = materialize_payload_edits(originals, [edit])
+        partial = bytes.fromhex(
+            result["materialized_packets_by_id"]["packet_partial"]["payload_hex"]
+        )
+        full = bytes.fromhex(
+            result["materialized_packets_by_id"]["packet_full"]["payload_hex"]
+        )
+
+        self.assertEqual(replacement[:60], partial)
+        self.assertEqual(replacement + full_suffix, full)
+        self.assertEqual(partial, full[:60])
+        projections = {
+            item["packet_id"]: item
+            for item in result["derived_payload_projection_changes"]
+        }
+        self.assertEqual(0, projections["packet_partial"]["payload_length_delta_bytes"])
+        self.assertFalse(
+            projections["packet_partial"]["projection_reaches_canonical_edit_end"]
+        )
+        self.assertEqual(10, projections["packet_full"]["payload_length_delta_bytes"])
+        self.assertTrue(
+            projections["packet_full"]["projection_reaches_canonical_edit_end"]
+        )
+        self.assertEqual(
+            73,
+            projections["packet_full"][
+                "canonical_edit_end_packet_payload_offset_bytes"
+            ],
+        )
+
     def test_materializes_canonical_payload_byte_range_without_retyping_as_full_region(self) -> None:
         result = materialize_payload_edits(
             original_packets(),

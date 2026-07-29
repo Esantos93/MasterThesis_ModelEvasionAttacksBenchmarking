@@ -476,8 +476,13 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             )
 
         issue = context.exception.issues[0]
-        self.assertEqual("payload_materialization_failed", issue["reason"])
-        self.assertEqual("tcp_repr_uncovered", issue["alias_id"])
+        self.assertEqual("canonical_target_not_jointly_covered", issue["reason"])
+        self.assertEqual(
+            2,
+            issue["materialization_error_context"][
+                "first_missing_canonical_offset_bytes"
+            ],
+        )
         self.assertEqual("payload_region_000001", issue["canonical_region_id"])
 
     def test_payload_materialization_error_writes_failed_report_without_final_outputs(self) -> None:
@@ -586,7 +591,14 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             self.assertEqual("failed", failed_report["metadata"]["execution_status"])
             self.assertIs(False, failed_report["metadata"]["materialization_success"])
             self.assertEqual(1, failed_report["summary"]["payload_materialization_issue_count"])
-            self.assertEqual("tcp_repr_uncovered", failed_report["patch_application"]["payload_materialization_issues"][0]["alias_id"])
+            failure_issue = failed_report["patch_application"]["payload_materialization_issues"][0]
+            self.assertEqual("canonical_target_not_jointly_covered", failure_issue["reason"])
+            self.assertEqual(
+                2,
+                failure_issue["materialization_error_context"][
+                    "first_missing_canonical_offset_bytes"
+                ],
+            )
 
 
 if __name__ == "__main__":

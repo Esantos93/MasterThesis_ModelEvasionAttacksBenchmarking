@@ -26,14 +26,18 @@ from common.header_policy import (
 )
 from common.io_utils import write_json
 from common.modification_strategy import ModificationCapabilities, resolve_modification_strategy
-from common.payload_materialization import materialize_payload_edits, ordered_payload_edits
+from common.payload_materialization import (
+    PayloadMaterializationError,
+    materialize_payload_edits,
+    ordered_payload_edits,
+)
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
 PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PROMPT_UNIT_SCHEMA_VERSIONS = {"prompt_unit_v2"}
-MERGED_SCHEMA_VERSION = "patch_applied_traffic_v4"
-REPORT_SCHEMA_VERSION = "patch_application_report_v4"
+MERGED_SCHEMA_VERSION = "patch_applied_traffic_v5"
+REPORT_SCHEMA_VERSION = "patch_application_report_v5"
 ACCEPTED_STEP17_STATUSES = {"accepted", "auto_empty_no_editable_regions"}
 SUPPORTED_PAYLOAD_REGION_TYPES = {"canonical_payload_region", "canonical_payload_byte_range"}
 
@@ -798,6 +802,8 @@ def build_payload_edit(
         "operation": operation,
         "canonical_region_start_offset_bytes": canonical_region_start,
         "canonical_region_length_bytes": canonical_region_length,
+        "canonical_stream_start": stream_start,
+        "canonical_stream_end": stream_end,
         "authorized_canonical_start_offset_bytes": authorized_start,
         "authorized_canonical_length_bytes": authorized_length,
         "canonical_start_offset_bytes": canonical_start,
@@ -1004,19 +1010,43 @@ def compact_payload_edit_diagnostic(edit: dict[str, Any] | None, *, alias_id: st
 #This helper converts a payload materialization exception into a fail-fast Step 18 issue.
 def payload_materialization_failure_issue(error: ValueError, payload_edits: list[dict[str, Any]]) -> dict[str, Any]:
     detail = str(error)
-    edit_position = payload_error_edit_position(detail)
-    alias_id = payload_error_alias_id(detail)
+    structured_detail = error.detail if isinstance(error, PayloadMaterializationError) else {}
+    edit_position = structured_detail.get("materialization_sequence_index")
+    if not isinstance(edit_position, int):
+        edit_position = payload_error_edit_position(detail)
+    alias_id = structured_detail.get("alias_id")
+    if not isinstance(alias_id, str):
+        alias_id = payload_error_alias_id(detail)
     failing_edit = None
+    structured_prompt_unit_id = structured_detail.get("prompt_unit_id")
+    structured_patch_index = structured_detail.get("patch_index")
+    structured_region_id = structured_detail.get("region_id")
+    if structured_prompt_unit_id is not None and structured_patch_index is not None:
+        failing_edit = next(
+            (
+                edit
+                for edit in payload_edits
+                if edit.get("prompt_unit_id") == structured_prompt_unit_id
+                and edit.get("patch_index") == structured_patch_index
+                and (
+                    structured_region_id is None
+                    or edit.get("region_id") == structured_region_id
+                )
+            ),
+            None,
+        )
     if edit_position is not None:
         ordered_edits = ordered_payload_edits(payload_edits)
-        if 1 <= edit_position <= len(ordered_edits):
+        if failing_edit is None and 1 <= edit_position <= len(ordered_edits):
             failing_edit = ordered_edits[edit_position - 1]
     issue = {
         "severity": "error",
-        "reason": "payload_materialization_failed",
+        "reason": str(structured_detail.get("reason", "payload_materialization_failed")),
         "detail": detail,
         "candidate_payload_edit_count": len(payload_edits),
     }
+    if structured_detail:
+        issue["materialization_error_context"] = copy.deepcopy(structured_detail)
     if edit_position is not None:
         issue["materialization_edit_position"] = edit_position
     if alias_id is not None:
@@ -1370,7 +1400,7 @@ def apply_model_patches(
     materialization_errors = materialized["header_materialization_issues"]
     payload_materialization_issues = materialized["payload_materialization_issues"]
     if heartbeat:
-        heartbeat("Building Step 18 V4 summary indexes.", force=True)
+        heartbeat("Building Step 18 V5 summary indexes.", force=True)
     modified_packet_ids = sorted(
         {
             str(patch["packet_id"])

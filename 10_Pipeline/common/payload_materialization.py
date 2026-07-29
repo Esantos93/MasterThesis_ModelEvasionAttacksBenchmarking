@@ -5,11 +5,18 @@ from copy import deepcopy
 from typing import Any
 
 
-PAYLOAD_MATERIALIZATION_SCHEMA_VERSION = "canonical_payload_materialization_result_v1"
+PAYLOAD_MATERIALIZATION_SCHEMA_VERSION = "canonical_payload_materialization_result_v2"
 SUPPORTED_REPLACEMENT_FORMATS = {"hex", "text"}
 SUPPORTED_PAYLOAD_OPERATIONS = {"replace_region", "replace_byte_range"}
 SUPPORTED_PAYLOAD_REGION_TYPES = {"canonical_payload_region", "canonical_payload_byte_range"}
 ETHERNET_MINIMUM_FRAME_BYTES = 60
+
+
+#This exception preserves the exact canonical edit and physical alias that caused materialization to fail.
+class PayloadMaterializationError(ValueError):
+    def __init__(self, message: str, **detail: Any):
+        super().__init__(message)
+        self.detail = detail
 
 
 #This function checks whether a value is valid even-length hexadecimal content.
@@ -361,24 +368,58 @@ def validate_payload_edit(
 
     aliases = normalize_packet_aliases(edit, original_packets_by_id)
     target_end = canonical_start + replaced_length
-    alias_original_segments = []
+    canonical_original_bytes: list[int | None] = [None] * replaced_length
+    overlapping_alias_count = 0
     for alias in aliases:
         alias_start = alias["canonical_start_offset_bytes"]
         alias_end = alias_start + alias["length_bytes"]
-        if canonical_start < alias_start or target_end > alias_end:
-            raise ValueError(
-                f"Payload edit {patch_index} target range is not fully covered by alias {alias['alias_id']!r}."
-            )
+        overlap_start = max(canonical_start, alias_start)
+        overlap_end = min(target_end, alias_end)
+        if overlap_start >= overlap_end:
+            continue
+        overlapping_alias_count += 1
         original_packet = original_packets_by_id[alias["packet_id"]]
         payload_hex, _payload_length = packet_payload(original_packet, alias["packet_id"])
-        relative_start = canonical_start - alias_start
+        relative_start = overlap_start - alias_start
         payload_start = alias["payload_start_offset_bytes"] + relative_start
-        original_segment_hex = payload_hex[payload_start * 2 : (payload_start + replaced_length) * 2]
-        alias_original_segments.append(original_segment_hex)
-    if len(set(alias_original_segments)) > 1:
-        raise ValueError(f"Payload edit {patch_index} aliases do not expose the same original canonical bytes.")
+        overlap_length = overlap_end - overlap_start
+        original_segment = bytes.fromhex(
+            payload_hex[payload_start * 2 : (payload_start + overlap_length) * 2]
+        )
+        canonical_offset = overlap_start - canonical_start
+        for byte_offset, byte_value in enumerate(original_segment):
+            target_offset = canonical_offset + byte_offset
+            previous_value = canonical_original_bytes[target_offset]
+            if previous_value is not None and previous_value != byte_value:
+                raise PayloadMaterializationError(
+                    f"Payload edit {patch_index} aliases disagree on original canonical bytes.",
+                    reason="canonical_alias_original_bytes_mismatch",
+                    prompt_unit_id=prompt_unit_id,
+                    patch_index=patch_index,
+                    canonical_region_id=canonical_region_id,
+                    region_id=edit.get("region_id", canonical_region_id),
+                    alias_id=alias["alias_id"],
+                    canonical_offset_bytes=canonical_start + target_offset,
+                )
+            canonical_original_bytes[target_offset] = byte_value
+    missing_offsets = [
+        canonical_start + offset
+        for offset, byte_value in enumerate(canonical_original_bytes)
+        if byte_value is None
+    ]
+    if missing_offsets:
+        raise PayloadMaterializationError(
+            f"Payload edit {patch_index} target range is not jointly covered by its physical aliases.",
+            reason="canonical_target_not_jointly_covered",
+            prompt_unit_id=prompt_unit_id,
+            patch_index=patch_index,
+            canonical_region_id=canonical_region_id,
+            region_id=edit.get("region_id", canonical_region_id),
+            first_missing_canonical_offset_bytes=missing_offsets[0],
+            missing_canonical_byte_count=len(missing_offsets),
+        )
 
-    original_segment_hex = alias_original_segments[0] if alias_original_segments else ""
+    original_segment_hex = bytes(int(value) for value in canonical_original_bytes).hex()
     normalized_edit = deepcopy(edit)
     normalized_edit.update(
         {
@@ -405,6 +446,7 @@ def validate_payload_edit(
             "prompt_unit_id": prompt_unit_id,
             "materialization_sequence_index": edit_position,
             "original_segment_hex": original_segment_hex,
+            "overlapping_physical_alias_count": overlapping_alias_count,
             "no_effect": original_segment_hex == replacement_hex,
         }
     )
@@ -413,21 +455,122 @@ def validate_payload_edit(
     return normalized_edit
 
 
+#This helper maps an original canonical boundary through one prefix-stable replacement.
+def transform_canonical_boundary(
+    boundary: int,
+    *,
+    canonical_start: int,
+    replaced_length: int,
+    replacement_length: int,
+) -> int:
+    canonical_end = canonical_start + replaced_length
+    if boundary <= canonical_start:
+        return boundary
+    if boundary >= canonical_end:
+        return boundary + replacement_length - replaced_length
+    return canonical_start + min(boundary - canonical_start, replacement_length)
+
+
+#This helper removes unchanged prefix and suffix bytes from one physical projection.
+def trim_unchanged_projection(
+    original_segment: bytes,
+    replacement_segment: bytes,
+) -> tuple[int, bytes, bytes]:
+    common_prefix = 0
+    common_limit = min(len(original_segment), len(replacement_segment))
+    while (
+        common_prefix < common_limit
+        and original_segment[common_prefix] == replacement_segment[common_prefix]
+    ):
+        common_prefix += 1
+    common_suffix = 0
+    suffix_limit = min(
+        len(original_segment) - common_prefix,
+        len(replacement_segment) - common_prefix,
+    )
+    while (
+        common_suffix < suffix_limit
+        and original_segment[len(original_segment) - common_suffix - 1]
+        == replacement_segment[len(replacement_segment) - common_suffix - 1]
+    ):
+        common_suffix += 1
+    original_end = len(original_segment) - common_suffix if common_suffix else len(original_segment)
+    replacement_end = (
+        len(replacement_segment) - common_suffix
+        if common_suffix
+        else len(replacement_segment)
+    )
+    return (
+        common_prefix,
+        original_segment[common_prefix:original_end],
+        replacement_segment[common_prefix:replacement_end],
+    )
+
+
 #This helper builds one physical projection record for a canonical payload edit.
 def build_projection_change(
     *,
     edit: dict[str, Any],
     alias: dict[str, Any],
     original_packet: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     canonical_start = int(edit["canonical_start_offset_bytes"])
+    canonical_end = canonical_start + int(edit["replaced_length_bytes"])
+    replacement = bytes.fromhex(str(edit["replacement_hex"]))
+    replacement_length = len(replacement)
     alias_start = int(alias["canonical_start_offset_bytes"])
-    relative_start = canonical_start - alias_start
-    payload_start = int(alias["payload_start_offset_bytes"]) + relative_start
-    replaced_length = int(edit["replaced_length_bytes"])
+    alias_end = alias_start + int(alias["length_bytes"])
+    transformed_alias_start = transform_canonical_boundary(
+        alias_start,
+        canonical_start=canonical_start,
+        replaced_length=int(edit["replaced_length_bytes"]),
+        replacement_length=replacement_length,
+    )
+    transformed_alias_end = transform_canonical_boundary(
+        alias_end,
+        canonical_start=canonical_start,
+        replaced_length=int(edit["replaced_length_bytes"]),
+        replacement_length=replacement_length,
+    )
+    payload_start = int(alias["payload_start_offset_bytes"])
     payload_hex, _payload_length = packet_payload(original_packet, alias["packet_id"])
-    original_segment_hex = payload_hex[payload_start * 2 : (payload_start + replaced_length) * 2]
-    replacement_length = int(edit["replacement_length_bytes"])
+    alias_length = int(alias["length_bytes"])
+    original_alias_segment = bytes.fromhex(
+        payload_hex[payload_start * 2 : (payload_start + alias_length) * 2]
+    )
+
+    prefix_end = min(alias_end, canonical_start)
+    prefix_length = max(0, prefix_end - alias_start)
+    suffix_start = max(alias_start, canonical_end)
+    suffix_offset = max(0, suffix_start - alias_start)
+    replacement_slice_start = max(transformed_alias_start, canonical_start) - canonical_start
+    replacement_slice_end = min(
+        transformed_alias_end,
+        canonical_start + replacement_length,
+    ) - canonical_start
+    replacement_slice_start = max(0, min(replacement_length, replacement_slice_start))
+    replacement_slice_end = max(
+        replacement_slice_start,
+        min(replacement_length, replacement_slice_end),
+    )
+    transformed_alias_segment = (
+        original_alias_segment[:prefix_length]
+        + replacement[replacement_slice_start:replacement_slice_end]
+        + original_alias_segment[suffix_offset:]
+    )
+    projection_prefix, original_projection, replacement_projection = trim_unchanged_projection(
+        original_alias_segment,
+        transformed_alias_segment,
+    )
+    if original_projection == replacement_projection:
+        return None
+    projection_payload_start = payload_start + projection_prefix
+    reaches_canonical_end = alias_start <= canonical_end <= alias_end
+    canonical_end_payload_offset = (
+        payload_start + canonical_end - alias_start
+        if reaches_canonical_end
+        else None
+    )
     return {
         "edit_kind": "canonical_payload_projection",
         "packet_id": alias["packet_id"],
@@ -442,16 +585,29 @@ def build_projection_change(
         "parent_group_id": edit.get("parent_group_id"),
         "patch_index": edit["patch_index"],
         "canonical_start_offset_bytes": canonical_start,
+        "canonical_edit_start_offset_bytes": canonical_start,
+        "canonical_edit_end_offset_bytes": canonical_end,
+        "canonical_replaced_length_bytes": int(edit["replaced_length_bytes"]),
+        "canonical_replacement_length_bytes": replacement_length,
+        "canonical_payload_length_delta_bytes": (
+            replacement_length - int(edit["replaced_length_bytes"])
+        ),
+        "alias_canonical_start_offset_bytes": alias_start,
+        "alias_canonical_end_offset_bytes": alias_end,
+        "transformed_alias_canonical_start_offset_bytes": transformed_alias_start,
+        "transformed_alias_canonical_end_offset_bytes": transformed_alias_end,
+        "projection_reaches_canonical_edit_end": reaches_canonical_end,
+        "canonical_edit_end_packet_payload_offset_bytes": canonical_end_payload_offset,
         "stream_start": alias.get("stream_start"),
         "stream_end": alias.get("stream_end"),
-        "replaced_length_bytes": replaced_length,
-        "replacement_length_bytes": replacement_length,
-        "payload_start_offset_bytes": payload_start,
+        "replaced_length_bytes": len(original_projection),
+        "replacement_length_bytes": len(replacement_projection),
+        "payload_start_offset_bytes": projection_payload_start,
         "packet_payload_offset_start_bytes": alias.get("packet_payload_offset_start_bytes"),
         "packet_payload_offset_end_bytes": alias.get("packet_payload_offset_end_bytes"),
-        "payload_length_delta_bytes": replacement_length - replaced_length,
-        "original_segment_hex": original_segment_hex,
-        "replacement_hex": edit["replacement_hex"],
+        "payload_length_delta_bytes": len(replacement_projection) - len(original_projection),
+        "original_segment_hex": original_projection.hex(),
+        "replacement_hex": replacement_projection.hex(),
         "requires_pipeline_recalculation": [
             "ipv4.total_length",
             "ipv4.checksum",
@@ -479,37 +635,45 @@ def materialize_payload_edits(
 
     materialization_issues: list[dict[str, Any]] = []
     relationships: list[dict[str, Any]] = []
-    for current_position, current_edit in enumerate(validated_edits):
-        for previous_edit in validated_edits[:current_position]:
-            classified = classify_payload_edit_relationship(previous_edit, current_edit)
-            if classified["classification"] == "disjoint":
-                continue
-            relationship = {
-                "canonical_region_id": current_edit["canonical_region_id"],
-                "previous_prompt_unit_id": previous_edit["prompt_unit_id"],
-                "prompt_unit_id": current_edit["prompt_unit_id"],
-                "previous_patch_index": previous_edit["patch_index"],
-                "patch_index": current_edit["patch_index"],
-                "previous_region_id": previous_edit.get("region_id"),
-                "region_id": current_edit.get("region_id"),
-                "classification": classified["classification"],
-                "overlap_start_offset_bytes": classified["overlap_start_offset_bytes"],
-                "overlap_length_bytes": classified["overlap_length_bytes"],
-            }
-            relationships.append(relationship)
-            if classified["classification"] in {"contradictory_overlap", "unsupported_overlap"}:
-                reason = (
-                    "unsupported_payload_overlap"
-                    if classified["classification"] == "unsupported_overlap"
-                    else "contradictory_payload_overlap"
-                )
-                materialization_issues.append(
-                    {
-                        "severity": "error",
-                        "reason": reason,
-                        **relationship,
-                    }
-                )
+    edits_by_canonical_region: dict[str, list[dict[str, Any]]] = {}
+    for edit in validated_edits:
+        edits_by_canonical_region.setdefault(str(edit["canonical_region_id"]), []).append(edit)
+
+    # Only edits owned by the same canonical region can overlap. Grouping first
+    # keeps the relationship audit proportional to edits per region instead of
+    # comparing every payload decision in a full experiment with every other one.
+    for region_edits in edits_by_canonical_region.values():
+        for current_position, current_edit in enumerate(region_edits):
+            for previous_edit in region_edits[:current_position]:
+                classified = classify_payload_edit_relationship(previous_edit, current_edit)
+                if classified["classification"] == "disjoint":
+                    continue
+                relationship = {
+                    "canonical_region_id": current_edit["canonical_region_id"],
+                    "previous_prompt_unit_id": previous_edit["prompt_unit_id"],
+                    "prompt_unit_id": current_edit["prompt_unit_id"],
+                    "previous_patch_index": previous_edit["patch_index"],
+                    "patch_index": current_edit["patch_index"],
+                    "previous_region_id": previous_edit.get("region_id"),
+                    "region_id": current_edit.get("region_id"),
+                    "classification": classified["classification"],
+                    "overlap_start_offset_bytes": classified["overlap_start_offset_bytes"],
+                    "overlap_length_bytes": classified["overlap_length_bytes"],
+                }
+                relationships.append(relationship)
+                if classified["classification"] in {"contradictory_overlap", "unsupported_overlap"}:
+                    reason = (
+                        "unsupported_payload_overlap"
+                        if classified["classification"] == "unsupported_overlap"
+                        else "contradictory_payload_overlap"
+                    )
+                    materialization_issues.append(
+                        {
+                            "severity": "error",
+                            "reason": reason,
+                            **relationship,
+                        }
+                    )
 
     blocking_overlap = any(issue.get("severity") == "error" for issue in materialization_issues)
     applied_signatures: set[tuple[str, int, int, str]] = set()
@@ -548,6 +712,8 @@ def materialize_payload_edits(
                     alias=alias,
                     original_packet=original_packets[alias["packet_id"]],
                 )
+                if projection is None:
+                    continue
                 packet_projection_edits.setdefault(alias["packet_id"], []).append(projection)
                 projection_changes.append(projection)
 
