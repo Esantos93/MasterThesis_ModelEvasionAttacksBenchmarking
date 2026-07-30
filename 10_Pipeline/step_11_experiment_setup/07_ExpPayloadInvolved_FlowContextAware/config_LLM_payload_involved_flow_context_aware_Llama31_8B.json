@@ -57,8 +57,8 @@
     "runtime_max_model_len": 12288,
     "token_budget": {
       "policy": "compact_patch_token_budget_v2",
-      "chars_per_token_estimate": 3.0,
-      "output_token_estimation_safety_factor": 2.0
+      "chars_per_token_estimate": 2.1,
+      "output_token_estimation_safety_factor": 2.2
     },
     "small_payload_min_bytes": 64,
     "small_payload_max_bytes": 512,
