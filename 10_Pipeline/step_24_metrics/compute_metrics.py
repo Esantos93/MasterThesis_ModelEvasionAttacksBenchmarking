@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 import traceback
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
-METRICS_SCHEMA_VERSION = "snort_metrics_summary_v1"
+METRICS_SCHEMA_VERSION = "snort_metrics_v2"
 
 
 # This function reads a JSON file and returns the parsed Python value.
@@ -69,15 +68,6 @@ def detector_policy_label_from_config(config: dict[str, Any], override: str | No
 
 def rules_policy_path_from_config(config: dict[str, Any]) -> str:
     return str(config.get("snort", {}).get("rules_policy_path", "")).strip()
-
-
-def signature_mutation_weight_from_config(config: dict[str, Any]) -> float:
-    value = config.get("pipeline", {}).get("signature_mutation_weight", 0.0)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("pipeline.signature_mutation_weight must be a number.")
-    if value < 0:
-        raise ValueError("pipeline.signature_mutation_weight must be non-negative.")
-    return float(value)
 
 
 # This function resolves the default Step 23 input directory and Step 24 output directory.
@@ -135,6 +125,21 @@ def safe_rate(numerator: int | float, denominator: int) -> float:
     return float(numerator) / float(denominator)
 
 
+def zeroable_rate(numerator: int | float, denominator: int) -> float:
+    if denominator == 0:
+        return 0.0
+    return float(numerator) / float(denominator)
+
+
+def metric_value(value: float, numerator: int | float, denominator: int) -> dict[str, int | float]:
+    return {
+        "value": value,
+        "percentage": value * 100.0,
+        "numerator": numerator,
+        "denominator": denominator,
+    }
+
+
 def validate_step23_metadata(
     *,
     artifact: dict[str, Any],
@@ -161,6 +166,18 @@ def validate_step23_metadata(
             f"Step 23 artifact detector_policy_label mismatch in {artifact_path}: "
             f"{metadata.get('detector_policy_label')!r} != {expected_detector_policy_label!r}"
         )
+
+
+def post_run_label_from_metadata(comparison_metadata: dict[str, Any]) -> str | None:
+    post_metadata = comparison_metadata.get("post_normalization_metadata")
+    if isinstance(post_metadata, dict):
+        value = post_metadata.get("source_post_run_label")
+        if isinstance(value, str) and value.strip():
+            return value
+    value = comparison_metadata.get("source_post_run_label")
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
 
 
 def summarize_signature_rows(signature_artifact: dict[str, Any]) -> dict[str, Any]:
@@ -240,8 +257,10 @@ def build_metrics(
         "snort_event_packet_anchor_shift_count",
         optional_int(comparison_summary, "delayed_snort_event_re_emission_count"),
     )
-    induced_alert_count = int(
-        comparison_summary.get("induced_alert_count", comparison_summary.get("post_only_unmatched_count", 0)) or 0
+    induced_alert_count = optional_int(
+        comparison_summary,
+        "induced_alert_count",
+        optional_int(comparison_summary, "post_only_unmatched_count"),
     )
     post_only_unmatched_count = induced_alert_count
     same_signature_match_count = require_int(comparison_summary, "same_signature_matches")
@@ -255,14 +274,11 @@ def build_metrics(
             "pre_alert_count is zero. Step 24 requires PRE detections because SER is defined over detected PRE alerts."
         )
 
-    signature_mutation_weight = signature_mutation_weight_from_config(config)
-    partial_credit_candidate_count = (
-        alert_mutation_count
-        + tcp_conversation_displaced_detection_count
-        + snort_event_packet_anchor_shift_count
-    )
-    weighted_success = successful_evasion_count + (signature_mutation_weight * partial_credit_candidate_count)
     signature_breakdowns = summarize_signature_rows(signature_summary)
+    new_post_unique_signature_count = signature_breakdowns["new_post_signature_count"]
+    signature_evasion_rate = safe_rate(successful_evasion_count, pre_alert_count)
+    net_alert_reduction_rate = safe_rate(pre_alert_count - post_alert_count, pre_alert_count)
+    signature_introduction_rate = zeroable_rate(new_post_unique_signature_count, post_unique_signature_count)
     return {
         "pre_alert_count": pre_alert_count,
         "post_alert_count": post_alert_count,
@@ -276,22 +292,26 @@ def build_metrics(
         "post_only_unmatched_count": post_only_unmatched_count,
         "same_signature_match_count": same_signature_match_count,
         "different_signature_replacements": different_signature_replacements,
-        "partial_credit_candidate_count": partial_credit_candidate_count,
-        "signature_mutation_weight": signature_mutation_weight,
-        "weighted_successful_evasion_count": weighted_success,
-        "signature_evasion_rate": safe_rate(weighted_success, pre_alert_count),
-        "successful_evasion_rate_raw": safe_rate(successful_evasion_count, pre_alert_count),
+        "signature_evasion_rate": signature_evasion_rate,
+        "ser": signature_evasion_rate,
+        "net_alert_reduction_rate": net_alert_reduction_rate,
+        "narr": net_alert_reduction_rate,
+        "signature_introduction_rate": signature_introduction_rate,
+        "sir": signature_introduction_rate,
+        "successful_evasion_rate_raw": signature_evasion_rate,
         "failed_evasion_rate": safe_rate(failed_evasion_count, pre_alert_count),
+        "alert_mutation_rate": safe_rate(alert_mutation_count, pre_alert_count),
         "alert_mutation_rate_raw": safe_rate(alert_mutation_count, pre_alert_count),
         "tcp_conversation_displaced_detection_rate": safe_rate(tcp_conversation_displaced_detection_count, pre_alert_count),
+        "packet_anchor_shift_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
         "snort_event_packet_anchor_shift_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
-        "delayed_snort_event_re_emission_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
         "post_alert_retention_rate": safe_rate(post_alert_count, pre_alert_count),
+        "induced_alert_rate": safe_rate(induced_alert_count, pre_alert_count),
         "induced_alert_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
-        "post_only_unmatched_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
         "unique_pre_signature_count": pre_unique_signature_count,
         "unique_post_signature_count": post_unique_signature_count,
         **signature_breakdowns,
+        "new_post_unique_signature_count": new_post_unique_signature_count,
         "pre_detector_source_counts": comparison_summary.get("pre_detector_source_counts", {}),
         "post_detector_source_counts": comparison_summary.get("post_detector_source_counts", {}),
         "classification_counts": comparison_summary.get("classification_counts", {}),
@@ -299,55 +319,60 @@ def build_metrics(
     }
 
 
-def write_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
-    scalar_keys = [
-        "pre_alert_count",
-        "post_alert_count",
-        "failed_evasion_count",
-        "successful_evasion_count",
-        "alert_mutation_count",
-        "tcp_conversation_displaced_detection_count",
-        "snort_event_packet_anchor_shift_count",
-        "delayed_snort_event_re_emission_count",
-        "induced_alert_count",
-        "post_only_unmatched_count",
-        "same_signature_match_count",
-        "different_signature_replacements",
-        "partial_credit_candidate_count",
-        "signature_mutation_weight",
-        "weighted_successful_evasion_count",
-        "signature_evasion_rate",
-        "successful_evasion_rate_raw",
-        "failed_evasion_rate",
-        "alert_mutation_rate_raw",
-        "tcp_conversation_displaced_detection_rate",
-        "snort_event_packet_anchor_shift_rate",
-        "delayed_snort_event_re_emission_rate",
-        "post_alert_retention_rate",
-        "induced_alert_rate_vs_pre",
-        "post_only_unmatched_rate_vs_pre",
-        "unique_pre_signature_count",
-        "unique_post_signature_count",
-        "disappeared_signature_count",
-        "new_post_signature_count",
-        "unchanged_signature_count",
-        "signature_row_count",
-    ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=["metric", "value"])
-        writer.writeheader()
-        for key in scalar_keys:
-            writer.writerow({"metric": key, "value": metrics.get(key)})
-
-
 def percentage(value: float) -> str:
     return f"{value * 100:.6f}%"
+
+
+def build_metric_groups(metrics: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    primary_metrics = {
+        "ser": metric_value(metrics["ser"], metrics["successful_evasion_count"], metrics["pre_alert_count"]),
+        "narr": metric_value(metrics["narr"], metrics["pre_alert_count"] - metrics["post_alert_count"], metrics["pre_alert_count"]),
+        "sir": metric_value(metrics["sir"], metrics["new_post_unique_signature_count"], metrics["unique_post_signature_count"]),
+    }
+    diagnostic_metrics = {
+        "induced_alert_rate": metric_value(metrics["induced_alert_rate"], metrics["induced_alert_count"], metrics["pre_alert_count"]),
+        "alert_mutation_rate": metric_value(metrics["alert_mutation_rate"], metrics["alert_mutation_count"], metrics["pre_alert_count"]),
+        "failed_evasion_rate": metric_value(metrics["failed_evasion_rate"], metrics["failed_evasion_count"], metrics["pre_alert_count"]),
+        "tcp_conversation_displaced_detection_rate": metric_value(
+            metrics["tcp_conversation_displaced_detection_rate"],
+            metrics["tcp_conversation_displaced_detection_count"],
+            metrics["pre_alert_count"],
+        ),
+        "packet_anchor_shift_rate": metric_value(
+            metrics["packet_anchor_shift_rate"],
+            metrics["snort_event_packet_anchor_shift_count"],
+            metrics["pre_alert_count"],
+        ),
+        "post_alert_retention_rate": metric_value(metrics["post_alert_retention_rate"], metrics["post_alert_count"], metrics["pre_alert_count"]),
+    }
+    return primary_metrics, diagnostic_metrics
+
+
+def build_clean_summary(artifact: dict[str, Any]) -> dict[str, Any]:
+    primary_metrics, diagnostic_metrics = build_metric_groups(artifact["metrics"])
+    return {
+        "experiment_identifier": {
+            "experiment_id": artifact["experiment_id"],
+            "experiment_config_label": artifact["experiment_config_label"],
+            "detector_policy_label": artifact["detector_policy_label"],
+            "post_run_label": artifact.get("post_run_label"),
+        },
+        "primary_metrics": primary_metrics,
+        "diagnostic_metrics": diagnostic_metrics,
+    }
+
+
+def write_clean_summary_json(path: Path, clean_summary: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as output_file:
+        json.dump(clean_summary, output_file, indent=2)
+        output_file.write("\n")
 
 
 def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
     metrics = artifact["metrics"]
     policy = artifact["metric_policy"]
+    primary_metrics, diagnostic_metrics = build_metric_groups(metrics)
     lines = [
         "# Step 24 Metrics Report",
         "",
@@ -356,12 +381,20 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"- Detector policy label: `{artifact['detector_policy_label']}`",
         f"- Rules policy path: `{artifact.get('rules_policy_path') or 'none'}`",
         f"- Snaplen: `{artifact.get('snaplen', 'not configured')}`",
+        f"- POST run label: `{artifact.get('post_run_label') or 'unknown'}`",
         "",
-        "## Core Metric",
+        "## Primary Metrics",
         "",
-        f"- SER formula: `{policy['signature_evasion_rate_formula']}`",
-        f"- Signature mutation weight: `{metrics['signature_mutation_weight']}`",
-        f"- Signature Evasion Rate: `{metrics['signature_evasion_rate']:.12f}` ({percentage(metrics['signature_evasion_rate'])})",
+        f"- SER formula: `{policy['ser_formula']}`",
+        f"- NARR formula: `{policy['narr_formula']}`",
+        f"- SIR formula: `{policy['sir_formula']}`",
+        "",
+        "| Metric | Numerator | Denominator | Value | Percentage |",
+        "| --- | ---: | ---: | ---: | ---: |",
+        *[
+            f"| {name.upper()} | {entry['numerator']} | {entry['denominator']} | {entry['value']:.12f} | {entry['percentage']:.6f}% |"
+            for name, entry in primary_metrics.items()
+        ],
         "",
         "## Alert Counts",
         "",
@@ -376,17 +409,14 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         f"| Packet-Anchor shifted | {metrics['snort_event_packet_anchor_shift_count']} |",
         f"| Induced Alert | {metrics['induced_alert_count']} |",
         "",
-        "## Supporting Rates",
+        "## Diagnostic Metrics",
         "",
-        "| Metric | Value |",
-        "| --- | ---: |",
-        f"| Successful evasion rate raw | {percentage(metrics['successful_evasion_rate_raw'])} |",
-        f"| Failed evasion rate | {percentage(metrics['failed_evasion_rate'])} |",
-        f"| Alert-signature mutation rate raw | {percentage(metrics['alert_mutation_rate_raw'])} |",
-        f"| TCP-conversation displaced detection rate | {percentage(metrics['tcp_conversation_displaced_detection_rate'])} |",
-        f"| Packet-anchor shifted rate | {percentage(metrics['snort_event_packet_anchor_shift_rate'])} |",
-        f"| Induced alert rate vs PRE | {percentage(metrics['induced_alert_rate_vs_pre'])} |",
-        f"| POST alert retention rate | {percentage(metrics['post_alert_retention_rate'])} |",
+        "| Metric | Numerator | Denominator | Value | Percentage |",
+        "| --- | ---: | ---: | ---: | ---: |",
+        *[
+            f"| {name} | {entry['numerator']} | {entry['denominator']} | {entry['value']:.12f} | {entry['percentage']:.6f}% |"
+            for name, entry in diagnostic_metrics.items()
+        ],
         "",
         "## Signature Summary",
         "",
@@ -459,9 +489,11 @@ def compute_metrics(
         f"experiment-config-{experiment_config_label}__"
         f"detector-policy-{resolved_detector_policy_label}"
     )
-    summary_path = resolved_output_dir / f"metrics-summary__{base_name}.json"
+    metrics_path = resolved_output_dir / f"metrics__{base_name}.json"
     report_path = resolved_output_dir / f"metrics-report__{base_name}.md"
-    table_path = resolved_output_dir / f"metrics-table__{base_name}.csv"
+    clean_summary_path = resolved_output_dir / f"metrics_summary-{experiment_id}.json"
+    post_run_label = post_run_label_from_metadata(comparison_metadata_artifact)
+    primary_metrics, diagnostic_metrics = build_metric_groups(metrics)
     artifact = {
         "schema_version": METRICS_SCHEMA_VERSION,
         "generated_at_utc": utc_now(),
@@ -470,15 +502,16 @@ def compute_metrics(
         "detector_policy_label": resolved_detector_policy_label,
         "rules_policy_path": rules_policy_path_from_config(config),
         "snaplen": config.get("snort", {}).get("snaplen"),
+        "post_run_label": post_run_label,
         "config_source": config.get("_config_path", ""),
         "source_step_23_comparison_metadata": str(comparison_metadata_path),
         "source_alert_comparison": str(alert_comparison_path),
         "source_signature_summary": str(signature_summary_path),
         "metric_policy": {
-            "signature_evasion_rate_formula": "(successful_evasion_count + signature_mutation_weight * (alert_mutation_count + tcp_conversation_displaced_detection_count + snort_event_packet_anchor_shift_count)) / pre_alert_count",
-            "current_policy": "With signature_mutation_weight = 0, only successful_evasion_count contributes to SER.",
-            "partial_credit_candidate_policy": "If partial credit is enabled later, Alert-Signature Mutation, TCP-Conversation Displaced Detection, and Packet-Anchor shifted are the weighted candidate categories.",
-            "signature_mutation_weight_source": "pipeline.signature_mutation_weight",
+            "ser_formula": "successful_evasion_count / pre_alert_count",
+            "narr_formula": "(pre_alert_count - post_alert_count) / pre_alert_count",
+            "sir_formula": "new_post_unique_signature_count / post_unique_signature_count; returns 0.0 when post_unique_signature_count is zero.",
+            "current_policy": "SER is strict disappearance of PRE detections. No weighted credit is applied to Alert-Signature Mutation, TCP-Conversation Displaced Detection, or Packet-Anchor shifted.",
             "zero_pre_alert_policy": "fail clearly because SER is undefined without PRE detections.",
             "tcp_conversation_displaced_detection_policy": "reported separately and not counted as evasion.",
             "snort_event_packet_anchor_shift_policy": "reported separately and not counted as evasion.",
@@ -486,17 +519,29 @@ def compute_metrics(
             "induced_alert_policy": "reported separately and not counted as evasion.",
             "post_only_unmatched_policy": "legacy alias for induced_alert_count.",
         },
+        "primary_metrics": primary_metrics,
+        "diagnostic_metrics": diagnostic_metrics,
         "metrics": metrics,
         "artifacts": {
-            "metrics_summary": str(summary_path),
+            "metrics": str(metrics_path),
+            "clean_metrics_summary": str(clean_summary_path),
             "metrics_report": str(report_path),
-            "metrics_table": str(table_path),
         },
     }
-    write_json(summary_path, artifact)
-    write_metrics_csv(table_path, metrics)
+    clean_summary = build_clean_summary(artifact)
+    write_json(metrics_path, artifact)
+    write_clean_summary_json(clean_summary_path, clean_summary)
     write_metrics_report(report_path, artifact)
     return artifact
+
+
+def print_metric_group(title: str, metric_group: dict[str, Any]) -> None:
+    print(title)
+    for name, entry in metric_group.items():
+        print(
+            f"  {name}: numerator={entry['numerator']} denominator={entry['denominator']} "
+            f"value={entry['value']:.12f} percentage={entry['percentage']:.6f}%"
+        )
 
 
 def resolve_log_path(args: argparse.Namespace) -> Path:
@@ -563,12 +608,11 @@ def main() -> None:
         print(f"Packet-anchor shifted: {metrics['snort_event_packet_anchor_shift_count']}")
         print(f"Failed evasion: {metrics['failed_evasion_count']}")
         print(f"Induced alert: {metrics['induced_alert_count']}")
-        print(f"Signature mutation weight: {metrics['signature_mutation_weight']}")
-        print(f"Signature Evasion Rate: {metrics['signature_evasion_rate']:.12f}")
-        print(f"POST alert retention rate: {metrics['post_alert_retention_rate']:.12f}")
-        print(f"Metrics summary: {result['artifacts']['metrics_summary']}")
+        print_metric_group("Primary metrics:", result["primary_metrics"])
+        print_metric_group("Diagnostic metrics:", result["diagnostic_metrics"])
+        print(f"Metrics JSON: {result['artifacts']['metrics']}")
+        print(f"Clean metrics summary: {result['artifacts']['clean_metrics_summary']}")
         print(f"Metrics report: {result['artifacts']['metrics_report']}")
-        print(f"Metrics table: {result['artifacts']['metrics_table']}")
 
 
 if __name__ == "__main__":

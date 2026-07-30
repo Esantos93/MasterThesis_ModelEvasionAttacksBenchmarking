@@ -20,6 +20,7 @@ EXPERIMENT_SUBDIRS = [
     "12_alerts_processed/post",
     "13_comparison",
     "14_metrics",
+    "15_packet_comparisons",
     "logs",
 ]
 

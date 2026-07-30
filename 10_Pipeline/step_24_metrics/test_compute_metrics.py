@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
-from step_24_metrics.compute_metrics import compute_metrics
+from step_24_metrics.compute_metrics import compute_metrics, main
 
 
 class Step24MetricsTests(unittest.TestCase):
@@ -29,11 +31,12 @@ class Step24MetricsTests(unittest.TestCase):
         mutation: int,
         induced: int = 0,
         displaced: int = 0,
-        delayed: int = 0,
+        anchor_shift: int = 0,
         weight: float = 0.0,
         detector_policy: str = "security-ips",
         signatures: list[dict] | None = None,
-    ) -> Path:
+        post_run_label: str = "run-fixture",
+    ) -> tuple[Path, Path]:
         config_path = root / "config.json"
         config = {
             "experiment": {
@@ -42,6 +45,7 @@ class Step24MetricsTests(unittest.TestCase):
             },
             "pipeline": {
                 "experiment_config_label": "baseline_004_headers_only_fixed_size_6",
+                # Historical config field kept in fixtures to prove Step 24 ignores it.
                 "signature_mutation_weight": weight,
             },
             "snort": {
@@ -78,7 +82,7 @@ class Step24MetricsTests(unittest.TestCase):
             "same_signature_matches": failed,
             "different_signature_replacements": mutation,
             "tcp_conversation_displaced_detection_count": displaced,
-            "snort_event_packet_anchor_shift_count": delayed,
+            "snort_event_packet_anchor_shift_count": anchor_shift,
             "induced_alert_count": induced,
             "post_only_unmatched_count": induced,
             "classification_counts": {
@@ -87,123 +91,203 @@ class Step24MetricsTests(unittest.TestCase):
                 "Induced Alert": induced,
                 "Successful Evasion": successful,
                 "TCP-Conversation Displaced Detection": displaced,
-                "Packet-Anchor shifted": delayed,
+                "Packet-Anchor shifted": anchor_shift,
             },
             "successful_evasion_count": successful,
             "alert_mutation_count": mutation,
             "failed_evasion_count": failed,
         }
         metadata = {
-            "schema_version": "snort_alert_comparison_v1",
+            "schema_version": "snort_alert_comparison_v5",
             "experiment_id": "exp_fixture",
             "experiment_config_label": label,
             "detector_policy_label": detector_policy,
             "rules_policy_path": "/rules/security.states",
+            "post_normalization_metadata": {
+                "source_post_run_label": post_run_label,
+            },
             "summary": summary,
         }
         self.write_json(
             comparison_dir / f"alert-comparison__experiment-config-{label}.json",
-            {"metadata": metadata, "summary": summary, "comparison_records": [], "post_only_unmatched_alerts": []},
+            {"metadata": metadata, "summary": summary, "comparison_records": [], "induced_alerts": []},
         )
         self.write_json(comparison_dir / f"comparison-metadata__experiment-config-{label}.json", metadata)
         self.write_json(
             comparison_dir / f"signature-comparison-summary__experiment-config-{label}.json",
             {"metadata": metadata, "summary": {"signature_row_count": len(signature_rows)}, "signatures": signature_rows},
         )
-        return config_path
+        return config_path, comparison_dir
 
-    def test_all_failed_evasion_ser_zero(self) -> None:
+    def test_ser_ignores_weighted_candidate_categories_from_historical_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=10, failed=10, successful=0, mutation=0)
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
-            self.assertEqual(result["metrics"]["post_alert_retention_rate"], 1.0)
-
-    def test_successful_evasion_increases_ser(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            signatures = [
-                {"signature_key": "1:1:1", "gid": 1, "detector_source": "ruleset_text", "pre_count": 6, "post_count": 6, "status": "present_in_pre_and_post"},
-                {"signature_key": "1:2:1", "gid": 1, "detector_source": "ruleset_text", "pre_count": 4, "post_count": 0, "status": "pre_only_disappeared"},
-            ]
-            config = self.make_fixture(root, pre_count=10, post_count=6, failed=6, successful=4, mutation=0, signatures=signatures)
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.4)
-            self.assertEqual(result["metrics"]["disappeared_signature_count"], 1)
-
-    def test_alert_mutation_ignored_when_weight_zero(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=10, failed=6, successful=0, mutation=4, weight=0.0)
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["alert_mutation_rate_raw"], 0.4)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
-
-    def test_alert_mutation_weight_contributes_to_ser(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=10, failed=6, successful=0, mutation=4, weight=0.5)
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.2)
-
-    def test_partial_credit_weight_includes_mutation_displaced_detection_and_delayed_re_emission(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = self.make_fixture(
+            config, _ = self.make_fixture(
                 root,
                 pre_count=10,
                 post_count=10,
-                failed=3,
+                failed=0,
                 successful=1,
                 mutation=2,
                 displaced=3,
-                delayed=1,
-                weight=0.5,
+                anchor_shift=4,
+                weight=0.9,
             )
             result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["partial_credit_candidate_count"], 6)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.4)
+            self.assertEqual(result["metrics"]["ser"], 0.1)
+            self.assertNotIn("weighted_successful_evasion_count", result["metrics"])
+            self.assertNotIn("signature_mutation_weight", result["metrics"])
 
-    def test_induced_alert_reported_separately(self) -> None:
+    def test_narr_positive_zero_and_negative(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=12, failed=10, successful=0, mutation=0, induced=2)
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["induced_alert_count"], 2)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
+            config, _ = self.make_fixture(root, pre_count=10, post_count=6, failed=6, successful=4, mutation=0)
+            self.assertEqual(compute_metrics(config_path=config)["metrics"]["narr"], 0.4)
 
-    def test_tcp_conversation_displaced_detection_reported_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=10, failed=8, successful=0, mutation=0, displaced=2)
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["tcp_conversation_displaced_detection_count"], 2)
-            self.assertEqual(result["metrics"]["tcp_conversation_displaced_detection_rate"], 0.2)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
+            config, _ = self.make_fixture(root, pre_count=10, post_count=10, failed=10, successful=0, mutation=0)
+            self.assertEqual(compute_metrics(config_path=config)["metrics"]["narr"], 0.0)
 
-    def test_snort_event_packet_anchor_shift_reported_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=10, post_count=10, failed=8, successful=0, mutation=0, delayed=2)
+            config, _ = self.make_fixture(root, pre_count=10, post_count=12, failed=10, successful=0, mutation=0, induced=2)
+            self.assertEqual(compute_metrics(config_path=config)["metrics"]["narr"], -0.2)
+
+    def test_sir_normal_and_zero_post_unique_signature_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            signatures = [
+                {"signature_key": "1:1:1", "gid": 1, "detector_source": "ruleset_text", "pre_count": 8, "post_count": 3, "status": "present_in_pre_and_post"},
+                {"signature_key": "1:2:1", "gid": 1, "detector_source": "ruleset_text", "pre_count": 0, "post_count": 2, "status": "post_only_new"},
+            ]
+            config, _ = self.make_fixture(root, pre_count=8, post_count=5, failed=3, successful=5, mutation=0, signatures=signatures)
             result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["snort_event_packet_anchor_shift_count"], 2)
-            self.assertEqual(result["metrics"]["snort_event_packet_anchor_shift_rate"], 0.2)
-            self.assertEqual(result["metrics"]["signature_evasion_rate"], 0.0)
+            self.assertEqual(result["metrics"]["new_post_unique_signature_count"], 1)
+            self.assertEqual(result["metrics"]["sir"], 0.5)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            signatures = [
+                {"signature_key": "1:1:1", "gid": 1, "detector_source": "ruleset_text", "pre_count": 8, "post_count": 0, "status": "pre_only_disappeared"},
+            ]
+            config, _ = self.make_fixture(root, pre_count=8, post_count=0, failed=0, successful=8, mutation=0, signatures=signatures)
+            result = compute_metrics(config_path=config)
+            self.assertEqual(result["metrics"]["unique_post_signature_count"], 0)
+            self.assertEqual(result["metrics"]["sir"], 0.0)
+
+    def test_all_six_diagnostic_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, _ = self.make_fixture(
+                root,
+                pre_count=20,
+                post_count=18,
+                failed=5,
+                successful=7,
+                mutation=3,
+                induced=2,
+                displaced=4,
+                anchor_shift=1,
+            )
+            diagnostics = compute_metrics(config_path=config)["diagnostic_metrics"]
+            expected = {
+                "induced_alert_rate": 2 / 20,
+                "alert_mutation_rate": 3 / 20,
+                "failed_evasion_rate": 5 / 20,
+                "tcp_conversation_displaced_detection_rate": 4 / 20,
+                "packet_anchor_shift_rate": 1 / 20,
+                "post_alert_retention_rate": 18 / 20,
+            }
+            self.assertEqual(set(diagnostics), set(expected))
+            for name, value in expected.items():
+                self.assertEqual(diagnostics[name]["value"], value)
+                self.assertEqual(diagnostics[name]["percentage"], value * 100)
+
+    def test_clean_json_shape_identifiers_and_exact_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "isolated_metrics"
+            config, _ = self.make_fixture(root, pre_count=10, post_count=10, failed=10, successful=0, mutation=0)
+            result = compute_metrics(config_path=config, output_dir=output_dir)
+            clean_path = output_dir / "metrics_summary-exp_fixture.json"
+            detailed_path = output_dir / "metrics__experiment-config-baseline-004-headers-only-fixed-size-6__detector-policy-security-ips.json"
+            report_path = output_dir / "metrics-report__experiment-config-baseline-004-headers-only-fixed-size-6__detector-policy-security-ips.md"
+            csv_path = output_dir / "metrics-table__experiment-config-baseline-004-headers-only-fixed-size-6__detector-policy-security-ips.csv"
+
+            self.assertEqual(Path(result["artifacts"]["clean_metrics_summary"]), clean_path)
+            self.assertEqual(Path(result["artifacts"]["metrics"]), detailed_path)
+            self.assertEqual(Path(result["artifacts"]["metrics_report"]), report_path)
+            self.assertTrue(clean_path.exists())
+            self.assertTrue(detailed_path.exists())
+            self.assertTrue(report_path.exists())
+            self.assertFalse(csv_path.exists())
+
+            clean = json.loads(clean_path.read_text(encoding="utf-8"))
+            self.assertEqual(set(clean), {"experiment_identifier", "primary_metrics", "diagnostic_metrics"})
+            self.assertEqual(list(clean), ["experiment_identifier", "primary_metrics", "diagnostic_metrics"])
+            clean_text = clean_path.read_text(encoding="utf-8")
+            self.assertLess(clean_text.index('"experiment_identifier"'), clean_text.index('"primary_metrics"'))
+            self.assertLess(clean_text.index('"primary_metrics"'), clean_text.index('"diagnostic_metrics"'))
+            self.assertEqual(
+                clean["experiment_identifier"],
+                {
+                    "experiment_id": "exp_fixture",
+                    "experiment_config_label": "baseline-004-headers-only-fixed-size-6",
+                    "detector_policy_label": "security-ips",
+                    "post_run_label": "run-fixture",
+                },
+            )
+
+    def test_terminal_output_lists_primary_and_diagnostic_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "terminal_metrics"
+            log_file = root / "step24.log"
+            config, _ = self.make_fixture(root, pre_count=10, post_count=12, failed=8, successful=1, mutation=1, induced=2)
+            old_argv = sys.argv[:]
+            sys.argv = [
+                "compute_metrics.py",
+                "--config",
+                str(config),
+                "--output-dir",
+                str(output_dir),
+                "--log-file",
+                str(log_file),
+            ]
+            try:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    main()
+            finally:
+                sys.argv = old_argv
+            text = stdout.getvalue()
+            self.assertIn("Primary metrics:", text)
+            self.assertIn("  ser: numerator=1 denominator=10 value=0.100000000000 percentage=10.000000%", text)
+            self.assertIn("Diagnostic metrics:", text)
+            self.assertIn("  induced_alert_rate: numerator=2 denominator=10 value=0.200000000000 percentage=20.000000%", text)
+            self.assertIn("Clean metrics summary:", text)
 
     def test_zero_pre_alerts_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=0, post_count=0, failed=0, successful=0, mutation=0)
+            config, _ = self.make_fixture(root, pre_count=0, post_count=0, failed=0, successful=0, mutation=0)
             with self.assertRaisesRegex(ValueError, "pre_alert_count is zero"):
                 compute_metrics(config_path=config)
 
-    def test_detector_policy_aware_default_path(self) -> None:
+    def test_detector_policy_aware_default_path_and_determinism(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = self.make_fixture(root, pre_count=3, post_count=3, failed=3, successful=0, mutation=0, detector_policy="security-ips")
-            result = compute_metrics(config_path=config)
-            self.assertIn("13_comparison/security-ips", result["source_alert_comparison"].replace("\\", "/"))
+            config, _ = self.make_fixture(root, pre_count=3, post_count=3, failed=3, successful=0, mutation=0, detector_policy="security-ips")
+            first = compute_metrics(config_path=config)
+            clean_path = Path(first["artifacts"]["clean_metrics_summary"])
+            first_clean = json.loads(clean_path.read_text(encoding="utf-8"))
+            second = compute_metrics(config_path=config)
+            second_clean = json.loads(clean_path.read_text(encoding="utf-8"))
+            self.assertIn("13_comparison/security-ips", first["source_alert_comparison"].replace("\\", "/"))
+            self.assertEqual(first_clean, second_clean)
+            self.assertEqual(first["primary_metrics"], second["primary_metrics"])
+            self.assertEqual(first["diagnostic_metrics"], second["diagnostic_metrics"])
 
 
 if __name__ == "__main__":
