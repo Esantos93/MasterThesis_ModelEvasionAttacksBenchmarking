@@ -98,6 +98,7 @@ class Step11ExperimentSetupTests(unittest.TestCase):
                 [str(experiment_root / subdir) for subdir in EXPERIMENT_SUBDIRS],
                 metadata["created_directories"],
             )
+            self.assertTrue((experiment_root / "15_packet_comparisons").is_dir())
             self.assertFalse((experiment_root / "05_groups" / "pre_snort_context_source").exists())
             self.assertNotIn("ids_context_source", metadata)
 
