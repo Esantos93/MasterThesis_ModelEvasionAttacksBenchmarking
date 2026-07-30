@@ -7,6 +7,7 @@ import sys
 import traceback
 import uuid
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from decimal import Decimal
 from itertools import zip_longest
@@ -24,6 +25,7 @@ from common.io_utils import write_json
 from common.terminal_logging import default_step_log_path, terminal_log
 from step_14_pcap_to_json.packet_headers_extraction import extract_physical_packet_facts
 from step_25_packet_comparison.json_stream import (
+    consume_selected_object_members,
     iter_json_array_at_path,
     load_json_value_at_path,
 )
@@ -95,13 +97,13 @@ def sha256_bytes(value: bytes) -> str:
 # This function imports Scapy only when PCAP comparison starts.
 def import_scapy() -> dict[str, Any]:
     try:
-        from scapy.all import PcapReader
+        from scapy.all import RawPcapReader
     except ImportError as exc:
         raise RuntimeError(
             "Scapy is required for Step 25 packet comparison. Install it in the "
             "benchmark environment before running this step."
         ) from exc
-    return {"PcapReader": PcapReader}
+    return {"RawPcapReader": RawPcapReader}
 
 
 # This function builds the configured experiment root.
@@ -352,7 +354,7 @@ def validate_pre_against_step14(
 
 # This function compares one PCAP timestamp with Step 14's explicit timestamp.
 def validate_packet_timestamp(
-    packet: Any,
+    packet_metadata: Any,
     reference_timestamp: Any,
     *,
     packet_id: str,
@@ -364,7 +366,15 @@ def validate_packet_timestamp(
         raise ValueError(
             f"Step 14 packet {packet_id!r} has a non-numeric timestamp_epoch_pcap."
         )
-    packet_timestamp = Decimal(str(getattr(packet, "time", "")))
+    if hasattr(packet_metadata, "sec") and hasattr(packet_metadata, "usec"):
+        packet_timestamp = Decimal(int(packet_metadata.sec)) + (
+            Decimal(int(packet_metadata.usec)) / Decimal(1_000_000)
+        )
+    else:
+        raise ValueError(
+            f"{traffic_version} PCAP metadata for packet_id={packet_id!r} "
+            "does not expose a classic-PCAP sec/usec timestamp."
+        )
     expected = Decimal(str(reference_timestamp))
     if abs(packet_timestamp - expected) > Decimal("0.000001"):
         raise ValueError(
@@ -452,44 +462,32 @@ def load_traceability_indexes(
         or step18_metadata.get("materialization_success") is not True
     ):
         raise ValueError("Step 25 requires a completed, successfully materialized Step 18 artifact.")
-    patch_schema = load_json_value_at_path(
-        step18_merged, ("patch_application", "schema_version")
-    )
-    if patch_schema != STEP18_PATCH_SCHEMA_VERSION:
-        raise ValueError(
-            f"Step 18 patch-application schema mismatch: {patch_schema!r}."
-        )
-
     explicit_headers_by_packet_field: dict[
-        tuple[str, str], list[dict[str, Any]]
-    ] = defaultdict(list)
-    for edit in iter_json_array_at_path(
-        step18_merged, ("patch_application", "effective_header_edits")
-    ):
+        str, dict[str, list[dict[str, Any]]]
+    ] = defaultdict(lambda: defaultdict(list))
+    derived_headers_by_packet_field: dict[
+        str, dict[str, list[dict[str, Any]]]
+    ] = defaultdict(lambda: defaultdict(list))
+    payload_edits_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
+    step18_patch_schema: list[Any] = []
+
+    def consume_effective_header_edit(edit: Any) -> None:
         if isinstance(edit, dict):
-            explicit_headers_by_packet_field[
-                (str(edit.get("packet_id")), normalize_logical_field(edit.get("field")))
+            explicit_headers_by_packet_field[str(edit.get("packet_id"))][
+                normalize_logical_field(edit.get("field"))
             ].append(edit)
 
-    derived_headers_by_packet_field: dict[
-        tuple[str, str], list[dict[str, Any]]
-    ] = defaultdict(list)
-    for change in iter_json_array_at_path(
-        step18_merged, ("patch_application", "derived_header_changes")
-    ):
+    def consume_derived_header_change(change: Any) -> None:
         if isinstance(change, dict):
             field = normalize_logical_field(change.get("derived_field"))
             if not field.startswith("record."):
-                derived_headers_by_packet_field[
-                    (str(change.get("packet_id")), field)
+                derived_headers_by_packet_field[str(change.get("packet_id"))][
+                    field
                 ].append(change)
 
-    payload_edits_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
-    for edit in iter_json_array_at_path(
-        step18_merged, ("patch_application", "payload_edits")
-    ):
+    def consume_payload_edit(edit: Any) -> None:
         if not isinstance(edit, dict):
-            continue
+            return
         key = (
             str(edit.get("prompt_unit_id")),
             int(edit.get("patch_index", 0) or 0),
@@ -499,8 +497,59 @@ def load_traceability_indexes(
             raise ValueError(f"Contradictory Step 18 payload edit identity: {key}.")
         payload_edits_by_key[key] = edit
 
+    consume_selected_object_members(
+        step18_merged,
+        ("patch_application",),
+        value_handlers={
+            "schema_version": step18_patch_schema.append,
+        },
+        array_item_handlers={
+            "effective_header_edits": consume_effective_header_edit,
+            "derived_header_changes": consume_derived_header_change,
+            "payload_edits": consume_payload_edit,
+        },
+    )
+    if step18_patch_schema != [STEP18_PATCH_SCHEMA_VERSION]:
+        raise ValueError(
+            f"Step 18 patch-application schema mismatch: "
+            f"{step18_patch_schema[0] if step18_patch_schema else None!r}."
+        )
+
+    step19_metadata_values: list[Any] = []
+    step19_summary_values: list[Any] = []
+    accepted_packet_ids = set()
+    payload_projections_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def consume_step19_packet_result(packet_result: Any) -> None:
+        if not isinstance(packet_result, dict):
+            raise ValueError("Step 19 packet_results contains a non-object value.")
+        if packet_result.get("status") == "accepted":
+            packet_id = packet_result.get("packet_id")
+            if packet_id is None:
+                raise ValueError("Accepted Step 19 packet result lacks packet_id.")
+            accepted_packet_ids.add(str(packet_id))
+
+    def consume_payload_projection(projection: Any) -> None:
+        if not isinstance(projection, dict) or projection.get("packet_id") is None:
+            raise ValueError(
+                "Step 19 effective payload projection is not traceable to packet_id."
+            )
+        payload_projections_by_packet[str(projection["packet_id"])].append(projection)
+
+    consume_selected_object_members(
+        step19_report,
+        (),
+        value_handlers={
+            "metadata": step19_metadata_values.append,
+            "summary": step19_summary_values.append,
+        },
+        array_item_handlers={
+            "packet_results": consume_step19_packet_result,
+            "validated_effective_payload_projection_changes": consume_payload_projection,
+        },
+    )
     step19_metadata = require_schema(
-        load_json_value_at_path(step19_report, ("metadata",)),
+        step19_metadata_values[0],
         expected=STEP19_SCHEMA_VERSION,
         description="Step 19 validation report",
     )
@@ -510,30 +559,46 @@ def load_traceability_indexes(
         experiment_config_label=experiment_config_label,
         description="Step 19 validation report",
     )
-    step19_summary = load_json_value_at_path(step19_report, ("summary",))
+    step19_summary = step19_summary_values[0]
     if not isinstance(step19_summary, dict) or int(step19_summary.get("error_count", -1)) != 0:
         raise ValueError("Step 25 requires a Step 19 report with error_count = 0.")
 
-    accepted_packet_ids = set()
-    for packet_result in iter_json_array_at_path(step19_report, ("packet_results",)):
+    step20_metadata_values: list[Any] = []
+    step20_summary_values: list[Any] = []
+    tcp_translation_by_packet: dict[str, dict[str, Any]] = {}
+
+    def consume_step20_packet_result(packet_result: Any) -> None:
         if not isinstance(packet_result, dict):
-            raise ValueError("Step 19 packet_results contains a non-object value.")
-        if packet_result.get("status") == "accepted":
-            packet_id = packet_result.get("packet_id")
-            if packet_id is None:
-                raise ValueError("Accepted Step 19 packet result lacks packet_id.")
-            accepted_packet_ids.add(str(packet_id))
+            raise ValueError("Step 20 packet_results contains a non-object value.")
+        if packet_result.get("status") != "reconstructed":
+            raise ValueError(
+                f"Step 25 cannot audit a failed Step 20 packet result: "
+                f"{packet_result.get('packet_id')!r}."
+            )
+        translation = packet_result.get("tcp_sequence_translation")
+        if not isinstance(translation, dict):
+            return
+        if (
+            int(translation.get("sequence_delta", 0) or 0) != 0
+            or int(translation.get("acknowledgement_delta", 0) or 0) != 0
+            or translation.get("original_sack_options")
+            != translation.get("reconstructed_sack_options")
+        ):
+            tcp_translation_by_packet[str(packet_result.get("packet_id"))] = translation
 
-    payload_projections_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for projection in iter_json_array_at_path(
-        step19_report, ("validated_effective_payload_projection_changes",)
-    ):
-        if not isinstance(projection, dict) or projection.get("packet_id") is None:
-            raise ValueError("Step 19 effective payload projection is not traceable to packet_id.")
-        payload_projections_by_packet[str(projection["packet_id"])].append(projection)
-
+    consume_selected_object_members(
+        step20_report,
+        (),
+        value_handlers={
+            "metadata": step20_metadata_values.append,
+            "summary": step20_summary_values.append,
+        },
+        array_item_handlers={
+            "packet_results": consume_step20_packet_result,
+        },
+    )
     step20_metadata = require_schema(
-        load_json_value_at_path(step20_report, ("metadata",)),
+        step20_metadata_values[0],
         expected=STEP20_SCHEMA_VERSION,
         description="Step 20 reconstruction report",
     )
@@ -545,7 +610,7 @@ def load_traceability_indexes(
     )
     if step20_metadata.get("status") != "completed":
         raise ValueError("Step 25 requires a completed Step 20 reconstruction report.")
-    step20_summary = load_json_value_at_path(step20_report, ("summary",))
+    step20_summary = step20_summary_values[0]
     if not isinstance(step20_summary, dict):
         raise ValueError("Step 20 summary must be an object.")
     if int(step20_summary.get("error_count", -1)) != 0:
@@ -554,26 +619,6 @@ def load_traceability_indexes(
         raise ValueError(
             "Step 25 requires Step 20 network_protocol_validation_error_count = 0."
         )
-
-    tcp_translation_by_packet: dict[str, dict[str, Any]] = {}
-    for packet_result in iter_json_array_at_path(step20_report, ("packet_results",)):
-        if not isinstance(packet_result, dict):
-            raise ValueError("Step 20 packet_results contains a non-object value.")
-        if packet_result.get("status") != "reconstructed":
-            raise ValueError(
-                f"Step 25 cannot audit a failed Step 20 packet result: "
-                f"{packet_result.get('packet_id')!r}."
-            )
-        translation = packet_result.get("tcp_sequence_translation")
-        if not isinstance(translation, dict):
-            continue
-        if (
-            int(translation.get("sequence_delta", 0) or 0) != 0
-            or int(translation.get("acknowledgement_delta", 0) or 0) != 0
-            or translation.get("original_sack_options")
-            != translation.get("reconstructed_sack_options")
-        ):
-            tcp_translation_by_packet[str(packet_result.get("packet_id"))] = translation
 
     return {
         "accepted_packet_ids": accepted_packet_ids,
@@ -632,10 +677,10 @@ def build_changed_fields(
     llm_materialization_accepted = packet_id in indexes["accepted_packet_ids"]
 
     if llm_materialization_accepted:
-        for (candidate_packet_id, field), records in sorted(
-            indexes["explicit_headers_by_packet_field"].items()
+        for field, records in sorted(
+            indexes["explicit_headers_by_packet_field"].get(packet_id, {}).items()
         ):
-            if candidate_packet_id != packet_id or field not in changed_physical_fields:
+            if field not in changed_physical_fields:
                 continue
             record = final_record(records)
             append_field_change(
@@ -649,12 +694,11 @@ def build_changed_fields(
                 provenance=record,
             )
 
-        for (candidate_packet_id, field), records in sorted(
-            indexes["derived_headers_by_packet_field"].items()
+        for field, records in sorted(
+            indexes["derived_headers_by_packet_field"].get(packet_id, {}).items()
         ):
             if (
-                candidate_packet_id != packet_id
-                or field not in changed_physical_fields
+                field not in changed_physical_fields
                 or field in attributed_fields
             ):
                 continue
@@ -792,7 +836,7 @@ def build_staged_comparisons(
     )
 
     scapy = import_scapy()
-    PcapReader = scapy["PcapReader"]
+    RawPcapReader = scapy["RawPcapReader"]
     individual_dir = staging_dir / "individual_comparisons"
     individual_dir.mkdir(parents=True, exist_ok=True)
     summary_entries = []
@@ -800,137 +844,163 @@ def build_staged_comparisons(
     seen_dataset_packet_numbers = set()
 
     reference_records = iter_json_array_at_path(reference_json, ("traffic",))
-    with PcapReader(str(pre_pcap)) as pre_reader, PcapReader(str(post_pcap)) as post_reader:
-        rows = zip_longest(reference_records, pre_reader, post_reader, fillvalue=MISSING)
-        for packet_index, (reference_record, pre_scapy_packet, post_scapy_packet) in enumerate(
-            rows, start=1
-        ):
-            missing_sources = [
-                name
-                for name, value in [
-                    ("Step 14 traffic", reference_record),
-                    ("PRE PCAP", pre_scapy_packet),
-                    ("POST PCAP", post_scapy_packet),
-                ]
-                if value is MISSING
-            ]
-            if missing_sources:
-                raise ValueError(
-                    "Step 25 requires equal Step 14/PRE/POST packet counts; "
-                    f"first mismatch at 1-based packet {packet_index}: {missing_sources}."
-                )
-            if not isinstance(reference_record, dict):
-                raise ValueError(f"Step 14 traffic record {packet_index} is not an object.")
-
-            packet_id = str(reference_record.get("packet_id", ""))
-            expected_packet_id = f"packet_{packet_index:06d}"
-            if packet_id != expected_packet_id:
-                raise ValueError(
-                    f"Step 14 packet order mismatch at {packet_index}: "
-                    f"{packet_id!r} != {expected_packet_id!r}."
-                )
-            reduced_packet_index = positive_packet_number(
-                reference_record.get("reduced_packet_index"),
-                "reduced_packet_index",
-                packet_id,
+    pending_writes: set[Future[Any]] = set()
+    with ThreadPoolExecutor(max_workers=12) as json_writer_pool:
+        with RawPcapReader(str(pre_pcap)) as pre_reader, RawPcapReader(
+            str(post_pcap)
+        ) as post_reader:
+            rows = zip_longest(
+                reference_records, pre_reader, post_reader, fillvalue=MISSING
             )
-            if reduced_packet_index != packet_index:
-                raise ValueError(
-                    f"Step 14 reduced_packet_index mismatch for {packet_id!r}: "
-                    f"{reduced_packet_index} != {packet_index}."
-                )
-            dataset_packet_number = positive_packet_number(
-                reference_record.get("original_packet_number"),
-                "original_packet_number",
-                packet_id,
-            )
-            if packet_id in seen_packet_ids:
-                raise ValueError(f"Duplicate Step 14 packet_id: {packet_id!r}.")
-            if dataset_packet_number in seen_dataset_packet_numbers:
-                raise ValueError(
-                    "dataset_pcap_packet_number is ambiguous because Step 14 "
-                    f"original_packet_number={dataset_packet_number} appears more than once."
-                )
-            seen_packet_ids.add(packet_id)
-            seen_dataset_packet_numbers.add(dataset_packet_number)
-
-            tcp_connection_id = reference_record.get("tcp_connection_id")
-            if not isinstance(tcp_connection_id, str) or not tcp_connection_id:
-                raise ValueError(
-                    f"Step 14 packet {packet_id!r} lacks explicit tcp_connection_id."
-                )
-
-            pre_frame = bytes(pre_scapy_packet)
-            post_frame = bytes(post_scapy_packet)
-            pre_structured = structured_packet(pre_frame)
-            post_structured = structured_packet(post_frame)
-            validate_pre_against_step14(reference_record, pre_structured, packet_index)
-            validate_packet_timestamp(
+            for packet_index, (
+                reference_record,
                 pre_scapy_packet,
-                reference_record.get("timestamp_epoch_pcap"),
-                packet_id=packet_id,
-                traffic_version="PRE",
-            )
-            validate_packet_timestamp(
                 post_scapy_packet,
-                reference_record.get("timestamp_epoch_pcap"),
-                packet_id=packet_id,
-                traffic_version="POST",
-            )
-            if immutable_packet_identity(pre_structured) != immutable_packet_identity(
-                post_structured
-            ):
-                raise ValueError(
-                    f"PRE/POST packet order or immutable identity changed at "
-                    f"1-based packet {packet_index} ({packet_id})."
+            ) in enumerate(rows, start=1):
+                missing_sources = [
+                    name
+                    for name, value in [
+                        ("Step 14 traffic", reference_record),
+                        ("PRE PCAP", pre_scapy_packet),
+                        ("POST PCAP", post_scapy_packet),
+                    ]
+                    if value is MISSING
+                ]
+                if missing_sources:
+                    raise ValueError(
+                        "Step 25 requires equal Step 14/PRE/POST packet counts; "
+                        f"first mismatch at 1-based packet {packet_index}: {missing_sources}."
+                    )
+                if not isinstance(reference_record, dict):
+                    raise ValueError(f"Step 14 traffic record {packet_index} is not an object.")
+    
+                packet_id = str(reference_record.get("packet_id", ""))
+                expected_packet_id = f"packet_{packet_index:06d}"
+                if packet_id != expected_packet_id:
+                    raise ValueError(
+                        f"Step 14 packet order mismatch at {packet_index}: "
+                        f"{packet_id!r} != {expected_packet_id!r}."
+                    )
+                reduced_packet_index = positive_packet_number(
+                    reference_record.get("reduced_packet_index"),
+                    "reduced_packet_index",
+                    packet_id,
+                )
+                if reduced_packet_index != packet_index:
+                    raise ValueError(
+                        f"Step 14 reduced_packet_index mismatch for {packet_id!r}: "
+                        f"{reduced_packet_index} != {packet_index}."
+                    )
+                dataset_packet_number = positive_packet_number(
+                    reference_record.get("original_packet_number"),
+                    "original_packet_number",
+                    packet_id,
+                )
+                if packet_id in seen_packet_ids:
+                    raise ValueError(f"Duplicate Step 14 packet_id: {packet_id!r}.")
+                if dataset_packet_number in seen_dataset_packet_numbers:
+                    raise ValueError(
+                        "dataset_pcap_packet_number is ambiguous because Step 14 "
+                        f"original_packet_number={dataset_packet_number} appears more than once."
+                    )
+                seen_packet_ids.add(packet_id)
+                seen_dataset_packet_numbers.add(dataset_packet_number)
+    
+                tcp_connection_id = reference_record.get("tcp_connection_id")
+                if not isinstance(tcp_connection_id, str) or not tcp_connection_id:
+                    raise ValueError(
+                        f"Step 14 packet {packet_id!r} lacks explicit tcp_connection_id."
+                    )
+    
+                pre_frame, pre_packet_metadata = pre_scapy_packet
+                post_frame, post_packet_metadata = post_scapy_packet
+                pre_frame = bytes(pre_frame)
+                post_frame = bytes(post_frame)
+                pre_structured = structured_packet(pre_frame)
+                post_structured = structured_packet(post_frame)
+                validate_pre_against_step14(reference_record, pre_structured, packet_index)
+                validate_packet_timestamp(
+                    pre_packet_metadata,
+                    reference_record.get("timestamp_epoch_pcap"),
+                    packet_id=packet_id,
+                    traffic_version="PRE",
+                )
+                validate_packet_timestamp(
+                    post_packet_metadata,
+                    reference_record.get("timestamp_epoch_pcap"),
+                    packet_id=packet_id,
+                    traffic_version="POST",
+                )
+                if immutable_packet_identity(pre_structured) != immutable_packet_identity(
+                    post_structured
+                ):
+                    raise ValueError(
+                        f"PRE/POST packet order or immutable identity changed at "
+                        f"1-based packet {packet_index} ({packet_id})."
+                    )
+    
+                if pre_frame == post_frame:
+                    continue
+    
+                changed_fields = build_changed_fields(
+                    packet_id=packet_id,
+                    pre_packet=pre_structured,
+                    post_packet=post_structured,
+                    indexes=indexes,
+                )
+                comparison_id = f"packet_comparison_{len(summary_entries) + 1:06d}"
+                modification_scope = derive_modification_scope(changed_fields)
+                detail_relative_path = (
+                    Path("individual_comparisons") / f"{comparison_id}.json"
+                )
+                detail = {
+                    "schema_version": COMPARISON_SCHEMA_VERSION,
+                    "comparison_id": comparison_id,
+                    "packet_identity": {
+                        "packet_id": packet_id,
+                        "tcp_connection_id": tcp_connection_id,
+                        "dataset_pcap_packet_number": dataset_packet_number,
+                        "pre_pcap_packet_number": packet_index,
+                        "post_pcap_packet_number": packet_index,
+                        "pre_frame_sha256": sha256_bytes(pre_frame),
+                        "post_frame_sha256": sha256_bytes(post_frame),
+                    },
+                    "modification_scope": modification_scope,
+                    "pre_packet": {
+                        "raw_packet_hex": pre_frame.hex(),
+                        "structured_packet": pre_structured,
+                    },
+                    "post_packet": {
+                        "raw_packet_hex": post_frame.hex(),
+                        "structured_packet": post_structured,
+                    },
+                    "changed_fields": changed_fields,
+                }
+                pending_writes.add(
+                    json_writer_pool.submit(
+                        write_json,
+                        staging_dir / detail_relative_path,
+                        detail,
+                    )
+                )
+                if len(pending_writes) >= 192:
+                    completed, pending_writes = wait(
+                        pending_writes,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for completed_write in completed:
+                        completed_write.result()
+                summary_entries.append(
+                    {
+                        "comparison_id": comparison_id,
+                        "modification_scope": modification_scope,
+                        "changed_field_count": len(changed_fields),
+                        "comparison_artifact": detail_relative_path.as_posix(),
+                    }
                 )
 
-            if pre_frame == post_frame:
-                continue
-
-            changed_fields = build_changed_fields(
-                packet_id=packet_id,
-                pre_packet=pre_structured,
-                post_packet=post_structured,
-                indexes=indexes,
-            )
-            comparison_id = f"packet_comparison_{len(summary_entries) + 1:06d}"
-            modification_scope = derive_modification_scope(changed_fields)
-            detail_relative_path = (
-                Path("individual_comparisons") / f"{comparison_id}.json"
-            )
-            detail = {
-                "schema_version": COMPARISON_SCHEMA_VERSION,
-                "comparison_id": comparison_id,
-                "packet_identity": {
-                    "packet_id": packet_id,
-                    "tcp_connection_id": tcp_connection_id,
-                    "dataset_pcap_packet_number": dataset_packet_number,
-                    "pre_pcap_packet_number": packet_index,
-                    "post_pcap_packet_number": packet_index,
-                    "pre_frame_sha256": sha256_bytes(pre_frame),
-                    "post_frame_sha256": sha256_bytes(post_frame),
-                },
-                "modification_scope": modification_scope,
-                "pre_packet": {
-                    "raw_packet_hex": pre_frame.hex(),
-                    "structured_packet": pre_structured,
-                },
-                "post_packet": {
-                    "raw_packet_hex": post_frame.hex(),
-                    "structured_packet": post_structured,
-                },
-                "changed_fields": changed_fields,
-            }
-            write_json(staging_dir / detail_relative_path, detail)
-            summary_entries.append(
-                {
-                    "comparison_id": comparison_id,
-                    "modification_scope": modification_scope,
-                    "changed_field_count": len(changed_fields),
-                    "comparison_artifact": detail_relative_path.as_posix(),
-                }
-            )
+        for pending_write in pending_writes:
+            pending_write.result()
 
     manifest = {
         "metadata": {

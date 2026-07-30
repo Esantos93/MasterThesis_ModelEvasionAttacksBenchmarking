@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterator, TextIO
+from typing import Any, Callable, Iterator, TextIO
 
 
 class JsonStreamReader:
@@ -47,6 +47,25 @@ class JsonStreamReader:
         actual = self.get()
         if actual != expected:
             raise ValueError(f"Expected JSON token {expected!r}, found {actual!r}.")
+
+
+# This function decodes one value directly from the buffered stream.
+def decode_json_value(reader: JsonStreamReader) -> Any:
+    reader.skip_whitespace()
+    decoder = json.JSONDecoder()
+    while True:
+        try:
+            value, end_position = decoder.raw_decode(
+                reader.buffer,
+                reader.position,
+            )
+        except json.JSONDecodeError:
+            if reader.eof:
+                raise ValueError("Invalid or incomplete JSON value in stream.")
+            reader._fill()
+            continue
+        reader.position = end_position
+        return value
 
 
 # This function consumes one complete JSON value while optionally retaining its text.
@@ -171,8 +190,7 @@ def iter_json_array_at_path(
             return
 
         while True:
-            item_text = read_json_value_text(reader, collect=True)
-            yield json.loads(item_text)
+            yield decode_json_value(reader)
             reader.skip_whitespace()
             delimiter = reader.get()
             if delimiter == "]":
@@ -181,3 +199,80 @@ def iter_json_array_at_path(
                 raise ValueError(
                     f"Expected ',' or ']' after JSON array element, found {delimiter!r}."
                 )
+
+
+# This function consumes selected members from one object in a single file pass.
+def consume_selected_object_members(
+    path: str | Path,
+    member_path: tuple[str, ...],
+    *,
+    value_handlers: dict[str, Callable[[Any], None]] | None = None,
+    array_item_handlers: dict[str, Callable[[Any], None]] | None = None,
+) -> set[str]:
+    value_handlers = value_handlers or {}
+    array_item_handlers = array_item_handlers or {}
+    requested_members = set(value_handlers) | set(array_item_handlers)
+    if not requested_members:
+        raise ValueError("At least one selected JSON object member is required.")
+
+    seen_members: set[str] = set()
+    with Path(path).open("r", encoding="utf-8-sig") as input_file:
+        reader = JsonStreamReader(input_file)
+        if member_path:
+            locate_json_path(reader, member_path)
+        reader.expect("{")
+        reader.skip_whitespace()
+        if reader.peek() == "}":
+            reader.get()
+        else:
+            while True:
+                key_text = read_json_value_text(reader, collect=True)
+                key = json.loads(key_text)
+                if not isinstance(key, str):
+                    raise ValueError("JSON object key is not a string.")
+                reader.expect(":")
+
+                if key in value_handlers:
+                    value_handlers[key](
+                        json.loads(read_json_value_text(reader, collect=True))
+                    )
+                    seen_members.add(key)
+                elif key in array_item_handlers:
+                    reader.expect("[")
+                    reader.skip_whitespace()
+                    if reader.peek() == "]":
+                        reader.get()
+                    else:
+                        while True:
+                            array_item_handlers[key](decode_json_value(reader))
+                            reader.skip_whitespace()
+                            array_delimiter = reader.get()
+                            if array_delimiter == "]":
+                                break
+                            if array_delimiter != ",":
+                                raise ValueError(
+                                    "Expected ',' or ']' after JSON array element, "
+                                    f"found {array_delimiter!r}."
+                                )
+                    seen_members.add(key)
+                else:
+                    read_json_value_text(reader, collect=False)
+
+                if seen_members == requested_members:
+                    break
+                reader.skip_whitespace()
+                delimiter = reader.get()
+                if delimiter == "}":
+                    break
+                if delimiter != ",":
+                    raise ValueError(
+                        f"Expected ',' or '}}' after JSON member, found {delimiter!r}."
+                    )
+
+    missing_members = requested_members - seen_members
+    if missing_members:
+        raise KeyError(
+            f"Selected JSON members were not found at {member_path!r}: "
+            f"{sorted(missing_members)}."
+        )
+    return seen_members
