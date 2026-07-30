@@ -43,7 +43,7 @@ STEP17_RUN_ID = "step17_llm_outputs_run_20260701_084630_baseline004_full"
 POST_RUN_LABEL = ""
 
 START_STEP = 18
-END_STEP = 24
+END_STEP = 25
 
 DRY_RUN = False
 
@@ -208,6 +208,16 @@ def maybe_run(step: int, command: list[str], capture_post_run_label: bool = Fals
     return run_command(step, command, capture_post_run_label=capture_post_run_label)
 
 
+def build_step25_command(*, python_command: list[str], config_path: Path) -> list[str]:
+    """Build the Step 25 command without duplicating subprocess execution."""
+
+    return python_command + [
+        "step_25_packet_comparison/compare_packets.py",
+        "--config",
+        str(config_path),
+    ]
+
+
 def main() -> None:
     check_exists(PIPELINE_ROOT, "pipeline root")
     check_exists(CONFIG_PATH, "config")
@@ -224,17 +234,20 @@ def main() -> None:
     model = llm["model_name"]
 
     reference_json = experiment_root / "04_packet_json" / "selected_packet_records.json"
-    prompt_root = resolve_step16_prompt_root(
-        experiment_root=experiment_root,
-        grouping_policy=grouping_policy,
-        step16_run_id=STEP16_RUN_ID,
-    )
-    step17_run_root = resolve_step17_model_root(
-        experiment_root=experiment_root,
-        grouping_policy=grouping_policy,
-        model=model,
-        step17_run_id=STEP17_RUN_ID,
-    )
+    prompt_root = None
+    step17_run_root = None
+    if START_STEP <= 18 <= END_STEP:
+        prompt_root = resolve_step16_prompt_root(
+            experiment_root=experiment_root,
+            grouping_policy=grouping_policy,
+            step16_run_id=STEP16_RUN_ID,
+        )
+        step17_run_root = resolve_step17_model_root(
+            experiment_root=experiment_root,
+            grouping_policy=grouping_policy,
+            model=model,
+            step17_run_id=STEP17_RUN_ID,
+        )
     merged_traffic = (
         experiment_root
         / "08_merged_outputs"
@@ -256,14 +269,16 @@ def main() -> None:
     print(f"Experiment config label: {experiment_config_label}")
     print(f"Grouping output label: {grouping_policy}")
     print(f"Model: {model}")
-    print(f"Step 16 prompt root: {prompt_root}")
-    print(f"Step 17 run root: {step17_run_root}")
+    print(f"Step 16 prompt root: {prompt_root or 'not required by selected steps'}")
+    print(f"Step 17 run root: {step17_run_root or 'not required by selected steps'}")
     print(f"Steps: {START_STEP}-{END_STEP}")
     print(f"Dry run: {DRY_RUN}")
 
     check_exists(experiment_root, "experiment root")
 
     if START_STEP <= 18 <= END_STEP:
+        assert step17_run_root is not None
+        assert prompt_root is not None
         check_exists(step17_run_root, "Step 17 run root")
         check_exists(reference_json, "Step 14 reference JSON")
         check_exists(prompt_root, "Step 16 prompts root")
@@ -367,6 +382,14 @@ def main() -> None:
             "--config",
             config,
         ],
+    )
+
+    maybe_run(
+        25,
+        build_step25_command(
+            python_command=py,
+            config_path=CONFIG_PATH,
+        ),
     )
 
     print("\nPipeline 2 automation completed.")
