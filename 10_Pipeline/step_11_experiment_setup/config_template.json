@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "experiment_id": "exp_cicids2017_<experiment_name>",
-    "description": "Short description of the experiment objective, independent variable, modification strategy, and contract.",
+    "experiment_id": "",
+    "description": "",
     "output_root": "/home/santos/Experiments"
   },
   "dataset": {
@@ -19,8 +19,8 @@
     "config_path": "/usr/local/etc/snort/snort.lua",
     "enable_ruleset": true,
     "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
-    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states",
-    "detector_policy_label": "security-ips",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states",
+    "detector_policy_label": "max-detect-ips",
     "detection_policy_options": [
       {
         "label": "connectivity-ips",
@@ -45,41 +45,32 @@
     "enable_builtin_rules": true
   },
   "llm": {
-    "model_name": "Llama-3.1-8B-Instruct",
-    "model_path": "/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+    "model_name": "",
+    "model_path": "",
     "prompt_version": "compact_patch_prompting_v2",
-    "prompt_input_json_data_profile": "baseline_input_profile_v1",
-    "prompt_instructions_profile": "baseline_instructions_profile_v1",
+    "prompt_input_json_data_profile": "",
+    "prompt_instructions_profile": "",
     "temperature": 0.0,
     "top_p": 0.95,
-    "prompt_target_context": 4096,
-    "prompt_template_overhead_tokens": 500,
-    "runtime_max_model_len": 12288,
+    "prompt_target_context": null,
+    "runtime_max_model_len": null,
     "token_budget": {
       "policy": "compact_patch_token_budget_v2",
-      "chars_per_token_estimate": 3.0,
-      "output_token_estimation_safety_factor": 1.2
+      "chars_per_token_estimate": null,
+      "output_token_estimation_safety_factor": null
     },
-    "small_payload_min_bytes": 64,
-    "small_payload_max_bytes": 512,
-    "small_full_token_budget_fraction": 0.05,
     "payload_window_left_context_bytes": 128,
-    "payload_window_editable_center_bytes": 512,
     "payload_window_right_context_bytes": 128
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "<experiment_config_label>",
-    "experiment_config_label_options": [
-      "<experiment_config_label>"
-    ],
-    "grouping_policy": "fixed_packet_count",
+    "experiment_config_label": "",
+    "experiment_config_label_options": [],
+    "grouping_policy": "",
     "grouping_unit": "physical_packet",
-    "group_size_packets": 6,
-    "modification_strategy": "header_only_strategy_v1",
-    "header_editability_policy": "conservative_header_editability_v1",
+    "modification_strategy": "",
+    "header_editability_policy": "",
     "pre_llm_traffic_selection_policy": "conservative_v1",
-    "post_llm_traffic_validation_policy": "reject_invalid_v1",
-    "signature_mutation_weight": 0.0
+    "post_llm_traffic_validation_policy": "reject_invalid_v1"
   }
 }

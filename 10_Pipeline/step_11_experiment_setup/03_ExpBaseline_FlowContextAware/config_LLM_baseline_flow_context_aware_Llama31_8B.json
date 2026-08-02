@@ -53,18 +53,13 @@
     "temperature": 0.0,
     "top_p": 0.95,
     "prompt_target_context": 4096,
-    "prompt_template_overhead_tokens": 500,
     "runtime_max_model_len": 12288,
     "token_budget": {
       "policy": "compact_patch_token_budget_v2",
       "chars_per_token_estimate": 3.0,
       "output_token_estimation_safety_factor": 1.2
     },
-    "small_payload_min_bytes": 64,
-    "small_payload_max_bytes": 512,
-    "small_full_token_budget_fraction": 0.05,
     "payload_window_left_context_bytes": 128,
-    "payload_window_editable_center_bytes": 512,
     "payload_window_right_context_bytes": 128
   },
   "pipeline": {
@@ -78,7 +73,6 @@
     "modification_strategy": "header_only_strategy_v1",
     "header_editability_policy": "conservative_header_editability_v1",
     "pre_llm_traffic_selection_policy": "conservative_v1",
-    "post_llm_traffic_validation_policy": "reject_invalid_v1",
-    "signature_mutation_weight": 0.0
+    "post_llm_traffic_validation_policy": "reject_invalid_v1"
   }
 }
