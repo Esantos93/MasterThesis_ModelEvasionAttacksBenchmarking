@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import sys
 import traceback
@@ -31,8 +32,10 @@ from step_25_packet_comparison.json_stream import (
 )
 
 
-MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v1"
-COMPARISON_SCHEMA_VERSION = "packet_comparison_v1"
+MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v2"
+LEGACY_MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v1"
+COMPARISON_SCHEMA_VERSION = "packet_comparison_v2"
+LEGACY_COMPARISON_SCHEMA_VERSION = "packet_comparison_v1"
 STEP14_SCHEMA_VERSION = "packet_json_v4"
 STEP18_SCHEMA_VERSION = "patch_applied_traffic_v5"
 STEP18_PATCH_SCHEMA_VERSION = "patch_application_report_v5"
@@ -54,6 +57,12 @@ MODIFICATION_SCOPES = {
     frozenset(
         {"llm_explicit", "pipeline_derived", "protocol_recomputed"}
     ): "llm_pipeline_protocol",
+}
+LLM_TARGET_SURFACES = {
+    frozenset(): "no_direct_llm_edit",
+    frozenset({"headers"}): "headers_only",
+    frozenset({"payload"}): "payload_only",
+    frozenset({"headers", "payload"}): "headers_and_payload",
 }
 PROTOCOL_RECOMPUTED_FIELDS = {
     "packet.length_bytes",
@@ -236,6 +245,21 @@ def structured_packet(frame: bytes) -> dict[str, Any]:
     }
 
 
+# This function creates the numbered human-facing packet view used in Step 25 details.
+def display_structured_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "01_captured_frame_byte_coverage_complete": packet[
+            "captured_frame_bytes_accounted_for"
+        ],
+        "02_packet_length_bytes": packet["packet_length_bytes"],
+        "03_ethernet_header": packet["ethernet_header"],
+        "04_ipv4_header": packet["ipv4_header"],
+        "05_tcp_header": packet["tcp_header"],
+        "06_payload_hex": packet["payload_hex"],
+        "07_payload_length_bytes": packet["payload_length_bytes"],
+    }
+
+
 # This function returns physical and derived values used for field-level comparison.
 def comparable_field_values(packet: dict[str, Any]) -> dict[str, Any]:
     ipv4 = packet["ipv4_header"]
@@ -410,6 +434,28 @@ def derive_modification_scope(changes: list[dict[str, Any]]) -> str:
     if scope is None:
         raise ValueError(f"Unsupported Step 25 modification-scope combination: {sorted(origins)}")
     return scope
+
+
+# This function classifies only the targets explicitly changed by the LLM.
+def derive_llm_target_surface(changes: list[dict[str, Any]]) -> str:
+    surfaces = set()
+    for change in changes:
+        if change.get("change_origin") != "llm_explicit":
+            continue
+        target_type = change.get("target_type")
+        if target_type == "physical_header_field":
+            surfaces.add("headers")
+        elif target_type == "canonical_payload_range":
+            surfaces.add("payload")
+        else:
+            raise ValueError(
+                "Unsupported explicit LLM target type for surface classification: "
+                f"{target_type!r}."
+            )
+    surface = LLM_TARGET_SURFACES.get(frozenset(surfaces))
+    if surface is None:
+        raise ValueError(f"Unsupported LLM target-surface combination: {surfaces!r}.")
+    return surface
 
 
 # This function assigns stable change ids after deterministic sorting.
@@ -745,41 +791,68 @@ def build_changed_fields(
             "Step 19 validated effective payload projection."
         )
     if payload_changed:
-        seen_logical_edits = set()
+        seen_physical_projections = set()
         for projection in sorted(
             projections,
             key=lambda item: (
                 str(item.get("canonical_region_id", "")),
                 int(item.get("canonical_edit_start_offset_bytes", -1)),
+                int(item.get("payload_start_offset_bytes", -1)),
                 str(item.get("prompt_unit_id", "")),
                 int(item.get("patch_index", 0)),
             ),
         ):
-            key = (
+            logical_key = (
                 str(projection.get("prompt_unit_id")),
                 int(projection.get("patch_index", 0) or 0),
                 str(projection.get("canonical_region_id")),
             )
-            if key in seen_logical_edits:
-                continue
-            logical_edit = indexes["payload_edits_by_key"].get(key)
+            logical_edit = indexes["payload_edits_by_key"].get(logical_key)
             if logical_edit is None:
                 raise ValueError(
                     f"Step 19 payload projection has no matching effective Step 18 "
-                    f"logical edit: packet_id={packet_id!r}, key={key!r}."
+                    f"logical edit: packet_id={packet_id!r}, key={logical_key!r}."
                 )
-            seen_logical_edits.add(key)
+            payload_start = projection.get("payload_start_offset_bytes")
+            physical_replaced_length = projection.get("replaced_length_bytes")
+            if (
+                isinstance(payload_start, bool)
+                or not isinstance(payload_start, int)
+                or payload_start < 0
+                or isinstance(physical_replaced_length, bool)
+                or not isinstance(physical_replaced_length, int)
+                or physical_replaced_length < 0
+            ):
+                raise ValueError(
+                    f"Step 19 payload projection has invalid packet-relative range: "
+                    f"packet_id={packet_id!r}, key={logical_key!r}, "
+                    f"start={payload_start!r}, length={physical_replaced_length!r}."
+                )
+            physical_projection_key = (
+                logical_key,
+                payload_start,
+                physical_replaced_length,
+                str(projection.get("original_segment_hex", "")),
+                str(projection.get("replacement_hex", "")),
+            )
+            if physical_projection_key in seen_physical_projections:
+                continue
+            seen_physical_projections.add(physical_projection_key)
             start = int(logical_edit["canonical_start_offset_bytes"])
-            replaced_length = int(logical_edit["replaced_length_bytes"])
+            canonical_replaced_length = int(logical_edit["replaced_length_bytes"])
             changes.append(
                 {
                     "target_type": "canonical_payload_range",
                     "canonical_region_id": logical_edit["canonical_region_id"],
                     "range_start_bytes": start,
-                    "range_end_bytes": start + replaced_length,
+                    "range_end_bytes": start + canonical_replaced_length,
+                    "packet_payload_range_start_bytes": payload_start,
+                    "packet_payload_range_end_bytes": (
+                        payload_start + physical_replaced_length
+                    ),
                     "change_origin": "llm_explicit",
-                    "pre_value": logical_edit["original_segment_hex"],
-                    "post_value": logical_edit["replacement_hex"],
+                    "pre_value": projection["original_segment_hex"],
+                    "post_value": projection["replacement_hex"],
                     "prompt_unit_id": logical_edit["prompt_unit_id"],
                     "patch_index": logical_edit["patch_index"],
                 }
@@ -968,11 +1041,15 @@ def build_staged_comparisons(
                     "modification_scope": modification_scope,
                     "pre_packet": {
                         "raw_packet_hex": pre_frame.hex(),
-                        "structured_packet": pre_structured,
+                        "structured_packet": display_structured_packet(
+                            pre_structured
+                        ),
                     },
                     "post_packet": {
                         "raw_packet_hex": post_frame.hex(),
-                        "structured_packet": post_structured,
+                        "structured_packet": display_structured_packet(
+                            post_structured
+                        ),
                     },
                     "changed_fields": changed_fields,
                 }
@@ -994,6 +1071,9 @@ def build_staged_comparisons(
                     {
                         "comparison_id": comparison_id,
                         "modification_scope": modification_scope,
+                        "llm_target_surface": derive_llm_target_surface(
+                            changed_fields
+                        ),
                         "changed_field_count": len(changed_fields),
                         "comparison_artifact": detail_relative_path.as_posix(),
                     }
@@ -1110,6 +1190,118 @@ def compare_packets(
     }
 
 
+# This function rebuilds only the compact index from validated existing details.
+def rebuild_summary_from_existing_details(
+    *,
+    config_path: str | Path,
+    experiment_root: str | Path | None = None,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    config = load_json_config(config_path)
+    validate_config(config)
+    paths = default_paths(config, experiment_root)
+    final_output_dir = (
+        Path(output_dir).expanduser() if output_dir else paths["output_dir"]
+    )
+    summary_path = final_output_dir / "packet_comparisons_summary.json"
+    require_file(summary_path, "existing Step 25 summary")
+    with summary_path.open("r", encoding="utf-8") as input_file:
+        manifest = json.load(input_file)
+    metadata = manifest.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("schema_version") not in {
+        LEGACY_MANIFEST_SCHEMA_VERSION,
+        MANIFEST_SCHEMA_VERSION,
+    }:
+        raise ValueError("Existing Step 25 summary has an unsupported schema.")
+    if metadata.get("experiment_id") != config["experiment"]["experiment_id"]:
+        raise ValueError("Existing Step 25 summary experiment_id does not match config.")
+    if (
+        metadata.get("experiment_config_label")
+        != config["pipeline"]["experiment_config_label"]
+    ):
+        raise ValueError(
+            "Existing Step 25 summary experiment_config_label does not match config."
+        )
+    entries = manifest.get("packet_comparisons")
+    if not isinstance(entries, list):
+        raise ValueError("Existing Step 25 packet_comparisons must be a list.")
+
+    rebuilt_entries = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Step 25 summary entry {index} is not an object.")
+        comparison_id = f"packet_comparison_{index:06d}"
+        if entry.get("comparison_id") != comparison_id:
+            raise ValueError(
+                f"Step 25 summary comparison order mismatch at {index}."
+            )
+        relative_artifact = Path(str(entry.get("comparison_artifact", "")))
+        if relative_artifact.is_absolute() or ".." in relative_artifact.parts:
+            raise ValueError(
+                f"Unsafe Step 25 comparison_artifact path: {relative_artifact}."
+            )
+        detail_path = final_output_dir / relative_artifact
+        require_file(detail_path, f"Step 25 detail {comparison_id}")
+        with detail_path.open("r", encoding="utf-8") as input_file:
+            detail = json.load(input_file)
+        if (
+            detail.get("schema_version")
+            not in {
+                LEGACY_COMPARISON_SCHEMA_VERSION,
+                COMPARISON_SCHEMA_VERSION,
+            }
+            or detail.get("comparison_id") != comparison_id
+        ):
+            raise ValueError(f"Invalid Step 25 detail identity: {detail_path}.")
+        changed_fields = detail.get("changed_fields")
+        if not isinstance(changed_fields, list) or not changed_fields:
+            raise ValueError(f"Step 25 detail has no changed_fields: {detail_path}.")
+        modification_scope = derive_modification_scope(changed_fields)
+        if (
+            detail.get("modification_scope") != modification_scope
+            or entry.get("modification_scope") != modification_scope
+        ):
+            raise ValueError(f"Step 25 scope mismatch: {detail_path}.")
+        if entry.get("changed_field_count") != len(changed_fields):
+            raise ValueError(f"Step 25 changed-field count mismatch: {detail_path}.")
+        rebuilt_entries.append(
+            {
+                "comparison_id": comparison_id,
+                "modification_scope": modification_scope,
+                "llm_target_surface": derive_llm_target_surface(changed_fields),
+                "changed_field_count": len(changed_fields),
+                "comparison_artifact": relative_artifact.as_posix(),
+            }
+        )
+
+    rebuilt_metadata = {
+        **metadata,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "generated_at_utc": utc_now(),
+        "comparison_count": len(rebuilt_entries),
+    }
+    rebuilt_manifest = {
+        "metadata": rebuilt_metadata,
+        "packet_comparisons": rebuilt_entries,
+    }
+    temporary_path = summary_path.with_name(
+        f".{summary_path.name}.staging-{uuid.uuid4().hex}"
+    )
+    try:
+        write_json(temporary_path, rebuilt_manifest)
+        temporary_path.replace(summary_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return {
+        "output_dir": str(final_output_dir),
+        "summary_path": str(summary_path),
+        "comparison_count": len(rebuilt_entries),
+        "pre_pcap_sha256": rebuilt_metadata["pre_pcap_sha256"],
+        "post_pcap_sha256": rebuilt_metadata["post_pcap_sha256"],
+    }
+
+
 # This function resolves the default Step 25 terminal-log path.
 def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
@@ -1144,6 +1336,11 @@ def parse_cli_args() -> argparse.Namespace:
     add("--step19-report", help="Optional Step 19 validation_report.json path.")
     add("--step20-report", help="Optional Step 20 reconstruction_report.json path.")
     add("--output-dir", help="Optional Step 25 output directory.")
+    add(
+        "--rebuild-summary-only",
+        action="store_true",
+        help="Validate existing details and rebuild only the compact V2 summary.",
+    )
     add("--log-file", help="Optional explicit terminal log file path.")
     return parser.parse_args()
 
@@ -1154,17 +1351,24 @@ def main() -> None:
     log_path = resolve_log_path(args)
     with terminal_log(log_path, banner="Step 25 terminal log"):
         try:
-            result = compare_packets(
-                config_path=args.config,
-                experiment_root=args.experiment_root,
-                reference_json=args.reference_json,
-                pre_pcap=args.pre_pcap,
-                post_pcap=args.post_pcap,
-                step18_merged=args.step18_merged,
-                step19_report=args.step19_report,
-                step20_report=args.step20_report,
-                output_dir=args.output_dir,
-            )
+            if args.rebuild_summary_only:
+                result = rebuild_summary_from_existing_details(
+                    config_path=args.config,
+                    experiment_root=args.experiment_root,
+                    output_dir=args.output_dir,
+                )
+            else:
+                result = compare_packets(
+                    config_path=args.config,
+                    experiment_root=args.experiment_root,
+                    reference_json=args.reference_json,
+                    pre_pcap=args.pre_pcap,
+                    post_pcap=args.post_pcap,
+                    step18_merged=args.step18_merged,
+                    step19_report=args.step19_report,
+                    step20_report=args.step20_report,
+                    output_dir=args.output_dir,
+                )
         except Exception:
             print("Step 25 failed. Traceback follows:", file=sys.stderr)
             traceback.print_exc()

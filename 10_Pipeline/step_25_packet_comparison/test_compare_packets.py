@@ -13,6 +13,8 @@ from step_25_packet_comparison.compare_packets import (
     MANIFEST_SCHEMA_VERSION,
     compare_packets,
     derive_modification_scope,
+    derive_llm_target_surface,
+    rebuild_summary_from_existing_details,
 )
 
 
@@ -232,6 +234,68 @@ class Step25Fixture:
 
 
 class PacketComparisonTests(unittest.TestCase):
+    def test_llm_target_surface_ignores_pipeline_and_protocol_changes(self) -> None:
+        header = {
+            "change_origin": "llm_explicit",
+            "target_type": "physical_header_field",
+        }
+        payload = {
+            "change_origin": "llm_explicit",
+            "target_type": "canonical_payload_range",
+        }
+        downstream = {
+            "change_origin": "pipeline_derived",
+            "target_type": "pipeline_controlled_header_field",
+        }
+        protocol = {
+            "change_origin": "protocol_recomputed",
+            "target_type": "protocol_recomputed_field",
+        }
+        self.assertEqual("headers_only", derive_llm_target_surface([header, protocol]))
+        self.assertEqual("payload_only", derive_llm_target_surface([payload, protocol]))
+        self.assertEqual(
+            "headers_and_payload",
+            derive_llm_target_surface([header, payload, downstream, protocol]),
+        )
+        self.assertEqual(
+            "no_direct_llm_edit",
+            derive_llm_target_surface([downstream, protocol]),
+        )
+
+    def test_summary_only_rebuild_adds_llm_target_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pre = packet_frame(self.scapy, packet_number=1, ttl=64)
+            post = packet_frame(self.scapy, packet_number=1, ttl=63)
+            fixture = self.fixture(
+                Path(temp_dir), pre_packets=[pre], post_packets=[post]
+            )
+            fixture.effective_header_edits = [
+                {
+                    "packet_id": "packet_000001",
+                    "field": "ipv4.ttl",
+                    "prompt_unit_id": "prompt_unit_1",
+                    "patch_index": 1,
+                }
+            ]
+            fixture.run()
+            summary_path = fixture.output_dir / "packet_comparisons_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["metadata"]["schema_version"] = "packet_comparisons_manifest_v1"
+            summary["packet_comparisons"][0].pop("llm_target_surface")
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+            rebuild_summary_from_existing_details(
+                config_path=fixture.config_path,
+                experiment_root=fixture.root,
+                output_dir=fixture.output_dir,
+            )
+            rebuilt = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(MANIFEST_SCHEMA_VERSION, rebuilt["metadata"]["schema_version"])
+            self.assertEqual(
+                "headers_only",
+                rebuilt["packet_comparisons"][0]["llm_target_surface"],
+            )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.scapy = load_scapy()
@@ -340,6 +404,10 @@ class PacketComparisonTests(unittest.TestCase):
                     "patch_index": 2,
                     "canonical_region_id": "canonical_region_1",
                     "canonical_edit_start_offset_bytes": 5,
+                    "payload_start_offset_bytes": 5,
+                    "replaced_length_bytes": 1,
+                    "original_segment_hex": b"a".hex(),
+                    "replacement_hex": b"X".hex(),
                 }
             ]
             fixture.run()
@@ -352,9 +420,29 @@ class PacketComparisonTests(unittest.TestCase):
             self.assertEqual("canonical_region_1", payload_change["canonical_region_id"])
             self.assertEqual(5, payload_change["range_start_bytes"])
             self.assertEqual(6, payload_change["range_end_bytes"])
+            self.assertEqual(
+                5,
+                payload_change["packet_payload_range_start_bytes"],
+            )
+            self.assertEqual(
+                6,
+                payload_change["packet_payload_range_end_bytes"],
+            )
             self.assertEqual("llm_explicit", payload_change["change_origin"])
             self.assertEqual("prompt_payload_1", payload_change["prompt_unit_id"])
             self.assertEqual(2, payload_change["patch_index"])
+            self.assertEqual(
+                [
+                    "01_captured_frame_byte_coverage_complete",
+                    "02_packet_length_bytes",
+                    "03_ethernet_header",
+                    "04_ipv4_header",
+                    "05_tcp_header",
+                    "06_payload_hex",
+                    "07_payload_length_bytes",
+                ],
+                list(detail["pre_packet"]["structured_packet"]),
+            )
 
     def test_pipeline_derived_sequence_translation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
