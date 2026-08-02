@@ -14,6 +14,7 @@ from step_25_packet_comparison.compare_packets import (
     compare_packets,
     derive_modification_scope,
     derive_llm_target_surface,
+    managed_raw_pcap_reader,
     rebuild_summary_from_existing_details,
 )
 
@@ -85,6 +86,33 @@ def packet_record(packet: Any, packet_number: int, dataset_packet_number: int) -
         **facts,
         "packet_length_bytes": len(frame),
     }
+
+
+class RawPcapReaderCompatibilityTests(unittest.TestCase):
+    def test_managed_reader_closes_reader_without_context_manager_protocol(self) -> None:
+        class ReaderWithoutContextManager:
+            def __init__(self, path: str):
+                self.path = path
+                self.closed = False
+
+            def __iter__(self):
+                return iter(())
+
+            def close(self) -> None:
+                self.closed = True
+
+        created: list[ReaderWithoutContextManager] = []
+
+        def factory(path: str) -> ReaderWithoutContextManager:
+            reader = ReaderWithoutContextManager(path)
+            created.append(reader)
+            return reader
+
+        with managed_raw_pcap_reader(factory, Path("fixture.pcap")) as reader:
+            self.assertEqual("fixture.pcap", reader.path)
+            self.assertFalse(reader.closed)
+
+        self.assertTrue(created[0].closed)
 
 
 class Step25Fixture:

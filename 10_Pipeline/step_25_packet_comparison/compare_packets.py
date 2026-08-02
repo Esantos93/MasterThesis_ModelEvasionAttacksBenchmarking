@@ -9,6 +9,7 @@ import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from itertools import zip_longest
@@ -113,6 +114,17 @@ def import_scapy() -> dict[str, Any]:
             "benchmark environment before running this step."
         ) from exc
     return {"RawPcapReader": RawPcapReader}
+
+
+# Scapy releases differ in whether RawPcapReader implements __enter__/__exit__.
+# This adapter relies only on the stable iterator and close() interface.
+@contextmanager
+def managed_raw_pcap_reader(reader_factory: Any, path: Path) -> Iterable[Any]:
+    reader = reader_factory(str(path))
+    try:
+        yield reader
+    finally:
+        reader.close()
 
 
 # This function builds the configured experiment root.
@@ -894,8 +906,10 @@ def build_staged_comparisons(
     reference_records = iter_json_array_at_path(reference_json, ("traffic",))
     pending_writes: set[Future[Any]] = set()
     with ThreadPoolExecutor(max_workers=12) as json_writer_pool:
-        with RawPcapReader(str(pre_pcap)) as pre_reader, RawPcapReader(
-            str(post_pcap)
+        with managed_raw_pcap_reader(
+            RawPcapReader, pre_pcap
+        ) as pre_reader, managed_raw_pcap_reader(
+            RawPcapReader, post_pcap
         ) as post_reader:
             rows = zip_longest(
                 reference_records, pre_reader, post_reader, fillvalue=MISSING
