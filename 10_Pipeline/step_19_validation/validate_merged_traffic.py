@@ -27,9 +27,9 @@ from common.validation_policy import (
 )
 
 
-VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v5"
-VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v5"
-PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v5"
+VALIDATION_REPORT_SCHEMA_VERSION = "merged_traffic_validation_report_v6"
+VALIDATED_TRAFFIC_SCHEMA_VERSION = "validated_modified_traffic_v6"
+PATCH_APPLICATION_SCHEMA_VERSION = "patch_application_report_v6"
 DEFAULT_IMMUTABLE_FIELDS = [
     "packet_id",
     "original_packet_number",
@@ -63,12 +63,12 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
     experiment = config["experiment"]
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
-#This function returns the default Step 19 input and output paths for the active experiment configuration.
-def default_paths(config: dict[str, Any], experiment_config_label: str) -> dict[str, Path]:
+#This function returns the default Step 19 input and output paths for the active experiment.
+def default_paths(config: dict[str, Any]) -> dict[str, Path]:
     experiment_root = build_experiment_root(config)
     return {
-        "input_json": experiment_root / "08_merged_outputs" / experiment_config_label / "merged_modified_traffic.json",
-        "output_dir": experiment_root / "09_validation" / experiment_config_label,
+        "input_json": experiment_root / "08_merged_outputs" / "merged_modified_traffic.json",
+        "output_dir": experiment_root / "09_validation",
         "reference_json": experiment_root / "04_packet_json" / "selected_packet_records.json",
     }
 
@@ -76,18 +76,9 @@ def default_paths(config: dict[str, Any], experiment_config_label: str) -> dict[
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
-
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
     resolve_modification_strategy(config)
     resolve_post_llm_traffic_validation_policy(config)
 
-
-#This function returns the single experiment label configured for this run.
-def experiment_config_label_from_config(config: dict[str, Any]) -> str:
-    return config["pipeline"]["experiment_config_label"]
 
 #This function builds a validation issue record with a standard severity, reason, and message shape.
 def issue(severity: str, reason: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -1508,8 +1499,7 @@ def run_validation(
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
-    paths = default_paths(config, experiment_config_label)
+    paths = default_paths(config)
     input_path = Path(input_json).expanduser() if input_json else paths["input_json"]
     validation_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
     reference_json_path = Path(reference_json).expanduser() if reference_json else paths["reference_json"]
@@ -1537,7 +1527,6 @@ def run_validation(
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
-            "experiment_config_label": experiment_config_label,
             "input_json": str(input_path),
             "reference_json": str(reference_json_path),
             "header_editability_policy": {
@@ -1599,7 +1588,6 @@ def run_validation(
             "schema_version": VALIDATED_TRAFFIC_SCHEMA_VERSION,
             "generated_at_utc": now,
             "experiment_id": config["experiment"]["experiment_id"],
-            "experiment_config_label": experiment_config_label,
             "source_merged_json": str(input_path),
             "validation_report": str(report_path),
             "accepted_packet_count": validation["summary"]["accepted_packet_count"],
@@ -1632,7 +1620,7 @@ def parse_cli_args() -> argparse.Namespace:
     add("--input", dest="input_json", help="Path to Step 18 merged_modified_traffic.json.")
     add("--output-dir", help="Directory where validation outputs will be written.")
     add("--reference-json", help="Optional original Step 14 selected_packet_records.json for immutable checks.")
-    add("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_19_validation/<experiment_config_label>/step_19_validation_<timestamp>.log.")
+    add("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_19_validation/step_19_validation_<timestamp>.log.")
     return parser.parse_args()
 
 
@@ -1641,11 +1629,9 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         return Path(args.log_file).expanduser()
     config = load_json_config(args.config)
-    experiment_config_label = experiment_config_label_from_config(config)
     return default_step_log_path(
         experiment_root=build_experiment_root(config),
         step_name="step_19_validation",
-        branch_label=experiment_config_label,
         filename_prefix="step_19_validation",
     )
 

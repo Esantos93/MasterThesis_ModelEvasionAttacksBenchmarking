@@ -500,12 +500,6 @@ def make_experimental_config(
     token_budget["payload_replacement_size_policy"] = deepcopy(
         EXPERIMENTAL_PAYLOAD_POLICY
     )
-    config["pipeline"]["experiment_config_label"] = (
-        "diag_payload_limit_sensitivity_3x_flow_context_aware_gemma-4-26B-A4B-it"
-    )
-    config["pipeline"]["experiment_config_label_options"] = [
-        config["pipeline"]["experiment_config_label"]
-    ]
     config["diagnostic"] = {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "paired_control_experiment_id": official_config["experiment"][

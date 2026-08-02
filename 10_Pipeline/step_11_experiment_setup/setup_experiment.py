@@ -62,8 +62,6 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         config["pipeline"],
         [
             "target_os",
-            "experiment_config_label",
-            "experiment_config_label_options",
             "grouping_policy",
             "grouping_unit",
             "modification_strategy",
@@ -101,14 +99,6 @@ def validate_config_shape(config: dict[str, Any]) -> None:
         )
     load_header_editability_policy(config, config.get("_config_path", ""))
     resolve_post_llm_traffic_validation_policy(config)
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
-    label_options = config["pipeline"]["experiment_config_label_options"]
-    if not isinstance(label_options, list) or not all(isinstance(item, str) for item in label_options):
-        raise ValueError("pipeline.experiment_config_label_options must be a list of strings.")
-    if experiment_config_label not in label_options:
-        raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
 
 
 def sha256_file(path: Path) -> str:

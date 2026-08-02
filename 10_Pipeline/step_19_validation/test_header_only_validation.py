@@ -93,7 +93,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 "llm_output_failure_groups": [],
             },
             "patch_application": {
-                "schema_version": "patch_application_report_v5",
+                "schema_version": "patch_application_report_v6",
                 "execution_status": "completed",
                 "materialization_success": True,
                 "explicit_header_edits": materialized["explicit_edits"],
@@ -185,7 +185,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             },
             "group_outcomes": {"accepted_groups": [{"prompt_unit_id": "group_000001", "packet_ids": ["packet_000001"]}], "llm_output_failure_groups": []},
             "patch_application": {
-                "schema_version": "patch_application_report_v5",
+                "schema_version": "patch_application_report_v6",
                 "execution_status": "completed",
                 "materialization_success": True,
                 "explicit_header_edits": [],
@@ -283,7 +283,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 "llm_output_failure_groups": [],
             },
             "patch_application": {
-                "schema_version": "patch_application_report_v5",
+                "schema_version": "patch_application_report_v6",
                 "execution_status": "completed",
                 "materialization_success": True,
                 "explicit_header_edits": header_materialized["explicit_edits"],
@@ -330,7 +330,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 ],
             },
             "patch_application": {
-                "schema_version": "patch_application_report_v5",
+                "schema_version": "patch_application_report_v6",
                 "execution_status": "completed",
                 "materialization_success": True,
                 "explicit_header_edits": [],
@@ -411,7 +411,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         explicit_edit["original_value"] = 0
         explicit_edit["constraints"] = {"min": 0, "max": 65535}
         merged = self.v4_merged_from_edits([explicit_edit])
-        merged["patch_application"]["schema_version"] = "patch_application_report_v5"
+        merged["patch_application"]["schema_version"] = "patch_application_report_v6"
 
         result = validate_merged_traffic(
             merged_json=merged,
@@ -445,7 +445,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
 
     def test_v4_reports_malformed_explicit_edit_without_crashing(self) -> None:
         merged = self.v4_merged_from_edits([])
-        merged["patch_application"]["schema_version"] = "patch_application_report_v5"
+        merged["patch_application"]["schema_version"] = "patch_application_report_v6"
         malformed = self.explicit_edit("ipv4.ttl", 1)
         malformed["patch_index"] = None
         merged["patch_application"]["explicit_header_edits"] = [malformed]
@@ -487,7 +487,6 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
                 "llm": {"model_name": "fixture-model"},
                 "pipeline": {
-                    "experiment_config_label": "fixture_v4",
                     "modification_strategy": "header_only_strategy_v1",
                     "header_editability_policy": "conservative_header_editability_v1",
                     "post_llm_traffic_validation_policy": "reject_invalid_v1",
@@ -594,7 +593,6 @@ class HeaderOnlyValidationTests(unittest.TestCase):
             "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
             "llm": {"model_name": "fixture-model"},
             "pipeline": {
-                "experiment_config_label": "fixture_v3",
                 "modification_strategy": strategy,
                 "header_editability_policy": "conservative_header_editability_v1",
                 "post_llm_traffic_validation_policy": "reject_invalid_v1",
@@ -812,8 +810,8 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 payload_hex="001122334455",
             )
 
-        self.assertEqual("patch_applied_traffic_v5", merged["metadata"]["schema_version"])
-        self.assertEqual("patch_application_report_v5", merged["patch_application"]["schema_version"])
+        self.assertEqual("patch_applied_traffic_v6", merged["metadata"]["schema_version"])
+        self.assertEqual("patch_application_report_v6", merged["patch_application"]["schema_version"])
         self.assertEqual(1, report["summary"]["explicit_header_edit_count"])
         self.assertEqual(0, report["summary"]["explicit_payload_edit_count"])
         self.assertEqual(1, merge_result["applied_patch_count"])
@@ -843,7 +841,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 reference_json=temp_dir / "selected_packet_records.json",
             )
 
-        self.assertEqual("patch_applied_traffic_v5", merged["metadata"]["schema_version"])
+        self.assertEqual("patch_applied_traffic_v6", merged["metadata"]["schema_version"])
         self.assertEqual([], merged["patch_application"]["explicit_header_edits"])
         self.assertEqual(1, len(merged["patch_application"]["explicit_payload_edits"]))
         self.assertEqual(1, report["summary"]["explicit_payload_edit_count"])
@@ -995,7 +993,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
                 payload_hex="001122334455",
             )
 
-        self.assertEqual("patch_application_report_v5", merged["patch_application"]["schema_version"])
+        self.assertEqual("patch_application_report_v6", merged["patch_application"]["schema_version"])
         self.assertEqual(1, len(merged["patch_application"]["explicit_header_edits"]))
         self.assertEqual(1, len(merged["patch_application"]["explicit_payload_edits"]))
         self.assertEqual(2, report["summary"]["applied_patch_count"])

@@ -142,7 +142,6 @@ def config(
     pipeline = {
         "grouping_policy": grouping_policy,
         "grouping_unit": "physical_packet",
-        "experiment_config_label": f"test-{grouping_policy}",
         "modification_strategy": modification_strategy,
         "header_editability_policy": header_policy,
     }
@@ -160,11 +159,7 @@ def config(
                 "chars_per_token_estimate": 3.0,
                 "output_token_estimation_safety_factor": 1.2,
             },
-            "small_payload_min_bytes": 64,
-            "small_payload_max_bytes": 512,
-            "small_full_token_budget_fraction": 0.05,
             "payload_window_left_context_bytes": 8,
-            "payload_window_editable_center_bytes": 16,
             "payload_window_right_context_bytes": 8,
         },
         "pipeline": pipeline,

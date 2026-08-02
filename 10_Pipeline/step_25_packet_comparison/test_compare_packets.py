@@ -94,7 +94,6 @@ class Step25Fixture:
         self.post_packets = post_packets
         self.scapy = load_scapy()
         self.experiment_id = "experiment_step25_test"
-        self.label = "step25-test-label"
         self.config_path = root / "config.json"
         self.reference_json = root / "selected_packet_records.json"
         self.pre_pcap = root / "pre.pcap"
@@ -126,9 +125,7 @@ class Step25Fixture:
                         "experiment_id": self.experiment_id,
                         "output_root": str(self.root),
                     },
-                    "pipeline": {
-                        "experiment_config_label": self.label,
-                    },
+                    "pipeline": {},
                 }
             ),
             encoding="utf-8",
@@ -149,14 +146,13 @@ class Step25Fixture:
             json.dumps(
                 {
                     "metadata": {
-                        "schema_version": "patch_applied_traffic_v5",
+                        "schema_version": "patch_applied_traffic_v6",
                         "experiment_id": self.experiment_id,
-                        "experiment_config_label": self.label,
                         "execution_status": "completed",
                         "materialization_success": True,
                     },
                     "patch_application": {
-                        "schema_version": "patch_application_report_v5",
+                        "schema_version": "patch_application_report_v6",
                         "effective_header_edits": self.effective_header_edits,
                         "derived_header_changes": self.derived_header_changes,
                         "payload_edits": self.payload_edits,
@@ -170,9 +166,8 @@ class Step25Fixture:
             json.dumps(
                 {
                     "metadata": {
-                        "schema_version": "merged_traffic_validation_report_v5",
+                        "schema_version": "merged_traffic_validation_report_v6",
                         "experiment_id": self.experiment_id,
-                        "experiment_config_label": self.label,
                     },
                     "summary": {"error_count": 0},
                     "packet_results": [
@@ -195,10 +190,9 @@ class Step25Fixture:
             json.dumps(
                 {
                     "metadata": {
-                        "schema_version": "pcap_reconstruction_report_v6",
+                        "schema_version": "pcap_reconstruction_report_v7",
                         "status": "completed",
                         "experiment_id": self.experiment_id,
-                        "experiment_config_label": self.label,
                     },
                     "summary": {
                         "error_count": 0,

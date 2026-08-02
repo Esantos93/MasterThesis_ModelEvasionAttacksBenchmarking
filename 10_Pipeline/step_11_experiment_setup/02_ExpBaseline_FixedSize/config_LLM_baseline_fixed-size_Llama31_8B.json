@@ -64,10 +64,6 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "baseline_Llama31_8B_headers_only_fixed_size_6",
-    "experiment_config_label_options": [
-      "baseline_Llama31_8B_headers_only_fixed_size_6"
-    ],
     "grouping_policy": "fixed_packet_count",
     "grouping_unit": "physical_packet",
     "group_size_packets": 6,

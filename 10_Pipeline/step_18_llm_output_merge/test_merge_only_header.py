@@ -403,7 +403,6 @@ class HeaderOnlyMergeTests(unittest.TestCase):
             "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
             "llm": {"model_name": "fixture-model"},
             "pipeline": {
-                "experiment_config_label": "fixture_v3",
                 "modification_strategy": "header_only_strategy_v1",
                 "header_editability_policy": "conservative_header_editability_v1",
             },
@@ -498,7 +497,6 @@ class HeaderOnlyMergeTests(unittest.TestCase):
                 "experiment": {"experiment_id": "fixture_exp", "output_root": str(temp_dir)},
                 "llm": {"model_name": "fixture-model"},
                 "pipeline": {
-                    "experiment_config_label": "fixture_v3",
                     "modification_strategy": "canonical_payload_only_strategy_v1",
                     "header_editability_policy": "conservative_header_editability_v1",
                 },
@@ -584,7 +582,7 @@ class HeaderOnlyMergeTests(unittest.TestCase):
                     output_dir=temp_dir / "08_merged_outputs",
                 )
 
-            output_root = temp_dir / "08_merged_outputs" / "fixture-v3"
+            output_root = temp_dir / "08_merged_outputs"
             failed_report = read_json(output_root / "merge_failed_report.json")
             self.assertFalse((output_root / "merged_modified_traffic.json").exists())
             self.assertFalse((output_root / "merge_report.json").exists())

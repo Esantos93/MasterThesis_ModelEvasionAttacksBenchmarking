@@ -35,7 +35,6 @@ def step19_v5_metadata(
     *,
     packet_count: int,
     experiment_id: str = "test-step20-v5",
-    experiment_config_label: str = "test-step20-v5",
     source_merged_json: str = "merged_modified_traffic.json",
     validation_report: str = "validation_report.json",
 ) -> dict:
@@ -43,7 +42,6 @@ def step19_v5_metadata(
         "schema_version": EXPECTED_INPUT_SCHEMA_VERSION,
         "generated_at_utc": "2026-07-26T00:00:00+00:00",
         "experiment_id": experiment_id,
-        "experiment_config_label": experiment_config_label,
         "source_merged_json": source_merged_json,
         "validation_report": validation_report,
         "accepted_packet_count": packet_count,
@@ -710,7 +708,7 @@ class Step19InputSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             validation_report = temp_dir / "validation_report.json"
-            validation_report.write_text(json.dumps({"metadata": {"schema_version": "merged_traffic_validation_report_v5"}}), encoding="utf-8")
+            validation_report.write_text(json.dumps({"metadata": {"schema_version": "merged_traffic_validation_report_v6"}}), encoding="utf-8")
             capabilities = resolve_modification_strategy(
                 {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
             )
@@ -776,7 +774,6 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
                 "output_root": ".",
             },
             "pipeline": {
-                "experiment_config_label": "test-step20-v5",
                 "modification_strategy": strategy,
                 "header_editability_policy": "conservative_header_editability_v1",
                 "post_llm_traffic_validation_policy": "reject_invalid_v1",
@@ -942,7 +939,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         validation_report.write_text(
             json.dumps(
                 {
-                    "metadata": {"schema_version": "merged_traffic_validation_report_v5"},
+                    "metadata": {"schema_version": "merged_traffic_validation_report_v6"},
                     "summary": {
                         "validated_effective_payload_projection_change_count": len(projections),
                     },
@@ -998,7 +995,6 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
             reference_pcap_path=reference_pcap,
             output_pcap_path=output_pcap,
             report_path=report_path,
-            experiment_config_label="test-step20-v5",
         )
         with report_path.open("r", encoding="utf-8") as input_file:
             report = json.load(input_file)
@@ -1015,7 +1011,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         packets = rdpcap(str(output_pcap))
 
         self.assertEqual("completed", result["report"]["metadata"]["status"])
-        self.assertEqual("pcap_reconstruction_report_v6", result["report"]["metadata"]["schema_version"])
+        self.assertEqual("pcap_reconstruction_report_v7", result["report"]["metadata"]["schema_version"])
         self.assertEqual(EXPECTED_INPUT_SCHEMA_VERSION, result["report"]["metadata"]["source_validation_schema_version"])
         self.assertEqual(
             "not_required_by_modification_strategy",

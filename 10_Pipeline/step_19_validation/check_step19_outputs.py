@@ -92,11 +92,6 @@ def parse_args() -> argparse.Namespace:
         help="Experiment root folder.",
     )
     parser.add_argument(
-        "--experiment-config-label",
-        required=True,
-        help="Experiment config label used under 09_validation.",
-    )
-    parser.add_argument(
         "--sample-size",
         type=int,
         default=5,
@@ -108,7 +103,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Ejecuta la comprobacion de outputs del Step 19."""
     args = parse_args()
-    step19_dir = Path(args.experiment_root) / "09_validation" / args.experiment_config_label
+    step19_dir = Path(args.experiment_root) / "09_validation"
     validated, validation_report = print_expected_files(step19_dir)
     summarize_step19(validated=validated, validation_report=validation_report, sample_size=args.sample_size)
 

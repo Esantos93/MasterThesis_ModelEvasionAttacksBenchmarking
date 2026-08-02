@@ -20,7 +20,7 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
-COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v5"
+COMPARISON_SCHEMA_VERSION = "snort_alert_comparison_v6"
 DEFAULT_MATCHING_POLICY = "packet_tcp_conversation"
 SUPPORTED_MATCHING_POLICIES = {"packet", "packet_tcp_conversation"}
 STRICT_DELAYED_EMISSION_FIELDS = (
@@ -60,19 +60,10 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline", "snort"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
     require_keys(config["snort"], ["detector_policy_label"], "snort")
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
     detector_policy_label = config["snort"]["detector_policy_label"]
     if not isinstance(detector_policy_label, str) or not sanitize_name_component(detector_policy_label):
         raise ValueError("snort.detector_policy_label must be a non-empty string.")
-
-
-# This function returns the experiment configuration label fixed in the Step 11 config.
-def experiment_config_label_from_config(config: dict[str, Any]) -> str:
-    return config["pipeline"]["experiment_config_label"]
 
 
 def detector_policy_label_from_config(config: dict[str, Any]) -> str:
@@ -87,17 +78,16 @@ def rules_policy_path_from_config(config: dict[str, Any]) -> str:
 def default_paths(
     config: dict[str, Any],
     detector_policy_label: str,
-    experiment_config_label: str,
     experiment_root_override: str | Path | None = None,
 ) -> dict[str, Path]:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     processed_root = experiment_root / "12_alerts_processed" / detector_policy_label
     pre_dir = processed_root / "pre"
-    post_dir = processed_root / "post" / experiment_config_label
+    post_dir = processed_root / "post"
     comparison_dir = experiment_root / "13_comparison" / detector_policy_label
     return {
         "pre_normalized": pre_dir / "normalized-alerts__traffic-pre.json",
-        "post_normalized": post_dir / f"normalized-alerts__traffic-post__experiment-config-{experiment_config_label}.json",
+        "post_normalized": post_dir / "normalized-alerts__traffic-post.json",
         "comparison_dir": comparison_dir,
     }
 
@@ -125,6 +115,7 @@ def validate_normalization_metadata(
     *,
     artifact_path: Path,
     expected_detector_policy_label: str,
+    expected_experiment_id: str,
 ) -> None:
     metadata = artifact.get("metadata", {})
     if not isinstance(metadata, dict):
@@ -140,6 +131,11 @@ def validate_normalization_metadata(
         raise ValueError(
             "Normalized artifact source_detector_policy_label does not match active config: "
             f"{source_detector_policy_label!r} != {expected_detector_policy_label!r} in {artifact_path}"
+        )
+    if metadata.get("experiment_id") != expected_experiment_id:
+        raise ValueError(
+            "Normalized artifact experiment_id does not match active config: "
+            f"{metadata.get('experiment_id')!r} != {expected_experiment_id!r} in {artifact_path}"
         )
 
 
@@ -711,10 +707,10 @@ def compare_normalized_alerts(
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
+    experiment_id = config["experiment"]["experiment_id"]
     detector_policy_label = detector_policy_label_from_config(config)
     rules_policy_path = rules_policy_path_from_config(config)
-    paths = default_paths(config, detector_policy_label, experiment_config_label, experiment_root)
+    paths = default_paths(config, detector_policy_label, experiment_root)
     pre_path = Path(pre_normalized).expanduser() if pre_normalized else paths["pre_normalized"]
     post_path = Path(post_normalized).expanduser() if post_normalized else paths["post_normalized"]
     comparison_dir = Path(output_dir).expanduser() if output_dir else paths["comparison_dir"]
@@ -725,19 +721,21 @@ def compare_normalized_alerts(
         pre_artifact,
         artifact_path=pre_path,
         expected_detector_policy_label=detector_policy_label,
+        expected_experiment_id=experiment_id,
     )
     validate_normalization_metadata(
         post_artifact,
         artifact_path=post_path,
         expected_detector_policy_label=detector_policy_label,
+        expected_experiment_id=experiment_id,
     )
     comparison = compare_alerts_by_comparable_unit(pre_alerts, post_alerts, matching_policy)
     per_signature_summary = summarize_by_signature(pre_alerts, post_alerts)
     comparison_dir.mkdir(parents=True, exist_ok=True)
 
-    comparison_path = comparison_dir / f"alert-comparison__experiment-config-{experiment_config_label}.json"
-    signature_summary_path = comparison_dir / f"signature-comparison-summary__experiment-config-{experiment_config_label}.json"
-    metadata_path = comparison_dir / f"comparison-metadata__experiment-config-{experiment_config_label}.json"
+    comparison_path = comparison_dir / "alert-comparison.json"
+    signature_summary_path = comparison_dir / "signature-comparison-summary.json"
+    metadata_path = comparison_dir / "comparison-metadata.json"
     metadata = {
         "schema_version": COMPARISON_SCHEMA_VERSION,
         "generated_at_utc": utc_now(),
@@ -745,7 +743,6 @@ def compare_normalized_alerts(
         "config_source": config.get("_config_path", ""),
         "detector_policy_label": detector_policy_label,
         "rules_policy_path": rules_policy_path,
-        "experiment_config_label": experiment_config_label,
         "source_pre_normalized_alerts": str(pre_path),
         "source_post_normalized_alerts": str(post_path),
         "comparison_policy": {

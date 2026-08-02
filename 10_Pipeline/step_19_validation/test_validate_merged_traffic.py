@@ -81,7 +81,7 @@ def payload_patch_application(originals: dict[str, dict], edits: list[dict]) -> 
     materialized = materialize_payload_edits(originals, edits)
     return (
         {
-            "schema_version": "patch_application_report_v5",
+            "schema_version": "patch_application_report_v6",
             "execution_status": "completed",
             "materialization_success": True,
             "explicit_header_edits": [],
@@ -110,7 +110,7 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
                 "traffic": [merged_record],
                 "group_outcomes": group_outcomes or {},
                 "patch_application": {
-                    "schema_version": "patch_application_report_v5",
+                    "schema_version": "patch_application_report_v6",
                     "execution_status": "completed",
                     "materialization_success": True,
                     "explicit_header_edits": [],
@@ -167,7 +167,7 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
                     "traffic": [dict(reference)],
                     "group_outcomes": {},
                     "patch_application": {
-                        "schema_version": "patch_application_report_v5",
+                        "schema_version": "patch_application_report_v6",
                         "execution_status": "completed",
                         "materialization_success": True,
                     },
@@ -267,7 +267,7 @@ class UncoveredPacketClassificationTests(unittest.TestCase):
                     "traffic": [dict(reference)],
                     "group_outcomes": {},
                     "patch_application": {
-                        "schema_version": "patch_application_report_v5",
+                        "schema_version": "patch_application_report_v6",
                         "execution_status": "failed",
                         "materialization_success": False,
                         "explicit_header_edits": [],
@@ -366,7 +366,7 @@ class LlmOutputFailureRollbackTests(unittest.TestCase):
             traffic=[deepcopy(original)],
             originals={"packet_011": original},
             patch_application={
-                "schema_version": "patch_application_report_v5",
+                "schema_version": "patch_application_report_v6",
                 "execution_status": "completed",
                 "materialization_success": True,
                 "explicit_header_edits": [],

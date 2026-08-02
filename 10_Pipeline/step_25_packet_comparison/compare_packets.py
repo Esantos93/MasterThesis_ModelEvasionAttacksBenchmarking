@@ -32,15 +32,15 @@ from step_25_packet_comparison.json_stream import (
 )
 
 
-MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v2"
-LEGACY_MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v1"
+MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v3"
+LEGACY_MANIFEST_SCHEMA_VERSIONS = {"packet_comparisons_manifest_v1", "packet_comparisons_manifest_v2"}
 COMPARISON_SCHEMA_VERSION = "packet_comparison_v2"
 LEGACY_COMPARISON_SCHEMA_VERSION = "packet_comparison_v1"
 STEP14_SCHEMA_VERSION = "packet_json_v4"
-STEP18_SCHEMA_VERSION = "patch_applied_traffic_v5"
-STEP18_PATCH_SCHEMA_VERSION = "patch_application_report_v5"
-STEP19_SCHEMA_VERSION = "merged_traffic_validation_report_v5"
-STEP20_SCHEMA_VERSION = "pcap_reconstruction_report_v6"
+STEP18_SCHEMA_VERSION = "patch_applied_traffic_v6"
+STEP18_PATCH_SCHEMA_VERSION = "patch_application_report_v6"
+STEP19_SCHEMA_VERSION = "merged_traffic_validation_report_v6"
+STEP20_SCHEMA_VERSION = "pcap_reconstruction_report_v7"
 PACKET_CORRESPONDENCE_POLICY = "same_order_and_packet_count_v1"
 CHANGE_ORIGINS = {
     "llm_explicit",
@@ -125,10 +125,6 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
-    label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(label, str) or not label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
 
 
 # This function resolves Step 25's canonical upstream and output paths.
@@ -141,7 +137,6 @@ def default_paths(
         if experiment_root_override
         else build_experiment_root(config)
     )
-    label = config["pipeline"]["experiment_config_label"]
     return {
         "experiment_root": experiment_root,
         "reference_json": experiment_root
@@ -152,19 +147,15 @@ def default_paths(
         / "selected_malicious_traffic.pcap",
         "step18_merged": experiment_root
         / "08_merged_outputs"
-        / label
         / "merged_modified_traffic.json",
         "step19_report": experiment_root
         / "09_validation"
-        / label
         / "validation_report.json",
         "step20_report": experiment_root
         / "10_reconstructed_pcap"
-        / label
         / "reconstruction_report.json",
         "post_pcap": experiment_root
         / "10_reconstructed_pcap"
-        / label
         / "modified_traffic.pcap",
         "output_dir": experiment_root / "15_packet_comparisons",
     }
@@ -195,27 +186,17 @@ def require_schema(
     return metadata
 
 
-# This function verifies that one artifact belongs to the active experiment branch.
+# This function verifies that one artifact belongs to the active experiment.
 def validate_artifact_identity(
     metadata: dict[str, Any],
     *,
     experiment_id: str,
-    experiment_config_label: str | None,
     description: str,
 ) -> None:
     if metadata.get("experiment_id") != experiment_id:
         raise ValueError(
             f"{description} experiment_id mismatch: "
             f"{metadata.get('experiment_id')!r} != {experiment_id!r}."
-        )
-    if (
-        experiment_config_label is not None
-        and metadata.get("experiment_config_label") != experiment_config_label
-    ):
-        raise ValueError(
-            f"{description} experiment_config_label mismatch: "
-            f"{metadata.get('experiment_config_label')!r} != "
-            f"{experiment_config_label!r}."
         )
 
 
@@ -490,7 +471,6 @@ def load_traceability_indexes(
     step19_report: Path,
     step20_report: Path,
     experiment_id: str,
-    experiment_config_label: str,
 ) -> dict[str, Any]:
     step18_metadata = require_schema(
         load_json_value_at_path(step18_merged, ("metadata",)),
@@ -500,7 +480,6 @@ def load_traceability_indexes(
     validate_artifact_identity(
         step18_metadata,
         experiment_id=experiment_id,
-        experiment_config_label=experiment_config_label,
         description="Step 18 merged traffic",
     )
     if (
@@ -602,7 +581,6 @@ def load_traceability_indexes(
     validate_artifact_identity(
         step19_metadata,
         experiment_id=experiment_id,
-        experiment_config_label=experiment_config_label,
         description="Step 19 validation report",
     )
     step19_summary = step19_summary_values[0]
@@ -651,7 +629,6 @@ def load_traceability_indexes(
     validate_artifact_identity(
         step20_metadata,
         experiment_id=experiment_id,
-        experiment_config_label=experiment_config_label,
         description="Step 20 reconstruction report",
     )
     if step20_metadata.get("status") != "completed":
@@ -889,7 +866,6 @@ def build_staged_comparisons(
     staging_dir: Path,
 ) -> dict[str, Any]:
     experiment_id = config["experiment"]["experiment_id"]
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
     step14_metadata = require_schema(
         load_json_value_at_path(reference_json, ("metadata",)),
         expected=STEP14_SCHEMA_VERSION,
@@ -905,7 +881,6 @@ def build_staged_comparisons(
         step19_report=step19_report,
         step20_report=step20_report,
         experiment_id=experiment_id,
-        experiment_config_label=experiment_config_label,
     )
 
     scapy = import_scapy()
@@ -1086,7 +1061,6 @@ def build_staged_comparisons(
         "metadata": {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "experiment_id": experiment_id,
-            "experiment_config_label": experiment_config_label,
             "generated_at_utc": utc_now(),
             "comparison_count": len(summary_entries),
             "pre_pcap_path": str(pre_pcap),
@@ -1209,19 +1183,12 @@ def rebuild_summary_from_existing_details(
         manifest = json.load(input_file)
     metadata = manifest.get("metadata")
     if not isinstance(metadata, dict) or metadata.get("schema_version") not in {
-        LEGACY_MANIFEST_SCHEMA_VERSION,
+        *LEGACY_MANIFEST_SCHEMA_VERSIONS,
         MANIFEST_SCHEMA_VERSION,
     }:
         raise ValueError("Existing Step 25 summary has an unsupported schema.")
     if metadata.get("experiment_id") != config["experiment"]["experiment_id"]:
         raise ValueError("Existing Step 25 summary experiment_id does not match config.")
-    if (
-        metadata.get("experiment_config_label")
-        != config["pipeline"]["experiment_config_label"]
-    ):
-        raise ValueError(
-            "Existing Step 25 summary experiment_config_label does not match config."
-        )
     entries = manifest.get("packet_comparisons")
     if not isinstance(entries, list):
         raise ValueError("Existing Step 25 packet_comparisons must be a list.")
@@ -1316,7 +1283,6 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     return default_step_log_path(
         experiment_root=experiment_root,
         step_name="step_25_packet_comparison",
-        branch_label=config["pipeline"]["experiment_config_label"],
         filename_prefix="step_25_packet_comparison",
     )
 

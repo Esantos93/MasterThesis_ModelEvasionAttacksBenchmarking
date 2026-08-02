@@ -224,12 +224,10 @@ def main() -> None:
 
     config_data = load_pipeline_config()
     experiment = config_data["experiment"]
-    pipeline = config_data["pipeline"]
     llm = config_data["llm"]
 
     experiment_id = experiment["experiment_id"]
     experiment_root = Path(experiment["output_root"]) / experiment_id
-    experiment_config_label = pipeline["experiment_config_label"]
     grouping_policy = grouping_output_label(config_data)
     model = llm["model_name"]
 
@@ -251,13 +249,11 @@ def main() -> None:
     merged_traffic = (
         experiment_root
         / "08_merged_outputs"
-        / experiment_config_label
         / "merged_modified_traffic.json"
     )
     validated_traffic = (
         experiment_root
         / "09_validation"
-        / experiment_config_label
         / "validated_modified_traffic.json"
     )
 
@@ -266,7 +262,6 @@ def main() -> None:
     print(f"Config: {CONFIG_PATH}")
     print(f"Experiment id: {experiment_id}")
     print(f"Experiment root: {experiment_root}")
-    print(f"Experiment config label: {experiment_config_label}")
     print(f"Grouping output label: {grouping_policy}")
     print(f"Model: {model}")
     print(f"Step 16 prompt root: {prompt_root or 'not required by selected steps'}")
@@ -316,7 +311,7 @@ def main() -> None:
             "--reference-json",
             str(reference_json),
             "--output-dir",
-            str(experiment_root / "09_validation" / experiment_config_label),
+            str(experiment_root / "09_validation"),
         ],
     )
 

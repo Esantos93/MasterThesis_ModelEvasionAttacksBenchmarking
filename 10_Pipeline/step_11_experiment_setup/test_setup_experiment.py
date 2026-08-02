@@ -53,7 +53,6 @@ def base_config(output_root: Path, *, ids_aware: bool = False, instructions_only
                 else "baseline_instructions_profile_v1"
             ),
             "prompt_target_context": 4096,
-            "prompt_template_overhead_tokens": 500,
             "runtime_max_model_len": 12288,
             "token_budget": {
                 "policy": "compact_patch_token_budget_v2",
@@ -63,8 +62,6 @@ def base_config(output_root: Path, *, ids_aware: bool = False, instructions_only
         },
         "pipeline": {
             "target_os": "Ubuntu",
-            "experiment_config_label": "test_step11",
-            "experiment_config_label_options": ["test_step11"],
             "grouping_policy": "flow_context_aware" if ids_aware else "fixed_packet_count",
             "grouping_unit": "physical_packet",
             "group_size_packets": 6,

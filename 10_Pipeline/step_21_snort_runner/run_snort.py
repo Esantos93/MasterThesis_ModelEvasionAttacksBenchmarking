@@ -23,7 +23,7 @@ from common.terminal_logging import default_step_log_path, terminal_log
 
 
 # This schema version identifies the raw Snort execution metadata written by Step 21.
-RUN_SCHEMA_VERSION = "snort_raw_run_v1"
+RUN_SCHEMA_VERSION = "snort_raw_run_v2"
 
 
 # These are artifacts managed by Step 21 or by the Snort output mode used by Step 21.
@@ -101,7 +101,7 @@ def prepare_clean_output_dir(output_dir: Path, experiment_root: Path) -> list[st
 
 
 # This function validates the minimum config shape required by Step 21.
-# It checks the experiment paths, Snort execution settings, detector rule toggles, detector policy label, and the pipeline experiment_config_label.
+# It checks the experiment paths, Snort execution settings, detector rule toggles, and detector policy label.
 # The rules_policy_path is optional, but when present it must be a string so it can be injected safely into the Snort Lua override.
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "snort", "pipeline"], "config")
@@ -111,7 +111,6 @@ def validate_config(config: dict[str, Any]) -> None:
         ["snort_binary", "config_path", "plugin_path", "daq_dir", "enable_builtin_rules", "enable_ruleset", "ruleset_path"],
         "snort",
     )
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
 
     snort = config["snort"]
     if not isinstance(snort["enable_builtin_rules"], bool):
@@ -137,21 +136,6 @@ def validate_config(config: dict[str, Any]) -> None:
         if not isinstance(snaplen, int) or isinstance(snaplen, bool) or snaplen <= 0:
             raise ValueError("snort.snaplen must be a positive integer when provided.")
 
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
-    label_options = config["pipeline"].get("experiment_config_label_options")
-    if label_options is not None:
-        if not isinstance(label_options, list) or not all(isinstance(item, str) for item in label_options):
-            raise ValueError("pipeline.experiment_config_label_options must be a list of strings when provided.")
-        if experiment_config_label not in label_options:
-            raise ValueError("pipeline.experiment_config_label must be one of pipeline.experiment_config_label_options.")
-
-
-# This function returns the experiment configuration label that is fixed for the current pipeline run.
-# Step 21 uses this label to locate POST PCAP artifacts and to keep POST Snort outputs separated by experiment configuration.
-def experiment_config_label_from_config(config: dict[str, Any]) -> str:
-    return config["pipeline"]["experiment_config_label"]
 
 
 # This function returns the detector policy label used to partition Step 21 Snort artifacts.
@@ -172,17 +156,16 @@ def detector_policy_label_from_config(config: dict[str, Any]) -> str:
 
 
 # This function returns the default input PCAP for either PRE or POST traffic.
-# PRE traffic is common to every experiment configuration, while POST traffic is resolved through experiment_config_label.
+# PRE and POST traffic are both resolved inside the single experiment workspace.
 def default_input_pcap(
     config: dict[str, Any],
     traffic_version: str,
-    experiment_config_label: str | None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     if traffic_version == "pre":
         return experiment_root / "03_selected_traffic" / "selected_malicious_traffic.pcap"
-    return experiment_root / "10_reconstructed_pcap" / experiment_config_label / "modified_traffic.pcap"
+    return experiment_root / "10_reconstructed_pcap" / "modified_traffic.pcap"
 
 
 # This function returns the default Step 21 output directory for a Snort run.
@@ -326,11 +309,10 @@ def filename_field(name: str, value: str) -> str:
 
 
 # This function builds the human-readable converted alert JSON filename.
-# The filename records traffic side, experiment configuration, PCAP stem, ruleset, policy, and built-in rule state.
+# The filename records traffic side, PCAP stem, ruleset, policy, and built-in rule state.
 def converted_alert_json_name(
     *,
     traffic_version: str,
-    experiment_config_label: str | None,
     input_pcap_path: Path,
     snort_config: dict[str, Any],
 ) -> str:
@@ -338,8 +320,6 @@ def converted_alert_json_name(
         "alerts",
         filename_field("traffic", traffic_version),
     ]
-    if experiment_config_label:
-        parts.append(filename_field("experiment-config", experiment_config_label))
     parts.extend(
         [
             filename_field("pcap", input_pcap_path.stem),
@@ -396,7 +376,6 @@ def postprocess_snort_alert_json(
     *,
     output_dir: Path,
     traffic_version: str,
-    experiment_config_label: str | None,
     input_pcap_path: Path,
     snort_config: dict[str, Any],
 ) -> dict[str, Any]:
@@ -412,7 +391,6 @@ def postprocess_snort_alert_json(
 
     converted_path = output_dir / converted_alert_json_name(
         traffic_version=traffic_version,
-        experiment_config_label=experiment_config_label,
         input_pcap_path=input_pcap_path,
         snort_config=snort_config,
     )
@@ -426,7 +404,6 @@ def run_one_snort_execution(
     config: dict[str, Any],
     traffic_version: str,
     detector_policy_label: str,
-    experiment_config_label: str | None,
     post_run_label: str | None,
     input_pcap_path: Path,
     output_dir: Path,
@@ -455,10 +432,9 @@ def run_one_snort_execution(
     stderr = ""
     exit_code: int | None = None
 
-    traffic_scope = "pre_common" if traffic_version == "pre" else "post_experiment_config"
+    traffic_scope = "pre" if traffic_version == "pre" else "post"
     print(f"[{traffic_version}] scope={traffic_scope} dry_run={dry_run}")
     print(f"[{traffic_version}] detector_policy_label={detector_policy_label}")
-    print(f"[{traffic_version}] experiment_config_label={experiment_config_label or 'null'}")
     print(f"[{traffic_version}] post_run_label={post_run_label or 'null'}")
     print(f"[{traffic_version}] input_pcap={input_pcap_path}")
     print(f"[{traffic_version}] output_dir={output_dir}")
@@ -495,7 +471,6 @@ def run_one_snort_execution(
         alert_postprocessing = postprocess_snort_alert_json(
             output_dir=output_dir,
             traffic_version=traffic_version,
-            experiment_config_label=experiment_config_label,
             input_pcap_path=input_pcap_path,
             snort_config=snort_config,
         )
@@ -512,7 +487,6 @@ def run_one_snort_execution(
         "traffic_version": traffic_version,
         "traffic_scope": traffic_scope,
         "detector_policy_label": detector_policy_label,
-        "experiment_config_label": experiment_config_label,
         "post_run_label": post_run_label,
         "input_pcap": str(input_pcap_path),
         "output_dir": str(output_dir),
@@ -570,19 +544,17 @@ def run_snort(
     config = load_json_config(config_path)
     validate_config(config)
 
-    experiment_config_label = experiment_config_label_from_config(config)
     detector_policy_label = detector_policy_label_from_config(config)
     resolved_experiment_root = Path(experiment_root).expanduser() if experiment_root else build_experiment_root(config)
     runs: list[dict[str, Any]] = []
     selected_versions = ["pre", "post"] if traffic_version == "both" else [traffic_version]
     post_run_label = f"run-{utc_minute_timestamp_for_path()}" if "post" in selected_versions else None
     for selected_version in selected_versions:
-        run_experiment_config_label = None if selected_version == "pre" else experiment_config_label
         run_post_label = post_run_label if selected_version == "post" else None
         resolved_input = (
             Path(input_pcap).expanduser()
             if input_pcap and len(selected_versions) == 1
-            else default_input_pcap(config, selected_version, run_experiment_config_label, resolved_experiment_root)
+            else default_input_pcap(config, selected_version, resolved_experiment_root)
         )
         resolved_output_dir = (
             Path(output_dir).expanduser()
@@ -594,7 +566,6 @@ def run_snort(
                 config=config,
                 traffic_version=selected_version,
                 detector_policy_label=detector_policy_label,
-                experiment_config_label=run_experiment_config_label,
                 post_run_label=run_post_label,
                 input_pcap_path=resolved_input,
                 output_dir=resolved_output_dir,
@@ -625,7 +596,7 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
 
 
 # This function parses command-line arguments for Step 21.
-# The experiment_config_label, ruleset, policy, and built-in rule settings are intentionally read from the config rather than from CLI flags.
+# The ruleset, policy, and built-in rule settings are intentionally read from the config rather than from CLI flags.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Snort 3 over Step 21 PRE and POST PCAP artifacts.")
     add = parser.add_argument
@@ -669,9 +640,8 @@ def main() -> None:
             raise SystemExit(1)
 
         for run in runs:
-            label = run["experiment_config_label"] or run["traffic_scope"]
             print(
-                f"{run['traffic_version']} {run['detector_policy_label']} {label}: "
+                f"{run['traffic_version']} {run['detector_policy_label']} {run['traffic_scope']}: "
                 f"exit_code={run['exit_code']} output_dir={run['output_dir']}"
             )
 

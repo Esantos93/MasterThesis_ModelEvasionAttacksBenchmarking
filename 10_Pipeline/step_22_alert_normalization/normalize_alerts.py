@@ -20,8 +20,7 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import terminal_log
 
 
-NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v3"
-PRE_COMMON_EXPERIMENT_LABEL = "PRE-modification-traffic"
+NORMALIZED_SCHEMA_VERSION = "snort_normalized_alerts_v4"
 
 
 # This function reads a JSON file and returns the parsed Python value.
@@ -50,19 +49,10 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline", "snort"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
     require_keys(config["snort"], ["detector_policy_label"], "snort")
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
     detector_policy_label = config["snort"]["detector_policy_label"]
     if not isinstance(detector_policy_label, str) or not sanitize_name_component(detector_policy_label):
         raise ValueError("snort.detector_policy_label must be a non-empty string.")
-
-
-# This function returns the experiment configuration label fixed in the Step 11 config.
-def experiment_config_label_from_config(config: dict[str, Any]) -> str:
-    return config["pipeline"]["experiment_config_label"]
 
 
 def detector_policy_label_from_config(config: dict[str, Any]) -> str:
@@ -78,7 +68,6 @@ def default_snort_input_dir(
     config: dict[str, Any],
     traffic_version: str,
     detector_policy_label: str,
-    experiment_config_label: str,
     post_run_label: str | None = None,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
@@ -96,14 +85,13 @@ def default_normalized_output_dir(
     config: dict[str, Any],
     traffic_version: str,
     detector_policy_label: str,
-    experiment_config_label: str,
     experiment_root_override: str | Path | None = None,
 ) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     detector_root = experiment_root / "12_alerts_processed" / detector_policy_label
     if traffic_version == "pre":
         return detector_root / "pre"
-    return detector_root / "post" / experiment_config_label
+    return detector_root / "post"
 
 
 def default_packet_trace_path(config: dict[str, Any], experiment_root_override: str | Path | None = None) -> Path:
@@ -199,7 +187,7 @@ def normalize_one_alert(
     raw_alert: dict[str, Any],
     alert_index: int,
     traffic_version: str,
-    experiment_config_label: str | None,
+    experiment_id: str,
     packet_trace: dict[str, Any] | None,
 ) -> dict[str, Any]:
     gid = optional_int(raw_alert.get("gid"))
@@ -213,7 +201,7 @@ def normalize_one_alert(
         "normalized_alert_id": f"{traffic_version}-{alert_index:06d}",
         "alert_index": alert_index,
         "traffic_version": traffic_version,
-        "experiment_config_label": experiment_config_label,
+        "experiment_id": experiment_id,
         "gid": gid,
         "sid": sid,
         "rev": rev,
@@ -295,7 +283,7 @@ def normalize_one_traffic_version(
     traffic_version: str,
     configured_detector_policy_label: str,
     configured_rules_policy_path: str,
-    configured_experiment_config_label: str,
+    configured_experiment_id: str,
     input_dir: Path,
     output_dir: Path,
     input_alert_json: Path | None,
@@ -309,7 +297,7 @@ def normalize_one_traffic_version(
     source_traffic_version = execution_metadata.get("traffic_version")
     source_detector_policy_label = execution_metadata.get("detector_policy_label")
     source_rules_policy_path = execution_metadata.get("rules_policy_path")
-    source_experiment_config_label = execution_metadata.get("experiment_config_label")
+    source_experiment_id = execution_metadata.get("experiment_id")
     source_traffic_scope = execution_metadata.get("traffic_scope")
     source_post_run_label = execution_metadata.get("post_run_label")
     if source_traffic_version != traffic_version:
@@ -322,16 +310,11 @@ def normalize_one_traffic_version(
             "Step 21 execution metadata detector_policy_label does not match the active config: "
             f"{source_detector_policy_label!r} != {configured_detector_policy_label!r}"
         )
-    if traffic_version == "post" and source_experiment_config_label != configured_experiment_config_label:
+    if source_experiment_id != configured_experiment_id:
         raise ValueError(
-            "Step 21 POST metadata experiment_config_label does not match the active config: "
-            f"{source_experiment_config_label!r} != {configured_experiment_config_label!r}"
+            "Step 21 metadata experiment_id does not match the active config: "
+            f"{source_experiment_id!r} != {configured_experiment_id!r}"
         )
-    normalized_experiment_config_label = (
-        PRE_COMMON_EXPERIMENT_LABEL
-        if traffic_version == "pre" and source_experiment_config_label is None
-        else source_experiment_config_label
-    )
 
     alert_json_path = input_alert_json if input_alert_json else resolve_converted_alert_json(input_dir, execution_metadata)
     raw_alerts = read_json(alert_json_path)
@@ -349,18 +332,14 @@ def normalize_one_traffic_version(
                 raw_alert,
                 alert_index,
                 traffic_version,
-                normalized_experiment_config_label,
+                configured_experiment_id,
                 packet_trace,
             )
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    if traffic_version == "pre":
-        normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}.json"
-        metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}.json"
-    else:
-        normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}__experiment-config-{configured_experiment_config_label}.json"
-        metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}__experiment-config-{configured_experiment_config_label}.json"
+    normalized_path = output_dir / f"normalized-alerts__traffic-{traffic_version}.json"
+    metadata_output_path = output_dir / f"normalization-metadata__traffic-{traffic_version}.json"
     summary = summarize_alerts(normalized_alerts)
     normalized_artifact = {
         "metadata": {
@@ -374,9 +353,7 @@ def normalize_one_traffic_version(
             "source_detector_policy_label": source_detector_policy_label,
             "configured_rules_policy_path": configured_rules_policy_path,
             "source_rules_policy_path": source_rules_policy_path,
-            "configured_experiment_config_label": configured_experiment_config_label,
-            "source_experiment_config_label": source_experiment_config_label,
-            "normalized_experiment_config_label": normalized_experiment_config_label,
+            "source_experiment_id": source_experiment_id,
             "traffic_scope": source_traffic_scope,
             "source_post_run_label": source_post_run_label,
             "source_snort_raw_dir": str(input_dir),
@@ -416,7 +393,7 @@ def normalize_one_traffic_version(
         "alerts": normalized_alerts,
     }
     processing_metadata = {
-        "schema_version": "snort_alert_normalization_metadata_v1",
+        "schema_version": "snort_alert_normalization_metadata_v2",
         "generated_at_utc": utc_now(),
         "traffic_version": traffic_version,
         "source_traffic_version": source_traffic_version,
@@ -424,9 +401,8 @@ def normalize_one_traffic_version(
         "source_detector_policy_label": source_detector_policy_label,
         "configured_rules_policy_path": configured_rules_policy_path,
         "source_rules_policy_path": source_rules_policy_path,
-        "configured_experiment_config_label": configured_experiment_config_label,
-        "source_experiment_config_label": source_experiment_config_label,
-        "normalized_experiment_config_label": normalized_experiment_config_label,
+        "experiment_id": configured_experiment_id,
+        "source_experiment_id": source_experiment_id,
         "traffic_scope": source_traffic_scope,
         "source_post_run_label": source_post_run_label,
         "source_alert_json": str(alert_json_path),
@@ -464,7 +440,7 @@ def normalize_alerts(
 ) -> list[dict[str, Any]]:
     config = load_json_config(config_path)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
+    experiment_id = config["experiment"]["experiment_id"]
     detector_policy_label = detector_policy_label_from_config(config)
     rules_policy_path = rules_policy_path_from_config(config)
     packet_trace_path = default_packet_trace_path(config, experiment_root)
@@ -486,7 +462,6 @@ def normalize_alerts(
                 config,
                 selected_version,
                 detector_policy_label,
-                experiment_config_label,
                 post_run_label if selected_version == "post" else None,
                 experiment_root,
             )
@@ -494,7 +469,7 @@ def normalize_alerts(
         resolved_output_dir = (
             Path(output_dir).expanduser()
             if output_dir
-            else default_normalized_output_dir(config, selected_version, detector_policy_label, experiment_config_label, experiment_root)
+            else default_normalized_output_dir(config, selected_version, detector_policy_label, experiment_root)
         )
         resolved_input_alert_json = Path(input_alert_json).expanduser() if input_alert_json else None
         results.append(
@@ -503,7 +478,7 @@ def normalize_alerts(
                 traffic_version=selected_version,
                 configured_detector_policy_label=detector_policy_label,
                 configured_rules_policy_path=rules_policy_path,
-                configured_experiment_config_label=experiment_config_label,
+                configured_experiment_id=experiment_id,
                 input_dir=resolved_input_dir,
                 output_dir=resolved_output_dir,
                 input_alert_json=resolved_input_alert_json,

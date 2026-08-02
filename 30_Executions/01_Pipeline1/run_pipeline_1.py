@@ -173,7 +173,6 @@ def main() -> None:
 
     experiment_id = experiment["experiment_id"]
     experiment_root = Path(experiment["output_root"]) / experiment_id
-    experiment_config_label = pipeline["experiment_config_label"]
     grouping_policy = pipeline.get("grouping_policy", "<missing>")
     group_size_packets = pipeline.get("group_size_packets", "<missing>")
 
@@ -182,7 +181,6 @@ def main() -> None:
     print(f"Config: {CONFIG_PATH}")
     print(f"Experiment id: {experiment_id}")
     print(f"Experiment root: {experiment_root}")
-    print(f"Experiment config label: {experiment_config_label}")
     print(f"Grouping policy: {grouping_policy}")
     print(f"Group size packets: {group_size_packets}")
     print(f"Steps: {START_STEP}-{END_STEP}")

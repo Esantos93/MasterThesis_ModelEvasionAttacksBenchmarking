@@ -44,7 +44,6 @@ class Step24MetricsTests(unittest.TestCase):
                 "output_root": str(root),
             },
             "pipeline": {
-                "experiment_config_label": "baseline_004_headers_only_fixed_size_6",
                 # Historical config field kept in fixtures to prove Step 24 ignores it.
                 "signature_mutation_weight": weight,
             },
@@ -56,7 +55,6 @@ class Step24MetricsTests(unittest.TestCase):
         }
         self.write_json(config_path, config)
 
-        label = "baseline-004-headers-only-fixed-size-6"
         comparison_dir = root / "exp_fixture" / "13_comparison" / detector_policy
         default_signatures = [
             {
@@ -98,9 +96,8 @@ class Step24MetricsTests(unittest.TestCase):
             "failed_evasion_count": failed,
         }
         metadata = {
-            "schema_version": "snort_alert_comparison_v5",
+            "schema_version": "snort_alert_comparison_v6",
             "experiment_id": "exp_fixture",
-            "experiment_config_label": label,
             "detector_policy_label": detector_policy,
             "rules_policy_path": "/rules/security.states",
             "post_normalization_metadata": {
@@ -109,12 +106,12 @@ class Step24MetricsTests(unittest.TestCase):
             "summary": summary,
         }
         self.write_json(
-            comparison_dir / f"alert-comparison__experiment-config-{label}.json",
+            comparison_dir / "alert-comparison.json",
             {"metadata": metadata, "summary": summary, "comparison_records": [], "induced_alerts": []},
         )
-        self.write_json(comparison_dir / f"comparison-metadata__experiment-config-{label}.json", metadata)
+        self.write_json(comparison_dir / "comparison-metadata.json", metadata)
         self.write_json(
-            comparison_dir / f"signature-comparison-summary__experiment-config-{label}.json",
+            comparison_dir / "signature-comparison-summary.json",
             {"metadata": metadata, "summary": {"signature_row_count": len(signature_rows)}, "signatures": signature_rows},
         )
         return config_path, comparison_dir
@@ -211,9 +208,9 @@ class Step24MetricsTests(unittest.TestCase):
             config, _ = self.make_fixture(root, pre_count=10, post_count=10, failed=10, successful=0, mutation=0)
             result = compute_metrics(config_path=config, output_dir=output_dir)
             clean_path = output_dir / "metrics_summary-exp_fixture.json"
-            detailed_path = output_dir / "metrics__experiment-config-baseline-004-headers-only-fixed-size-6__detector-policy-security-ips.json"
-            report_path = output_dir / "metrics-report__experiment-config-baseline-004-headers-only-fixed-size-6__detector-policy-security-ips.md"
-            csv_path = output_dir / "metrics-table__experiment-config-baseline-004-headers-only-fixed-size-6__detector-policy-security-ips.csv"
+            detailed_path = output_dir / "metrics.json"
+            report_path = output_dir / "metrics-report.md"
+            csv_path = output_dir / "metrics-table.csv"
 
             self.assertEqual(Path(result["artifacts"]["clean_metrics_summary"]), clean_path)
             self.assertEqual(Path(result["artifacts"]["metrics"]), detailed_path)
@@ -233,7 +230,6 @@ class Step24MetricsTests(unittest.TestCase):
                 clean["experiment_identifier"],
                 {
                     "experiment_id": "exp_fixture",
-                    "experiment_config_label": "baseline-004-headers-only-fixed-size-6",
                     "detector_policy_label": "security-ips",
                     "post_run_label": "run-fixture",
                 },

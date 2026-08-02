@@ -15,16 +15,13 @@ def write_json(path: Path, data: dict) -> None:
 
 
 class Step21SnortRunnerTests(unittest.TestCase):
-    def make_config(self, root: Path, *, label: str = "baseline_004_headers_only_fixed_size_6") -> Path:
+    def make_config(self, root: Path) -> Path:
         config = {
             "experiment": {
                 "experiment_id": "exp_fixture",
                 "output_root": str(root),
             },
-            "pipeline": {
-                "experiment_config_label": label,
-                "experiment_config_label_options": [label],
-            },
+            "pipeline": {},
             "snort": {
                 "snort_binary": "/usr/local/bin/snort",
                 "config_path": "/usr/local/etc/snort/snort.lua",
@@ -42,9 +39,9 @@ class Step21SnortRunnerTests(unittest.TestCase):
         write_json(config_path, config)
         return config_path
 
-    def make_experiment_inputs(self, experiment_root: Path, *, label: str = "baseline-004-headers-only-fixed-size-6") -> None:
+    def make_experiment_inputs(self, experiment_root: Path) -> None:
         pre_pcap = experiment_root / "03_selected_traffic" / "selected_malicious_traffic.pcap"
-        post_pcap = experiment_root / "10_reconstructed_pcap" / label / "modified_traffic.pcap"
+        post_pcap = experiment_root / "10_reconstructed_pcap" / "modified_traffic.pcap"
         pre_pcap.parent.mkdir(parents=True, exist_ok=True)
         post_pcap.parent.mkdir(parents=True, exist_ok=True)
         pre_pcap.write_bytes(b"pcap")
@@ -197,7 +194,6 @@ class Step21SnortRunnerTests(unittest.TestCase):
                     config=run_snort.load_json_config(config_path),
                     traffic_version="pre",
                     detector_policy_label="max-detect-ips",
-                    experiment_config_label=None,
                     post_run_label=None,
                     input_pcap_path=experiment_root / "03_selected_traffic" / "selected_malicious_traffic.pcap",
                     output_dir=pre_output,
@@ -208,9 +204,8 @@ class Step21SnortRunnerTests(unittest.TestCase):
                     config=run_snort.load_json_config(config_path),
                     traffic_version="post",
                     detector_policy_label="max-detect-ips",
-                    experiment_config_label="baseline-004-headers-only-fixed-size-6",
                     post_run_label="manual-post",
-                    input_pcap_path=experiment_root / "10_reconstructed_pcap" / "baseline-004-headers-only-fixed-size-6" / "modified_traffic.pcap",
+                    input_pcap_path=experiment_root / "10_reconstructed_pcap" / "modified_traffic.pcap",
                     output_dir=post_output,
                     experiment_root=experiment_root,
                     dry_run=False,

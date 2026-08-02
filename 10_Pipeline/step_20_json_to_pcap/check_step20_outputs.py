@@ -10,13 +10,9 @@ PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
-from common.naming import sanitize_name_component
-
-
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v6"
-EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION = "validated_modified_traffic_v5"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v7"
+EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION = "validated_modified_traffic_v6"
 DEFAULT_EXPERIMENT_ROOT = Path("/home/santos/Experiments/exp_cicids2017_baseline_004")
-DEFAULT_EXPERIMENT_CONFIG_LABEL = "baseline-004-headers-only-fixed-size-6"
 DEFAULT_EXPECTED_PACKET_COUNT = 99831
 
 HEADER_ONLY_ZERO_FIELDS = [
@@ -87,11 +83,6 @@ def parse_args() -> argparse.Namespace:
         help="Experiment root containing 10_reconstructed_pcap/.",
     )
     parser.add_argument(
-        "--experiment-config-label",
-        default=DEFAULT_EXPERIMENT_CONFIG_LABEL,
-        help="Step 20 output branch under 10_reconstructed_pcap/. The value is normalized like config labels.",
-    )
-    parser.add_argument(
         "--output-dir",
         default=None,
         help="Explicit Step 20 output directory containing modified_traffic.pcap and reconstruction_report.json.",
@@ -120,14 +111,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     experiment_root = Path(args.experiment_root).expanduser()
-    experiment_config_label = sanitize_name_component(args.experiment_config_label)
-    output_dir = Path(args.output_dir).expanduser() if args.output_dir else experiment_root / "10_reconstructed_pcap" / experiment_config_label
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else experiment_root / "10_reconstructed_pcap"
     pcap_path = output_dir / "modified_traffic.pcap"
     report_path = output_dir / "reconstruction_report.json"
     failures: list[str] = []
 
     print(f"Experiment root: {experiment_root}")
-    print(f"Experiment config label: {experiment_config_label}")
     print(f"Modified PCAP: {pcap_path}")
     print(f"Reconstruction report: {report_path}")
 
@@ -174,12 +163,6 @@ def main() -> None:
         "source_validation_contract.validated_traffic_schema_version",
         source_validation_contract.get("validated_traffic_schema_version") if isinstance(source_validation_contract, dict) else None,
         EXPECTED_SOURCE_VALIDATION_SCHEMA_VERSION,
-    )
-    add_equal_check(
-        failures,
-        "metadata.experiment_config_label",
-        metadata.get("experiment_config_label"),
-        experiment_config_label,
     )
 
     input_packet_count = summary.get("input_packet_count")

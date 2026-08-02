@@ -64,8 +64,6 @@
   },
   "pipeline": {
     "target_os": "Ubuntu",
-    "experiment_config_label": "",
-    "experiment_config_label_options": [],
     "grouping_policy": "",
     "grouping_unit": "physical_packet",
     "modification_strategy": "",

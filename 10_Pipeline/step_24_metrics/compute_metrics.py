@@ -20,7 +20,7 @@ from common.naming import sanitize_name_component
 from common.terminal_logging import default_step_log_path, terminal_log
 
 
-METRICS_SCHEMA_VERSION = "snort_metrics_v2"
+METRICS_SCHEMA_VERSION = "snort_metrics_v3"
 
 
 # This function reads a JSON file and returns the parsed Python value.
@@ -44,18 +44,10 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline", "snort"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
     require_keys(config["snort"], ["detector_policy_label"], "snort")
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
     detector_policy_label = config["snort"]["detector_policy_label"]
     if not isinstance(detector_policy_label, str) or not sanitize_name_component(detector_policy_label):
         raise ValueError("snort.detector_policy_label must be a non-empty string.")
-
-
-def experiment_config_label_from_config(config: dict[str, Any]) -> str:
-    return config["pipeline"]["experiment_config_label"]
 
 
 def detector_policy_label_from_config(config: dict[str, Any], override: str | None = None) -> str:
@@ -83,11 +75,11 @@ def default_paths(
     }
 
 
-def default_step23_artifact_paths(comparison_dir: Path, experiment_config_label: str) -> dict[str, Path]:
+def default_step23_artifact_paths(comparison_dir: Path) -> dict[str, Path]:
     return {
-        "alert_comparison": comparison_dir / f"alert-comparison__experiment-config-{experiment_config_label}.json",
-        "comparison_metadata": comparison_dir / f"comparison-metadata__experiment-config-{experiment_config_label}.json",
-        "signature_summary": comparison_dir / f"signature-comparison-summary__experiment-config-{experiment_config_label}.json",
+        "alert_comparison": comparison_dir / "alert-comparison.json",
+        "comparison_metadata": comparison_dir / "comparison-metadata.json",
+        "signature_summary": comparison_dir / "signature-comparison-summary.json",
     }
 
 
@@ -145,7 +137,6 @@ def validate_step23_metadata(
     artifact: dict[str, Any],
     artifact_path: Path,
     expected_experiment_id: str,
-    expected_experiment_config_label: str,
     expected_detector_policy_label: str,
 ) -> None:
     metadata = artifact.get("metadata", artifact)
@@ -155,11 +146,6 @@ def validate_step23_metadata(
         raise ValueError(
             f"Step 23 artifact experiment_id mismatch in {artifact_path}: "
             f"{metadata.get('experiment_id')!r} != {expected_experiment_id!r}"
-        )
-    if metadata.get("experiment_config_label") != expected_experiment_config_label:
-        raise ValueError(
-            f"Step 23 artifact experiment_config_label mismatch in {artifact_path}: "
-            f"{metadata.get('experiment_config_label')!r} != {expected_experiment_config_label!r}"
         )
     if metadata.get("detector_policy_label") != expected_detector_policy_label:
         raise ValueError(
@@ -353,7 +339,6 @@ def build_clean_summary(artifact: dict[str, Any]) -> dict[str, Any]:
     return {
         "experiment_identifier": {
             "experiment_id": artifact["experiment_id"],
-            "experiment_config_label": artifact["experiment_config_label"],
             "detector_policy_label": artifact["detector_policy_label"],
             "post_run_label": artifact.get("post_run_label"),
         },
@@ -377,7 +362,6 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
         "# Step 24 Metrics Report",
         "",
         f"- Experiment ID: `{artifact['experiment_id']}`",
-        f"- Experiment config label: `{artifact['experiment_config_label']}`",
         f"- Detector policy label: `{artifact['detector_policy_label']}`",
         f"- Rules policy path: `{artifact.get('rules_policy_path') or 'none'}`",
         f"- Snaplen: `{artifact.get('snaplen', 'not configured')}`",
@@ -447,12 +431,11 @@ def compute_metrics(
     config = load_json_config(config_path)
     validate_config(config)
     experiment_id = config["experiment"]["experiment_id"]
-    experiment_config_label = experiment_config_label_from_config(config)
     resolved_detector_policy_label = detector_policy_label_from_config(config, detector_policy_label)
     paths = default_paths(config, resolved_detector_policy_label, experiment_root)
     resolved_comparison_dir = Path(comparison_dir).expanduser() if comparison_dir else paths["comparison_dir"]
     resolved_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
-    step23_paths = default_step23_artifact_paths(resolved_comparison_dir, experiment_config_label)
+    step23_paths = default_step23_artifact_paths(resolved_comparison_dir)
     alert_comparison_path = Path(alert_comparison).expanduser() if alert_comparison else step23_paths["alert_comparison"]
     comparison_metadata_path = Path(comparison_metadata).expanduser() if comparison_metadata else step23_paths["comparison_metadata"]
     signature_summary_path = Path(signature_summary).expanduser() if signature_summary else step23_paths["signature_summary"]
@@ -474,7 +457,6 @@ def compute_metrics(
             artifact=artifact,
             artifact_path=path,
             expected_experiment_id=experiment_id,
-            expected_experiment_config_label=experiment_config_label,
             expected_detector_policy_label=resolved_detector_policy_label,
         )
 
@@ -485,12 +467,8 @@ def compute_metrics(
         comparison_metadata=comparison_metadata_artifact,
         signature_summary=signature_summary_artifact,
     )
-    base_name = (
-        f"experiment-config-{experiment_config_label}__"
-        f"detector-policy-{resolved_detector_policy_label}"
-    )
-    metrics_path = resolved_output_dir / f"metrics__{base_name}.json"
-    report_path = resolved_output_dir / f"metrics-report__{base_name}.md"
+    metrics_path = resolved_output_dir / "metrics.json"
+    report_path = resolved_output_dir / "metrics-report.md"
     clean_summary_path = resolved_output_dir / f"metrics_summary-{experiment_id}.json"
     post_run_label = post_run_label_from_metadata(comparison_metadata_artifact)
     primary_metrics, diagnostic_metrics = build_metric_groups(metrics)
@@ -498,7 +476,6 @@ def compute_metrics(
         "schema_version": METRICS_SCHEMA_VERSION,
         "generated_at_utc": utc_now(),
         "experiment_id": experiment_id,
-        "experiment_config_label": experiment_config_label,
         "detector_policy_label": resolved_detector_policy_label,
         "rules_policy_path": rules_policy_path_from_config(config),
         "snaplen": config.get("snort", {}).get("snaplen"),
@@ -596,7 +573,6 @@ def main() -> None:
 
         metrics = result["metrics"]
         print(f"Experiment: {result['experiment_id']}")
-        print(f"Experiment config: {result['experiment_config_label']}")
         print(f"Detector policy: {result['detector_policy_label']}")
         print(f"Rules policy path: {result['rules_policy_path'] or 'none'}")
         print(f"Snaplen: {result.get('snaplen', 'not configured')}")

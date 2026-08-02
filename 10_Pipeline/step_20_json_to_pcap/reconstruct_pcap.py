@@ -24,8 +24,8 @@ from common.terminal_logging import default_step_log_path, terminal_log
 from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v6"
-EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v5"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v7"
+EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v6"
 STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD = "validated_effective_payload_projection_changes"
 STEP19_FULL_POST_RECONSTRUCTION_POLICY = "full_packet_universe_with_original_noop_for_invalid_and_failure_only_packets"
 ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = COMMON_ETHERNET_MINIMUM_FRAME_BYTES
@@ -33,7 +33,6 @@ TCP_SEQUENCE_MODULUS = 1 << 32
 TCP_SEQUENCE_MASK = TCP_SEQUENCE_MODULUS - 1
 STEP19_V5_REQUIRED_METADATA_FIELDS = [
     "experiment_id",
-    "experiment_config_label",
     "source_merged_json",
     "validation_report",
     "accepted_packet_count",
@@ -81,35 +80,25 @@ def build_experiment_root(config: dict[str, Any]) -> Path:
     return Path(experiment["output_root"]).expanduser() / experiment["experiment_id"]
 
 
-#This function returns the default Step 20 input and output paths for the active experiment configuration.
+#This function returns the default Step 20 input and output paths for the active experiment.
 #This function uses experiment_root_override when provided instead of the experiment root stored in the config.
 #This is useful when the VM artifacts are under a different folder than the one currently written in the config file.
-def default_paths(config: dict[str, Any], experiment_config_label: str, experiment_root_override: str | Path | None = None) -> dict[str, Path]:
+def default_paths(config: dict[str, Any], experiment_root_override: str | Path | None = None) -> dict[str, Path]:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     return {
-        "input_json": experiment_root / "09_validation" / experiment_config_label / "validated_modified_traffic.json",
+        "input_json": experiment_root / "09_validation" / "validated_modified_traffic.json",
         "reference_pcap": experiment_root / "03_selected_traffic" / "selected_malicious_traffic.pcap",
-        "output_dir": experiment_root / "10_reconstructed_pcap" / experiment_config_label,
+        "output_dir": experiment_root / "10_reconstructed_pcap",
     }
 
 
 #This function validates the minimum config keys needed by Step 20.
-#This function checks the experiment identity, output root, and pipeline.experiment_config_label because each config maps to one POST branch.
+#This function checks the experiment identity and output root.
 def validate_config(config: dict[str, Any]) -> None:
     require_keys(config, ["experiment", "pipeline"], "config")
     require_keys(config["experiment"], ["experiment_id", "output_root"], "experiment")
-    require_keys(config["pipeline"], ["experiment_config_label"], "pipeline")
-
-    experiment_config_label = config["pipeline"]["experiment_config_label"]
-    if not isinstance(experiment_config_label, str) or not experiment_config_label.strip():
-        raise ValueError("pipeline.experiment_config_label must be a non-empty string.")
     resolve_modification_strategy(config)
     resolve_post_llm_traffic_validation_policy(config)
-
-
-#This function returns the single pipeline.experiment_config_label configured for this run.
-def experiment_config_label_from_config(config: dict[str, Any]) -> str:
-    return config["pipeline"]["experiment_config_label"]
 
 
 #This function resolves a path stored in Step 19 metadata and handles relocated experiment roots.
@@ -2454,7 +2443,6 @@ def reconstruct_validated_traffic(
     reference_pcap_path: Path,
     output_pcap_path: Path,
     report_path: Path,
-    experiment_config_label: str,
 ) -> dict[str, Any]:
     if not input_json_path.exists():
         raise FileNotFoundError(f"Step 19 validated traffic JSON does not exist: {input_json_path}")
@@ -2562,7 +2550,6 @@ def reconstruct_validated_traffic(
                     "status": "failed_during_tcp_reconstruction_planning",
                     "experiment_id": config["experiment"]["experiment_id"],
                     "config_source": config.get("_config_path", ""),
-                    "experiment_config_label": experiment_config_label,
                     "input_json": str(input_json_path),
                     "reference_pcap": str(reference_pcap_path),
                     "output_pcap": str(output_pcap_path),
@@ -2675,7 +2662,6 @@ def reconstruct_validated_traffic(
             ),
             "experiment_id": config["experiment"]["experiment_id"],
             "config_source": config.get("_config_path", ""),
-            "experiment_config_label": experiment_config_label,
             "input_json": str(input_json_path),
             "reference_pcap": str(reference_pcap_path),
             "source_validation_schema_version": metadata.get("schema_version"),
@@ -2747,7 +2733,7 @@ def reconstruct_validated_traffic(
 
 
 #This function is the public Python entry point for Step 20.
-#This function loads the config, resolves the active experiment_config_label paths, and delegates the actual reconstruction work.
+#This function loads the config, resolves the active experiment paths, and delegates the actual reconstruction work.
 def run_reconstruction(
     *,
     config_path: str | Path,
@@ -2759,8 +2745,7 @@ def run_reconstruction(
 ) -> dict[str, Any]:
     config = load_json_config(config_path)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
-    paths = default_paths(config, experiment_config_label, experiment_root)
+    paths = default_paths(config, experiment_root)
     input_json_path = Path(input_json).expanduser() if input_json else paths["input_json"]
     reference_pcap_path = Path(reference_pcap).expanduser() if reference_pcap else paths["reference_pcap"]
     reconstruction_output_dir = Path(output_dir).expanduser() if output_dir else paths["output_dir"]
@@ -2772,24 +2757,21 @@ def run_reconstruction(
         reference_pcap_path=reference_pcap_path,
         output_pcap_path=output_pcap_path,
         report_path=report_path,
-        experiment_config_label=experiment_config_label,
     )
 
 
 #This function resolves the terminal log path for Step 20.
-#This function writes default logs under the active experiment root and branch label so Ubuntu runs keep terminal evidence next to artifacts.
+#This function writes default logs under the active experiment root so Ubuntu runs keep terminal evidence next to artifacts.
 def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         return Path(args.log_file).expanduser()
 
     config = load_json_config(args.config)
     validate_config(config)
-    experiment_config_label = experiment_config_label_from_config(config)
     experiment_root = Path(args.experiment_root).expanduser() if args.experiment_root else build_experiment_root(config)
     return default_step_log_path(
         experiment_root=experiment_root,
         step_name="step_20_json_to_pcap",
-        branch_label=experiment_config_label,
         filename_prefix="step_20_json_to_pcap",
     )
 

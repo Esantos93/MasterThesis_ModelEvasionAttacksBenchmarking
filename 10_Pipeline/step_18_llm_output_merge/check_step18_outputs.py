@@ -143,11 +143,6 @@ def parse_args() -> argparse.Namespace:
         help="Experiment root folder.",
     )
     parser.add_argument(
-        "--experiment-config-label",
-        required=True,
-        help="Experiment config label used under 08_merged_outputs.",
-    )
-    parser.add_argument(
         "--sample-size",
         type=int,
         default=5,
@@ -159,7 +154,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Ejecuta la comprobacion de outputs del Step 18."""
     args = parse_args()
-    step18_dir = Path(args.experiment_root) / "08_merged_outputs" / args.experiment_config_label
+    step18_dir = Path(args.experiment_root) / "08_merged_outputs"
     merged, merge_report = print_expected_files(step18_dir)
     summarize_step18(merged=merged, merge_report=merge_report, sample_size=args.sample_size)
 

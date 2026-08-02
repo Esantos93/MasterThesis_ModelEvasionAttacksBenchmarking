@@ -2234,11 +2234,9 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
         return Path(args.log_file).expanduser()
     config = load_json_config(args.config)
     experiment_root = build_experiment_root(config)
-    experiment_config_label = config.get("pipeline", {}).get("experiment_config_label")
     return default_step_log_path(
         experiment_root=experiment_root,
         step_name="step_15_grouping",
-        branch_label=str(experiment_config_label) if experiment_config_label else None,
         filename_prefix="step_15_grouping",
     )
 
@@ -2263,7 +2261,7 @@ def parse_cli_args() -> argparse.Namespace:
             "artifacts. Use this to calibrate prompt_target_context before a full generation."
         ),
     )
-    parser.add_argument("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_15_grouping/<experiment_config_label>/step_15_grouping_<timestamp>.log.")
+    parser.add_argument("--log-file", help="Optional terminal log file. Defaults to <experiment_root>/logs/step_15_grouping/step_15_grouping_<timestamp>.log.")
     return parser.parse_args()
 
 
