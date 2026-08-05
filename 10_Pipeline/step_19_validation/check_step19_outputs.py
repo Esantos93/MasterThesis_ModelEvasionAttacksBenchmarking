@@ -5,12 +5,14 @@ from pathlib import Path
 from typing import Any
 
 
+#This function loads one Step 19 artifact for independent inspection.
 def load_json(path: Path) -> dict[str, Any]:
     """Carga un fichero JSON y devuelve su contenido como diccionario."""
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
+#This function reports artifact size without retaining the full packet population.
 def file_size_mb(path: Path) -> str:
     """Devuelve el tamano del fichero en MB, o una cadena vacia si no existe."""
     if not path.exists():
@@ -18,6 +20,7 @@ def file_size_mb(path: Path) -> str:
     return f"{path.stat().st_size / (1024 * 1024):.2f} MB"
 
 
+#This function prints structured checker sections with an optional output bound.
 def print_json(title: str, data: Any, limit: int | None = None) -> None:
     """Imprime una seccion JSON, recortandola si se define un limite."""
     text = json.dumps(data, indent=2, ensure_ascii=False)
@@ -27,6 +30,7 @@ def print_json(title: str, data: Any, limit: int | None = None) -> None:
     print(text)
 
 
+#This function verifies and reports the required final Step 19 artifacts.
 def print_expected_files(step19_dir: Path) -> tuple[Path, Path]:
     """Muestra y devuelve los ficheros esperados del Step 19."""
     validated = step19_dir / "validated_modified_traffic.json"
@@ -44,6 +48,7 @@ def print_expected_files(step19_dir: Path) -> tuple[Path, Path]:
     return validated, validation_report
 
 
+#This function summarizes validation status, preserved traffic, and reconstruction readiness.
 def summarize_step19(validated: Path, validation_report: Path, sample_size: int) -> None:
     """Resume metadata, contadores y muestras relevantes del Step 19."""
     validated_data = load_json(validated)
@@ -83,6 +88,7 @@ def summarize_step19(validated: Path, validation_report: Path, sample_size: int)
     print_json("FIRST VALIDATED PACKET", (traffic or [{}])[0], limit=3000)
 
 
+#This function parses the Step 19 output directory and sample size.
 def parse_args() -> argparse.Namespace:
     """Parsea los argumentos de linea de comandos del comprobador."""
     parser = argparse.ArgumentParser(description="Inspect Step 19 validation output and report.")
@@ -100,6 +106,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function runs the Step 19 artifact checker.
 def main() -> None:
     """Ejecuta la comprobacion de outputs del Step 19."""
     args = parse_args()

@@ -50,6 +50,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("snort.detector_policy_label must be a non-empty string.")
 
 
+#This function resolves the detector-policy branch for metric inputs and outputs.
 def detector_policy_label_from_config(config: dict[str, Any], override: str | None = None) -> str:
     raw_label = override if override is not None else config["snort"]["detector_policy_label"]
     label = sanitize_name_component(raw_label)
@@ -58,6 +59,7 @@ def detector_policy_label_from_config(config: dict[str, Any], override: str | No
     return label
 
 
+#This function preserves the Snort rules-policy identity in final metric provenance.
 def rules_policy_path_from_config(config: dict[str, Any]) -> str:
     return str(config.get("snort", {}).get("rules_policy_path", "")).strip()
 
@@ -75,6 +77,7 @@ def default_paths(
     }
 
 
+#This function resolves the three canonical Step 23 artifacts required for metric computation.
 def default_step23_artifact_paths(comparison_dir: Path) -> dict[str, Path]:
     return {
         "alert_comparison": comparison_dir / "alert-comparison.json",
@@ -83,12 +86,14 @@ def default_step23_artifact_paths(comparison_dir: Path) -> dict[str, Path]:
     }
 
 
+#This function validates that a loaded Step 23 artifact has an object root.
 def require_json_object(value: Any, path: Path, artifact_name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{artifact_name} must be a JSON object: {path}")
     return value
 
 
+#This function requires non-negative integer counters used by primary metrics.
 def require_int(summary: dict[str, Any], key: str) -> int:
     value = summary.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -98,6 +103,7 @@ def require_int(summary: dict[str, Any], key: str) -> int:
     return value
 
 
+#This function reads optional diagnostic counters while retaining strict integer validation.
 def optional_int(summary: dict[str, Any], key: str, default: int = 0) -> int:
     if key not in summary:
         return default
@@ -109,6 +115,7 @@ def optional_int(summary: dict[str, Any], key: str, default: int = 0) -> int:
     return value
 
 
+#This function computes rates whose denominator must be positive for methodological validity.
 def safe_rate(numerator: int | float, denominator: int) -> float:
     if denominator == 0:
         raise ValueError(
@@ -117,12 +124,14 @@ def safe_rate(numerator: int | float, denominator: int) -> float:
     return float(numerator) / float(denominator)
 
 
+#This function returns zero for an empty comparison population and otherwise computes the rate normally.
 def zeroable_rate(numerator: int | float, denominator: int) -> float:
     if denominator == 0:
         return 0.0
     return float(numerator) / float(denominator)
 
 
+#This function stores a metric together with the exact numerator and denominator that produced it.
 def metric_value(value: float, numerator: int | float, denominator: int) -> dict[str, int | float]:
     return {
         "value": value,
@@ -132,6 +141,7 @@ def metric_value(value: float, numerator: int | float, denominator: int) -> dict
     }
 
 
+#This function requires all Step 23 inputs to describe the same comparison run and detector policy.
 def validate_step23_metadata(
     *,
     artifact: dict[str, Any],
@@ -154,6 +164,7 @@ def validate_step23_metadata(
         )
 
 
+#This function extracts the POST Snort run label used to identify the measured result.
 def post_run_label_from_metadata(comparison_metadata: dict[str, Any]) -> str | None:
     post_metadata = comparison_metadata.get("post_normalization_metadata")
     if isinstance(post_metadata, dict):
@@ -166,6 +177,7 @@ def post_run_label_from_metadata(comparison_metadata: dict[str, Any]) -> str | N
     return None
 
 
+#This function derives unique PRE, POST, and newly introduced signature sets for SIR.
 def summarize_signature_rows(signature_artifact: dict[str, Any]) -> dict[str, Any]:
     signatures = signature_artifact.get("signatures")
     if not isinstance(signatures, list):
@@ -217,6 +229,7 @@ def summarize_signature_rows(signature_artifact: dict[str, Any]) -> dict[str, An
     }
 
 
+#This function computes SER, NARR, SIR, and the agreed diagnostic rates from validated counts.
 def build_metrics(
     *,
     config: dict[str, Any],
@@ -241,14 +254,8 @@ def build_metrics(
     snort_event_packet_anchor_shift_count = optional_int(
         comparison_summary,
         "snort_event_packet_anchor_shift_count",
-        optional_int(comparison_summary, "delayed_snort_event_re_emission_count"),
     )
-    induced_alert_count = optional_int(
-        comparison_summary,
-        "induced_alert_count",
-        optional_int(comparison_summary, "post_only_unmatched_count"),
-    )
-    post_only_unmatched_count = induced_alert_count
+    induced_alert_count = optional_int(comparison_summary, "induced_alert_count")
     same_signature_match_count = require_int(comparison_summary, "same_signature_matches")
     different_signature_replacements = require_int(comparison_summary, "different_signature_replacements")
     pre_unique_signature_count = require_int(comparison_summary, "pre_unique_signature_count")
@@ -273,9 +280,7 @@ def build_metrics(
         "alert_mutation_count": alert_mutation_count,
         "tcp_conversation_displaced_detection_count": tcp_conversation_displaced_detection_count,
         "snort_event_packet_anchor_shift_count": snort_event_packet_anchor_shift_count,
-        "delayed_snort_event_re_emission_count": snort_event_packet_anchor_shift_count,
         "induced_alert_count": induced_alert_count,
-        "post_only_unmatched_count": post_only_unmatched_count,
         "same_signature_match_count": same_signature_match_count,
         "different_signature_replacements": different_signature_replacements,
         "signature_evasion_rate": signature_evasion_rate,
@@ -284,16 +289,13 @@ def build_metrics(
         "narr": net_alert_reduction_rate,
         "signature_introduction_rate": signature_introduction_rate,
         "sir": signature_introduction_rate,
-        "successful_evasion_rate_raw": signature_evasion_rate,
         "failed_evasion_rate": safe_rate(failed_evasion_count, pre_alert_count),
         "alert_mutation_rate": safe_rate(alert_mutation_count, pre_alert_count),
-        "alert_mutation_rate_raw": safe_rate(alert_mutation_count, pre_alert_count),
         "tcp_conversation_displaced_detection_rate": safe_rate(tcp_conversation_displaced_detection_count, pre_alert_count),
         "packet_anchor_shift_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
         "snort_event_packet_anchor_shift_rate": safe_rate(snort_event_packet_anchor_shift_count, pre_alert_count),
         "post_alert_retention_rate": safe_rate(post_alert_count, pre_alert_count),
         "induced_alert_rate": safe_rate(induced_alert_count, pre_alert_count),
-        "induced_alert_rate_vs_pre": safe_rate(induced_alert_count, pre_alert_count),
         "unique_pre_signature_count": pre_unique_signature_count,
         "unique_post_signature_count": post_unique_signature_count,
         **signature_breakdowns,
@@ -305,10 +307,7 @@ def build_metrics(
     }
 
 
-def percentage(value: float) -> str:
-    return f"{value * 100:.6f}%"
-
-
+#This function separates the canonical primary metrics from diagnostic rates used for interpretation.
 def build_metric_groups(metrics: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     primary_metrics = {
         "ser": metric_value(metrics["ser"], metrics["successful_evasion_count"], metrics["pre_alert_count"]),
@@ -334,6 +333,7 @@ def build_metric_groups(metrics: dict[str, Any]) -> tuple[dict[str, Any], dict[s
     return primary_metrics, diagnostic_metrics
 
 
+#This function builds the compact human-readable JSON summary emitted beside the detailed metrics artifact.
 def build_clean_summary(artifact: dict[str, Any]) -> dict[str, Any]:
     primary_metrics, diagnostic_metrics = build_metric_groups(artifact["metrics"])
     return {
@@ -347,6 +347,7 @@ def build_clean_summary(artifact: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#This function writes the compact metrics summary as stable indented JSON.
 def write_clean_summary_json(path: Path, clean_summary: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as output_file:
@@ -354,6 +355,7 @@ def write_clean_summary_json(path: Path, clean_summary: dict[str, Any]) -> None:
         output_file.write("\n")
 
 
+#This function renders the detailed metrics artifact as a Markdown report for thesis inspection.
 def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
     metrics = artifact["metrics"]
     policy = artifact["metric_policy"]
@@ -417,6 +419,7 @@ def write_metrics_report(path: Path, artifact: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+#This function validates Step 23 artifacts, computes all final metrics, and writes the detailed and clean reports.
 def compute_metrics(
     *,
     config_path: str | Path,
@@ -492,9 +495,7 @@ def compute_metrics(
             "zero_pre_alert_policy": "fail clearly because SER is undefined without PRE detections.",
             "tcp_conversation_displaced_detection_policy": "reported separately and not counted as evasion.",
             "snort_event_packet_anchor_shift_policy": "reported separately and not counted as evasion.",
-            "delayed_snort_event_re_emission_policy": "legacy alias for snort_event_packet_anchor_shift_count.",
             "induced_alert_policy": "reported separately and not counted as evasion.",
-            "post_only_unmatched_policy": "legacy alias for induced_alert_count.",
         },
         "primary_metrics": primary_metrics,
         "diagnostic_metrics": diagnostic_metrics,
@@ -512,6 +513,7 @@ def compute_metrics(
     return artifact
 
 
+#This function prints one metric category with value, percentage, and source counts.
 def print_metric_group(title: str, metric_group: dict[str, Any]) -> None:
     print(title)
     for name, entry in metric_group.items():
@@ -521,6 +523,7 @@ def print_metric_group(title: str, metric_group: dict[str, Any]) -> None:
         )
 
 
+#This function resolves the Step 24 terminal log beside the active experiment artifacts.
 def resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         return Path(args.log_file).expanduser()
@@ -536,6 +539,7 @@ def resolve_log_path(args: argparse.Namespace) -> Path:
     )
 
 
+#This function parses metric input overrides while preserving canonical defaults.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute Step 24 thesis metrics from Step 23 alert comparison artifacts.")
     add = parser.add_argument
@@ -551,6 +555,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function computes final metrics, prints the multidimensional profile, and reports artifact paths.
 def main() -> None:
     args = parse_cli_args()
     log_path = resolve_log_path(args)

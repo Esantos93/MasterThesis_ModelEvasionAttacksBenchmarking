@@ -49,11 +49,13 @@ IDS_MANIFEST_FIELDS = {
 }
 
 
+#This function reads one Step 15 artifact for independent validation.
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
+#This function resolves artifact paths across local and transferred experiment roots without guessing identities.
 def resolve_existing_path(path_value: Any, base_dir: Path) -> Path:
     if not isinstance(path_value, str) or not path_value:
         raise ValueError(f"Expected non-empty path string, found {path_value!r}")
@@ -70,6 +72,7 @@ def resolve_existing_path(path_value: Any, base_dir: Path) -> Path:
     raise FileNotFoundError(f"Could not resolve artifact path: {path_value}")
 
 
+#This function locates the single active V3 Compact Unit manifest in a grouping directory.
 def find_manifest(output_dir: Path) -> Path:
     manifest_path = output_dir / f"{MANIFEST_SCHEMA}.json"
     if not manifest_path.exists():
@@ -77,6 +80,7 @@ def find_manifest(output_dir: Path) -> Path:
     return manifest_path
 
 
+#This function resolves a manifest strategy through the shared capability registry.
 def capabilities_for_strategy(strategy: Any) -> ModificationCapabilities:
     if not isinstance(strategy, str) or not strategy:
         raise ValueError(f"Step 15 manifest has an invalid strategy: {strategy!r}")
@@ -85,6 +89,7 @@ def capabilities_for_strategy(strategy: Any) -> ModificationCapabilities:
     )
 
 
+#This function checks that header classification covers the complete source packet population.
 def check_header_classification_artifacts(
     metadata: dict[str, Any],
     output_dir: Path,
@@ -126,6 +131,7 @@ def check_header_classification_artifacts(
     }
 
 
+#This function validates manifest identity, counts, schemas, strategy capabilities, and referenced files.
 def check_common_manifest(
     *,
     manifest: dict[str, Any],
@@ -154,7 +160,7 @@ def check_common_manifest(
             f"Expected grouping_unit='physical_packet', found {metadata.get('grouping_unit')!r}"
         )
 
-    capabilities = capabilities_for_strategy(metadata.get("strategy"))
+    capabilities = capabilities_for_strategy(metadata.get("modification_strategy"))
     expected_capabilities = capabilities.as_metadata()
     if metadata.get("modification_strategy") != capabilities.strategy:
         raise ValueError("Manifest strategy and modification_strategy disagree.")
@@ -218,6 +224,7 @@ def check_common_manifest(
     return check_header_classification_artifacts(metadata, manifest_path.parent)
 
 
+#This function loads the Step 14 packet universe referenced by the manifest.
 def load_source_packet_json(
     metadata: dict[str, Any],
     output_dir: Path,
@@ -237,6 +244,7 @@ def load_source_packet_json(
     return source, source_path
 
 
+#This function builds packet, connection, and canonical-region indexes used by all unit checks.
 def build_source_lookups(
     source: dict[str, Any],
 ) -> tuple[
@@ -313,6 +321,7 @@ def build_source_lookups(
     )
 
 
+#This function verifies the Parent Group index against the source packet universe and grouping policy.
 def validate_parent_group_index(
     *,
     manifest: dict[str, Any],
@@ -419,6 +428,7 @@ def validate_parent_group_index(
     return groups_by_id, packet_owner
 
 
+#This function validates IDS context only when the selected input profile requires it.
 def prepare_ids_context(
     *,
     metadata: dict[str, Any],
@@ -461,6 +471,7 @@ def prepare_ids_context(
     return True, mapping
 
 
+#This function checks compact Parent Group references without requiring replicated packet-ID lists.
 def validate_group_metadata(
     *,
     unit: dict[str, Any],
@@ -486,6 +497,7 @@ def validate_group_metadata(
             )
 
 
+#This function validates one authorized header region against the source packet and active editability policy.
 def validate_header_region(
     *,
     region: dict[str, Any],
@@ -518,6 +530,7 @@ def validate_header_region(
         raise ValueError(f"Unit {unit_path} header target duplicates inconsistent limits.")
 
 
+#This function validates one canonical payload target, its limits, ownership, and physical aliases.
 def validate_payload_entry(
     *,
     entry: dict[str, Any],
@@ -747,6 +760,7 @@ def validate_payload_entry(
     return entry_target_count
 
 
+#This function recomputes the projection and requires exact agreement with the stored token plan.
 def validate_token_plan(
     *,
     unit: dict[str, Any],
@@ -792,6 +806,7 @@ def validate_token_plan(
     return overflow_tokens
 
 
+#This function derives the physical packets represented by a unit from its active targets.
 def represented_parent_packet_ids(
     *,
     unit: dict[str, Any],
@@ -817,6 +832,7 @@ def represented_parent_packet_ids(
     return sorted(represented, key=packet_order.__getitem__)
 
 
+#This function verifies contiguous flow-fragment context and packet order.
 def validate_flow_context(
     *,
     unit: dict[str, Any],
@@ -868,6 +884,7 @@ def validate_flow_context(
     return fragment_index, fragment_count
 
 
+#This function proves canonical payload coverage without overlap or missing authorized bytes.
 def validate_canonical_coverage(
     *,
     capabilities: ModificationCapabilities,
@@ -933,9 +950,10 @@ def validate_canonical_coverage(
     }
 
 
+#This function validates every V3 unit and aggregates coverage and token-plan diagnostics.
 def check_v3_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
     metadata = manifest["metadata"]
-    capabilities = capabilities_for_strategy(metadata.get("strategy"))
+    capabilities = capabilities_for_strategy(metadata.get("modification_strategy"))
     expected_capabilities = capabilities.as_metadata()
     source, source_path = load_source_packet_json(metadata, manifest_path.parent)
     (
@@ -1050,8 +1068,6 @@ def check_v3_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, A
             raise ValueError(
                 f"Unit {unit_path} has wrong schema {unit.get('schema_version')!r}."
             )
-        if unit.get("strategy") != capabilities.strategy:
-            raise ValueError(f"Unit {unit_path} has the wrong strategy.")
         if unit.get("modification_strategy") != capabilities.strategy:
             raise ValueError(f"Unit {unit_path} has the wrong modification_strategy.")
         if unit.get("capabilities") != expected_capabilities:
@@ -1418,6 +1434,7 @@ def check_v3_units(manifest: dict[str, Any], manifest_path: Path) -> dict[str, A
     }
 
 
+#This function parses checker inputs and transferred-root overrides.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Validate active Step 15 V3 compact modification-unit outputs."
@@ -1450,6 +1467,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function runs the independent checker and returns a nonzero status on contract violations.
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser()
@@ -1486,7 +1504,7 @@ def main() -> None:
         "manifest": str(manifest_path),
         "manifest_schema": metadata.get("schema_version"),
         "unit_schema": metadata.get("compact_view_schema_version"),
-        "strategy": metadata.get("strategy"),
+        "modification_strategy": metadata.get("modification_strategy"),
         "capabilities": metadata.get("capabilities"),
         "grouping_policy": metadata.get("grouping_policy"),
         "grouping_unit": metadata.get("grouping_unit"),

@@ -258,7 +258,7 @@ def resolve_prompt_file_path(prompt_entry: dict[str, Any], prompt_dir: Path) -> 
         if fallback_path.exists():
             return fallback_path
 
-    prompt_id = prompt_entry.get("prompt_unit_id") or prompt_entry.get("group_id")
+    prompt_id = prompt_entry.get("prompt_unit_id")
     if isinstance(prompt_id, str) and prompt_id:
         fallback_path = prompt_dir / f"{prompt_id}.prompt.json"
         if fallback_path.exists():
@@ -459,22 +459,6 @@ def build_prompt_generation_params(
     return prompt_generation_params, runtime_token_plan
 
 
-#This function extracts the text response from the model chat completion response.
-def extract_response_text(response: dict[str, Any]) -> str:
-    choices = response.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise ValueError("Model response did not contain choices.")
-    first_choice = choices[0]
-    if not isinstance(first_choice, dict):
-        raise ValueError("Model response first choice is not an object.")
-    message = first_choice.get("message")
-    if isinstance(message, dict) and isinstance(message.get("content"), str):
-        return message["content"]
-    if isinstance(first_choice.get("text"), str):
-        return first_choice["text"]
-    raise ValueError("Model response did not contain message content.")
-
-
 #This function extracts generated text from one streamed model chunk.
 def extract_stream_chunk_text(chunk: dict[str, Any]) -> str:
     choices = chunk.get("choices")
@@ -501,14 +485,12 @@ def extract_generation_response_metadata(response: Any) -> dict[str, Any]:
     return deepcopy(response_metadata)
 
 
-#This function accepts both historical string results and structured backend generation results.
+#This function validates and unpacks the structured result returned by every active generation backend.
 def normalize_backend_generation_result(result: Any) -> tuple[str, dict[str, Any]]:
-    if isinstance(result, str):
-        return result, {}
     if isinstance(result, dict) and isinstance(result.get("text"), str):
         return result["text"], extract_generation_response_metadata(result)
     raise TypeError(
-        "Model backend generation result must be a string or an object containing string field 'text'."
+        "Model backend generation result must be an object containing string field 'text'."
     )
 
 
@@ -531,7 +513,7 @@ def count_visible_packet_ids(generated_text: str, expected_packet_ids: list[str]
 def start_generation_heartbeat(
     *,
     model_name: str,
-    group_id: str,
+    prompt_unit_id: str,
     prompt_index: int,
     total_prompts: int,
     heartbeat_seconds: int,
@@ -552,7 +534,7 @@ def start_generation_heartbeat(
             print(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
                 f"{model_name}: still generating response for prompt/group {prompt_index}/{total_prompts} "
-                f"({group_id}){packet_text}"
+                f"({prompt_unit_id}){packet_text}"
             )
 
     thread = threading.Thread(target=heartbeat_loop, daemon=True)
@@ -566,6 +548,7 @@ LAST_COMPLETE_JSON_RECOVERY_PARSER = "strict_last_complete_top_level_json_v1"
 class IncompleteTrailingJsonObjectError(ValueError):
     failure_reason = "incomplete_trailing_json_object"
 
+    #This initializer preserves parser recovery evidence for the failure metadata artifact.
     def __init__(self, output_recovery: dict[str, Any]) -> None:
         super().__init__(
             "A new top-level JSON object starts after the last complete object but does not finish."
@@ -657,12 +640,6 @@ def parse_model_json_with_recovery(raw_text: str) -> tuple[Any, dict[str, Any] |
             recovery["last_complete_top_level_json"]["incomplete_object_start_char"] = incomplete_start
             raise IncompleteTrailingJsonObjectError(recovery)
         return selected["value"], recovery
-
-
-#This compatibility wrapper returns only the selected JSON value.
-def parse_model_json(raw_text: str) -> Any:
-    parsed_output, _ = parse_model_json_with_recovery(raw_text)
-    return parsed_output
 
 
 #This function builds a lookup for editable regions declared by Step 16.
@@ -954,6 +931,7 @@ def expand_compact_header_edits(
     }
     seen_header_edit_targets: dict[tuple[str, str], int] = {}
 
+    #This nested helper snapshots the normalization operations applied while validating header output.
     def current_normalization() -> dict[str, Any]:
         return build_header_output_normalization(
             region_id_alias_count=normalized_region_id_alias_count,
@@ -1479,7 +1457,6 @@ def build_run_metadata(
         "status": status,
         "failure_reason": failure_reason,
         "experiment_id": prompt_package.get("experiment_id"),
-        "group_id": prompt_package.get("group_id"),
         "parent_group_id": prompt_package.get("parent_group_id"),
         "prompt_unit_id": prompt_package.get("prompt_unit_id"),
         "prompt_version": prompt_package.get("prompt_version"),
@@ -1628,7 +1605,7 @@ def run_single_prompt(
     total_prompts: int,
 ) -> dict[str, Any]:
     prompt_package = validate_prompt_package(read_json(prompt_path), prompt_path)
-    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_package.get("group_id") or prompt_path.stem.replace(".prompt", ""))
+    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_path.stem.replace(".prompt", ""))
     parent_group_id = str(prompt_package.get("parent_group_id") or "")
     output_stem = prompt_unit_id
     raw_path = output_dirs["raw"] / f"{output_stem}.raw.txt"
@@ -1671,7 +1648,7 @@ def run_single_prompt(
         }
         heartbeat_stop, heartbeat_thread = start_generation_heartbeat(
             model_name=model_name,
-            group_id=prompt_unit_id,
+            prompt_unit_id=prompt_unit_id,
             prompt_index=prompt_index,
             total_prompts=total_prompts,
             heartbeat_seconds=heartbeat_seconds,
@@ -1804,7 +1781,7 @@ def build_prompt_output_context(
     model_name: str,
     output_dirs: dict[str, Path],
 ) -> dict[str, Any]:
-    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_package.get("group_id") or prompt_path.stem.replace(".prompt", ""))
+    prompt_unit_id = str(prompt_package.get("prompt_unit_id") or prompt_path.stem.replace(".prompt", ""))
     output_stem = prompt_unit_id
     return {
         "prompt_unit_id": prompt_unit_id,

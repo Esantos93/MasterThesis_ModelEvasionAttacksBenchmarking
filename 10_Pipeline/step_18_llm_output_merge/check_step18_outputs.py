@@ -4,12 +4,14 @@ from pathlib import Path
 from typing import Any
 
 
+#This function loads one Step 18 artifact for manual and automated inspection.
 def load_json(path: Path) -> dict[str, Any]:
     """Carga un fichero JSON y devuelve su contenido como diccionario."""
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
+#This function reports artifact size without loading large traffic files into memory.
 def file_size_mb(path: Path) -> str:
     """Devuelve el tamano del fichero en MB, o una cadena vacia si no existe."""
     if not path.exists():
@@ -17,6 +19,7 @@ def file_size_mb(path: Path) -> str:
     return f"{path.stat().st_size / (1024 * 1024):.2f} MB"
 
 
+#This function prints structured checker sections with an optional output bound.
 def print_json(title: str, data: Any, limit: int | None = None) -> None:
     """Imprime una seccion JSON, recortandola si se define un limite."""
     text = json.dumps(data, indent=2, ensure_ascii=False)
@@ -26,6 +29,7 @@ def print_json(title: str, data: Any, limit: int | None = None) -> None:
     print(text)
 
 
+#This function verifies and reports the required final Step 18 artifacts.
 def print_expected_files(step18_dir: Path) -> tuple[Path, Path]:
     """Muestra y devuelve los ficheros esperados del Step 18."""
     merged = step18_dir / "merged_modified_traffic.json"
@@ -43,6 +47,7 @@ def print_expected_files(step18_dir: Path) -> tuple[Path, Path]:
     return merged, merge_report
 
 
+#This function summarizes completion status, edits, failures, and materialization evidence.
 def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None:
     """Resume metadata, contadores y muestras relevantes del Step 18."""
     merged_data = load_json(merged)
@@ -134,6 +139,7 @@ def summarize_step18(merged: Path, merge_report: Path, sample_size: int) -> None
     )
 
 
+#This function parses the Step 18 output directory and sample size.
 def parse_args() -> argparse.Namespace:
     """Parsea los argumentos de linea de comandos del comprobador."""
     parser = argparse.ArgumentParser(description="Inspect Step 18 merged output and merge report.")
@@ -151,6 +157,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function runs the Step 18 artifact checker.
 def main() -> None:
     """Ejecuta la comprobacion de outputs del Step 18."""
     args = parse_args()

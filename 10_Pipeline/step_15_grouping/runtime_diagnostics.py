@@ -10,6 +10,7 @@ from typing import Any
 MIB = 1024 * 1024
 
 
+#This function reads Linux process and host memory counters for long Step 15 runs.
 def _linux_memory_snapshot() -> dict[str, float]:
     status_values: dict[str, int] = {}
     try:
@@ -41,6 +42,7 @@ def _linux_memory_snapshot() -> dict[str, float]:
     return result
 
 
+#This function reads equivalent Windows memory counters for local diagnostics.
 def _windows_memory_snapshot() -> dict[str, float]:
     if os.name != "nt":
         return {}
@@ -97,6 +99,7 @@ def _windows_memory_snapshot() -> dict[str, float]:
     return result
 
 
+#This function selects the platform-specific memory collector and returns a stable diagnostic shape.
 def process_memory_snapshot() -> dict[str, float]:
     snapshot = _linux_memory_snapshot()
     if snapshot:
@@ -104,11 +107,13 @@ def process_memory_snapshot() -> dict[str, float]:
     return _windows_memory_snapshot()
 
 
+#This function formats a compact heartbeat representation of the current memory snapshot.
 def memory_snapshot_text() -> str:
     snapshot = process_memory_snapshot()
     return ", ".join(f"{key}={value}" for key, value in snapshot.items())
 
 
+#This function bounds manifest-level token diagnostics while leaving complete plans inside unit artifacts.
 def summarize_token_plan(token_plan: dict[str, Any]) -> dict[str, Any]:
     breakdown = token_plan.get("breakdown", {})
     bounded_breakdown = {
@@ -136,6 +141,7 @@ def summarize_token_plan(token_plan: dict[str, Any]) -> dict[str, Any]:
 
 
 class PlanningDiagnostics:
+    #This initializer creates bounded counters for diagnostic-only and full Step 15 planning runs.
     def __init__(self) -> None:
         self.unit_count = 0
         self.header_packet_atom_count = 0
@@ -156,6 +162,7 @@ class PlanningDiagnostics:
         self.payload_window_length_counts: Counter[int] = Counter()
         self.parent_group_unit_counts: Counter[str] = Counter()
 
+    #This method accumulates target, token, alias, and fragmentation statistics from one unit.
     def observe_unit(self, unit: dict[str, Any]) -> None:
         self.unit_count += 1
         parent_group_id = str(unit["parent_group_id"])
@@ -218,6 +225,7 @@ class PlanningDiagnostics:
             total_planned_tokens,
         )
 
+    #This method produces a deterministic bounded diagnostic report without unit-level payload data.
     def as_dict(self) -> dict[str, Any]:
         payload_window_count = sum(self.payload_window_length_counts.values())
         payload_window_bytes = sum(

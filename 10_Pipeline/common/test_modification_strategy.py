@@ -79,20 +79,12 @@ class ModificationStrategyTests(unittest.TestCase):
             capabilities.as_metadata(),
         )
 
-    def test_rejects_retired_strategy_names_without_aliases(self) -> None:
-        retired_names = (
-            "payload_only_strategy_v1",
-            "hybrid_physical_header_canonical_payload_strategy_v1",
-            "hybrid_strategy_v1",
-        )
-
-        for retired_name in retired_names:
-            with self.subTest(retired_name=retired_name):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "Unsupported pipeline.modification_strategy",
-                ):
-                    resolve_modification_strategy(config_for(retired_name))
+    def test_rejects_unsupported_strategy(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Unsupported pipeline.modification_strategy",
+        ):
+            resolve_modification_strategy(config_for("unsupported_strategy"))
 
     def test_rejects_missing_or_blank_strategy(self) -> None:
         invalid_configs = (

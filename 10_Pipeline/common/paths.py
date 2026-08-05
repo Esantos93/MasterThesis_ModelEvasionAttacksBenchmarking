@@ -25,6 +25,7 @@ EXPERIMENT_SUBDIRS = [
 ]
 
 
+#This function creates the canonical Step 11-25 experiment directory layout and returns every resolved path.
 def create_experiment_dirs(experiment_root: str | Path) -> list[Path]:
     root = Path(experiment_root)
     root.mkdir(parents=True, exist_ok=True)

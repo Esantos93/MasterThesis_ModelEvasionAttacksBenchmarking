@@ -12,36 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_llm_batch
 import run_llm_batch_vllm
-import reparse_llm_outputs
 import summarize_llm_runtime
-
-
-class ReparseArtifactCleanupTest(unittest.TestCase):
-    def test_accepted_reparse_removes_superseded_failure_artifacts(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            failures_dir = Path(temp_dir)
-            failure_path = failures_dir / "unit.failure.json"
-            rejected_path = failures_dir / "unit.rejected.json"
-            failure_path.write_text("{}\n", encoding="utf-8")
-            rejected_path.write_text("{}\n", encoding="utf-8")
-            output_paths = {
-                "raw": "unit.raw.txt",
-                "failure": str(failure_path),
-                "rejected_json": str(rejected_path),
-            }
-
-            removed_paths = reparse_llm_outputs.remove_superseded_failure_artifacts(
-                failure_path=failure_path,
-                rejected_path=rejected_path,
-                output_paths=output_paths,
-            )
-
-            self.assertEqual(removed_paths, [failure_path, rejected_path])
-            self.assertFalse(failure_path.exists())
-            self.assertFalse(rejected_path.exists())
-            self.assertNotIn("failure", output_paths)
-            self.assertNotIn("rejected_json", output_paths)
-            self.assertEqual(output_paths["raw"], "unit.raw.txt")
 
 
 class PromptPackageContractTest(unittest.TestCase):
@@ -50,19 +21,17 @@ class PromptPackageContractTest(unittest.TestCase):
         prompt_package["schema_version"] = "prompt_unit_v1"
 
         with self.assertRaisesRegex(ValueError, "prompt_unit_v2"):
-            run_llm_batch.validate_prompt_package(prompt_package, Path("historical_prompt.prompt.json"))
+            run_llm_batch.validate_prompt_package(prompt_package, Path("unsupported_prompt.prompt.json"))
 
-    def test_rejects_historical_source_contracts(self) -> None:
-        for schema_version in ("compact_modification_unit_v1", "compact_modification_unit_v2"):
-            with self.subTest(schema_version=schema_version):
-                prompt_package = build_header_prompt_package()
-                prompt_package["source_modification_unit_schema_version"] = schema_version
+    def test_rejects_unsupported_source_contract(self) -> None:
+        prompt_package = build_header_prompt_package()
+        prompt_package["source_modification_unit_schema_version"] = "unsupported_contract"
 
-                with self.assertRaisesRegex(ValueError, "accepts only prompt units generated from"):
-                    run_llm_batch.validate_prompt_package(
-                        prompt_package,
-                        Path(f"historical_{schema_version}.prompt.json"),
-                    )
+        with self.assertRaisesRegex(ValueError, "accepts only prompt units generated from"):
+            run_llm_batch.validate_prompt_package(
+                prompt_package,
+                Path("unsupported_contract.prompt.json"),
+            )
 
     def test_rejects_capabilities_not_matching_shared_registry(self) -> None:
         prompt_package = build_header_prompt_package()
@@ -345,7 +314,9 @@ def build_prompt_engineering_header_prompt_package() -> dict:
 #This test case covers Step 17 response JSON parsing before contract validation.
 class ModelJsonParsingTest(unittest.TestCase):
     def test_strict_json_response_is_parsed(self) -> None:
-        parsed = run_llm_batch.parse_model_json('{"schema_version": "patch_output_v1"}')
+        parsed, _ = run_llm_batch.parse_model_json_with_recovery(
+            '{"schema_version": "patch_output_v1"}'
+        )
 
         self.assertEqual(parsed["schema_version"], "patch_output_v1")
 
@@ -359,7 +330,7 @@ class ModelJsonParsingTest(unittest.TestCase):
 }
 ```"""
 
-        parsed = run_llm_batch.parse_model_json(raw_text)
+        parsed, _ = run_llm_batch.parse_model_json_with_recovery(raw_text)
 
         self.assertEqual(parsed["schema_version"], "patch_output_v1")
         self.assertEqual(parsed["header_edits"], [])
@@ -607,7 +578,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
         self.assertEqual(parsed_output["patches"][0]["packet_id"], "tcp_region_001")
         self.assertEqual(parsed_output["patches"][0]["canonical_region_id"], "tcp_region_001")
 
-    def test_mismatched_legacy_and_canonical_ids_are_rejected(self) -> None:
+    def test_mismatched_packet_and_canonical_ids_are_rejected(self) -> None:
         parsed_output = {
             "schema_version": "patch_output_v1",
             "parent_group_id": "parent_001",
@@ -1155,7 +1126,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
 }
 ```"""
 
-        parsed_output = run_llm_batch.parse_model_json(raw_text)
+        parsed_output, _ = run_llm_batch.parse_model_json_with_recovery(raw_text)
         result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
 
         self.assertTrue(result["accepted"])
@@ -1171,7 +1142,7 @@ class CanonicalRegionPatchValidationTest(unittest.TestCase):
 }
 ```"""
 
-        parsed_output = run_llm_batch.parse_model_json(raw_text)
+        parsed_output, _ = run_llm_batch.parse_model_json_with_recovery(raw_text)
         result = run_llm_batch.validate_patch_output(parsed_output, build_header_prompt_package())
 
         self.assertTrue(result["accepted"])
@@ -1349,7 +1320,7 @@ class SyntheticLlm:
         *,
         messages_batch: list[list[dict]],
         generation_params_batch: list[dict],
-    ) -> list[str]:
+    ) -> list[dict]:
         prompt_unit_ids = [str(messages[0]["content"]) for messages in messages_batch]
         self.batch_generation_calls.append(prompt_unit_ids)
         self.batch_max_tokens.append([int(params["max_tokens"]) for params in generation_params_batch])
@@ -1363,7 +1334,7 @@ class SyntheticLlm:
                 }
             if self.abstention_reason is not None:
                 output["abstention"] = self.abstention_reason
-            outputs.append(json.dumps(output))
+            outputs.append({"text": json.dumps(output), "response_metadata": {}})
         return outputs
 
 
@@ -1383,11 +1354,14 @@ class StaticRawSyntheticLlm(SyntheticLlm):
         *,
         messages_batch: list[list[dict]],
         generation_params_batch: list[dict],
-    ) -> list[str]:
+    ) -> list[dict]:
         prompt_unit_ids = [str(messages[0]["content"]) for messages in messages_batch]
         self.batch_generation_calls.append(prompt_unit_ids)
         self.batch_max_tokens.append([int(params["max_tokens"]) for params in generation_params_batch])
-        return [self.raw_outputs[prompt_unit_id] for prompt_unit_id in prompt_unit_ids]
+        return [
+            {"text": self.raw_outputs[prompt_unit_id], "response_metadata": {}}
+            for prompt_unit_id in prompt_unit_ids
+        ]
 
 
 #This backend returns vLLM-shaped structured results with caller-controlled termination metadata.
@@ -1463,7 +1437,6 @@ def build_runtime_prompt(
     prompt_package = build_header_prompt_package()
     prompt_package["prompt_unit_id"] = prompt_unit_id
     prompt_package["source_modification_unit_id"] = prompt_unit_id
-    prompt_package["group_id"] = prompt_unit_id
     prompt_package["input_traceability"]["source_modification_unit_id"] = prompt_unit_id
     prompt_package["messages"] = [{"role": "user", "content": prompt_unit_id}]
     if prompt_engineering:
@@ -1721,63 +1694,6 @@ class TokenPlanRuntimeTest(unittest.TestCase):
                 2,
             )
 
-    def test_reparser_uses_last_complete_json_and_records_recovery(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            run_dir = root / "run"
-            for directory_name in ["raw", "parsed", "metadata", "failures"]:
-                (run_dir / directory_name).mkdir(parents=True, exist_ok=True)
-            prompt_path = root / "reparse_recovery.prompt.json"
-            prompt_path.write_text(
-                json.dumps(build_runtime_prompt("reparse_recovery", planned_output_tokens=20)),
-                encoding="utf-8",
-            )
-            draft = {
-                "schema_version": "patch_output_v1",
-                "parent_group_id": "parent_001",
-                "prompt_unit_id": "reparse_recovery",
-                "header_edits": [["packet_000001", "ipv4.ttl", 63]],
-            }
-            final = {
-                "schema_version": "patch_output_v1",
-                "parent_group_id": "parent_001",
-                "prompt_unit_id": "reparse_recovery",
-                "header_edits": [["packet_000001", "ipv4.ttl", 128]],
-            }
-            raw_path = run_dir / "raw" / "reparse_recovery.raw.txt"
-            raw_path.write_text(f"Draft:\n{json.dumps(draft)}\nFinal:\n{json.dumps(final)}", encoding="utf-8")
-            metadata_path = run_dir / "metadata" / "reparse_recovery.metadata.json"
-            metadata_path.write_text(
-                json.dumps(
-                    {
-                        "status": "failed",
-                        "failure_reason": "JSONDecodeError",
-                        "prompt_file": str(prompt_path),
-                        "parent_group_id": "parent_001",
-                        "prompt_unit_id": "reparse_recovery",
-                        "model_name": "synthetic",
-                        "output_paths": {"raw": str(raw_path), "metadata": str(metadata_path)},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = reparse_llm_outputs.reparse_one_raw_output(
-                raw_path=raw_path,
-                run_dir=run_dir,
-                prompt_dirs=[root],
-                write=True,
-            )
-
-            self.assertEqual(result["new_status"], "accepted")
-            self.assertEqual(
-                result["output_recovery"]["last_complete_top_level_json"]["selected_candidate_ordinal"],
-                2,
-            )
-            updated_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            self.assertEqual(updated_metadata["status"], "accepted")
-            self.assertEqual(updated_metadata["reparse"]["parser"], "step17_current_parser_v2")
-
     def test_conscious_abstention_is_recorded_in_single_and_batch_modes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1839,7 +1755,7 @@ class TokenPlanRuntimeTest(unittest.TestCase):
                 )
                 self.assertEqual(metadata["output_decision"], "conscious_abstention")
 
-    def test_runtime_max_tokens_equals_planned_output_tokens_without_legacy_budgeting(self) -> None:
+    def test_runtime_max_tokens_equals_planned_output_tokens(self) -> None:
         llm = SyntheticLlm({"unit_header_001": 40})
         prompt_package = build_runtime_prompt("unit_header_001", planned_output_tokens=37)
 
@@ -1855,8 +1771,6 @@ class TokenPlanRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime_plan["real_input_tokens"], 40)
         self.assertEqual(runtime_plan["input_estimation_error_tokens"], 30)
         self.assertEqual(runtime_plan["overflow_tokens"], 0)
-        self.assertNotIn("dynamic_output_budget_policy", runtime_plan)
-        self.assertNotIn("expected_output_patch_tokens", runtime_plan)
 
     def test_single_prompt_overflow_is_controlled_and_does_not_call_llm(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2049,11 +1963,9 @@ class VllmModelDiscoveryTest(unittest.TestCase):
             [False, True],
         )
 
-    def test_legacy_string_backend_result_remains_compatible(self) -> None:
-        text, response_metadata = run_llm_batch.normalize_backend_generation_result("legacy text")
-
-        self.assertEqual(text, "legacy text")
-        self.assertEqual(response_metadata, {})
+    def test_backend_result_requires_structured_output(self) -> None:
+        with self.assertRaisesRegex(TypeError, "must be an object"):
+            run_llm_batch.normalize_backend_generation_result("plain text")
 
     def test_vllm_model_discovery_ignores_hidden_checkpoint_directories(self) -> None:
         with TemporaryDirectory() as temp_dir:

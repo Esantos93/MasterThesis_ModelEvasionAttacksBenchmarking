@@ -56,10 +56,6 @@ if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
 print(value)
 ' "${CONFIG_PATH}")"
 fi
-if [[ -n "${EXPECTED_OUTPUT_PATCH_TOKENS:-}" ]]; then
-  echo "EXPECTED_OUTPUT_PATCH_TOKENS is obsolete. Step 17 uses each prompt unit's token_plan.planned_output_tokens."
-  exit 1
-fi
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-30}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"

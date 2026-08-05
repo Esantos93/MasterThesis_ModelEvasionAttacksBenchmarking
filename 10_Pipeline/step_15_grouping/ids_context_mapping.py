@@ -17,11 +17,13 @@ from common.ids_context import (
 )
 
 
+#This function reads one IDS mapping source artifact from disk.
 def _read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
+#This function projects only approved detector evidence into IDS-aware Compact Units.
 def _model_visible_detector_fields(definition: dict[str, Any]) -> dict[str, Any]:
     source = str(definition["detector_source"])
     record = {
@@ -60,9 +62,11 @@ class IdsContextMapping:
     detector_definition_counts_by_source: dict[str, int]
 
     @property
+    #This property reports how many TCP conversations have propagated detector evidence.
     def tcp_connections_with_ids_context(self) -> int:
         return len(self.records_by_connection)
 
+    #This method materializes connection-propagated IDS records for the packets visible in one Compact Unit.
     def materialize(self, physical_packets: list[dict[str, Any]]) -> dict[str, Any]:
         packet_ids_by_connection: dict[str, list[str]] = {}
         for packet in physical_packets:
@@ -96,6 +100,7 @@ class IdsContextMapping:
         validate_ids_context(context)
         return context
 
+    #This method serializes IDS source and population counts for manifest-level audit.
     def manifest_metadata(self) -> dict[str, Any]:
         return {
             "ids_context_enabled": True,
@@ -110,6 +115,7 @@ class IdsContextMapping:
         }
 
 
+#This function joins validated PRE alerts, detector definitions, packets, and TCP connections for Step 15.
 def load_ids_context_mapping(
     *,
     source_bundle_path: Path,

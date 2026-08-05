@@ -62,6 +62,7 @@ class Step18MaterializationFailure(RuntimeError):
 def make_heartbeat(interval_seconds: float = 30.0):
     last_report = {"time": 0.0}
 
+    #This nested helper rate-limits progress messages while allowing forced final status output.
     def heartbeat(message: str, *, force: bool = False) -> None:
         now = time.monotonic()
         if force or now - last_report["time"] >= interval_seconds:

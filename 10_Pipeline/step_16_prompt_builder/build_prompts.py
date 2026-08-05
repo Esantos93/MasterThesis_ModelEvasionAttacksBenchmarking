@@ -137,7 +137,7 @@ def validate_modification_units_manifest(
             f"Found schema_version={schema_version!r} in {manifest_path}."
         )
     validate_capabilities_metadata(
-        strategy=metadata.get("strategy") or metadata.get("modification_strategy"),
+        strategy=metadata.get("modification_strategy"),
         capabilities=metadata.get("capabilities"),
         expected_capabilities=expected_capabilities,
         artifact_path=manifest_path,
@@ -173,7 +173,7 @@ def validate_modification_unit(
             f"{modification_unit_path}. Found schema_version={schema_version!r}."
         )
     validate_capabilities_metadata(
-        strategy=modification_unit.get("strategy") or modification_unit.get("modification_strategy"),
+        strategy=modification_unit.get("modification_strategy"),
         capabilities=modification_unit.get("capabilities"),
         expected_capabilities=expected_capabilities,
         artifact_path=modification_unit_path,
@@ -693,7 +693,6 @@ def build_prompt_unit(
         "experiment_id": config["experiment"]["experiment_id"],
         "parent_group_id": prompt_unit["parent_group_id"],
         "prompt_unit_id": prompt_unit["prompt_unit_id"],
-        "group_id": prompt_unit["prompt_unit_id"],
         "prompt_version": prompt_version,
         "prompt_contract": prompt_contract,
         "modification_strategy": expected_capabilities.strategy,
@@ -939,7 +938,6 @@ def run_prompt_builder(
             {
                 "parent_group_id": prompt_unit["parent_group_id"],
                 "prompt_unit_id": prompt_unit["prompt_unit_id"],
-                "group_id": prompt_unit["group_id"],
                 "prompt_file": prompt_path.name,
                 "source_modification_unit_id": prompt_unit["source_modification_unit_id"],
                 "source_modification_unit_file": str(modification_unit_path),

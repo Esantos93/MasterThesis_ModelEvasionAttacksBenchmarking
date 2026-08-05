@@ -164,12 +164,14 @@ PAYLOAD_INSTRUCTION_PREFIXES = (
 )
 
 
+#This function resolves the configured input profile before Steps 15 and 16 project model-visible JSON.
 def load_prompt_input_json_data_structure_from_config(config: dict[str, Any]) -> dict[str, Any]:
     llm_config = config.get("llm", {})
     profile_name = str(llm_config.get("prompt_input_json_data_profile", DEFAULT_PROMPT_INPUT_JSON_DATA_PROFILE)).strip()
     return load_prompt_input_json_data_structure(profile_name)
 
 
+#This function returns an isolated copy of a registered input profile and rejects unknown selectors.
 def load_prompt_input_json_data_structure(profile_name: str) -> dict[str, Any]:
     if profile_name not in PROMPT_INPUT_JSON_DATA_PROFILES:
         raise ValueError(
@@ -179,12 +181,14 @@ def load_prompt_input_json_data_structure(profile_name: str) -> dict[str, Any]:
     return dict(PROMPT_INPUT_JSON_DATA_PROFILES[profile_name])
 
 
+#This function resolves the configured instruction profile from the shared registry.
 def load_prompt_instructions_profile_from_config(config: dict[str, Any]) -> tuple[str, list[str]]:
     llm_config = config.get("llm", {})
     profile_name = str(llm_config.get("prompt_instructions_profile", DEFAULT_PROMPT_INSTRUCTIONS_PROFILE)).strip()
     return load_prompt_instructions_profile(profile_name)
 
 
+#This function returns an isolated instruction profile so callers cannot mutate the shared definition.
 def load_prompt_instructions_profile(profile_name: str) -> tuple[str, list[str]]:
     if profile_name not in PROMPT_INSTRUCTIONS_PROFILES:
         raise ValueError(
@@ -194,6 +198,7 @@ def load_prompt_instructions_profile(profile_name: str) -> tuple[str, list[str]]
     return profile_name, list(PROMPT_INSTRUCTIONS_PROFILES[profile_name])
 
 
+#This function identifies experiments that require the PRE Snort context bundle.
 def prompt_engineering_profiles_selected(config: dict[str, Any]) -> bool:
     input_profile = load_prompt_input_json_data_structure_from_config(config)
     instructions_profile, _instruction_lines = load_prompt_instructions_profile_from_config(config)
@@ -202,6 +207,7 @@ def prompt_engineering_profiles_selected(config: dict[str, Any]) -> bool:
     ).startswith("prompt_engineering_")
 
 
+#This function copies only explicitly approved fields into the model-visible projection.
 def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict[str, Any]:
     copied: dict[str, Any] = {}
     for field_name in field_names:
@@ -212,6 +218,7 @@ def copy_selected_fields(source: dict[str, Any], field_names: list[Any]) -> dict
     return copied
 
 
+#This function projects canonical payload regions while separating editable targets from non-editable context.
 def build_projected_canonical_regions(
     *,
     prompt_unit: dict[str, Any],
@@ -249,6 +256,7 @@ def build_projected_canonical_regions(
     return projected_regions
 
 
+#This function projects the physical packets and headers selected by the active input profile.
 def build_projected_physical_packets(
     *,
     prompt_unit: dict[str, Any],
@@ -287,6 +295,7 @@ def build_projected_physical_packets(
     return projected_packets
 
 
+#This function builds the compact editable-header table consumed by the prompt and output estimator.
 def build_projected_editable_header_table(
     *,
     prompt_unit: dict[str, Any],
@@ -319,6 +328,7 @@ def build_projected_editable_header_table(
     return rows
 
 
+#This function assembles the exact model-visible JSON from one Compact Unit and one input profile.
 def build_compact_prompt_input(
     *,
     prompt_unit: dict[str, Any],
@@ -390,6 +400,7 @@ def build_compact_prompt_input(
     return prompt_input
 
 
+#This function normalizes internal V3 metadata before model projection while preserving header-only prompt equivalence.
 def prepare_prompt_source_unit(modification_unit: dict[str, Any]) -> dict[str, Any]:
     prompt_source_unit = dict(modification_unit)
     modification_unit_id = prompt_source_unit["modification_unit_id"]
@@ -397,6 +408,7 @@ def prepare_prompt_source_unit(modification_unit: dict[str, Any]) -> dict[str, A
     return prompt_source_unit
 
 
+#This function composes the instruction lines required by the active profile and target surface.
 def select_prompt_instructions(
     *,
     instruction_lines: list[str],
@@ -419,6 +431,7 @@ def select_prompt_instructions(
     return selected_lines
 
 
+#This function builds the target-aware JSON skeleton that constrains valid model output branches.
 def build_patch_output_skeleton(
     *,
     parent_group_id: str,
@@ -443,6 +456,7 @@ def build_patch_output_skeleton(
     return "\n".join(output_skeleton_lines)
 
 
+#This function serializes the complete prompt and exposes the same components used for budgeting in Steps 15 and 16.
 def build_compact_patch_prompt_parts(
     *,
     prompt_unit: dict[str, Any],
@@ -508,10 +522,12 @@ def build_compact_patch_prompt_parts(
     }
 
 
+#This function converts serialized character length into the configured conservative token estimate.
 def estimate_text_tokens(text: str, chars_per_token_estimate: float) -> int:
     return max(1, int(len(text) / chars_per_token_estimate) + 1)
 
 
+#This function estimates the projected input with the exact serializer that Step 16 uses to write prompts.
 def estimate_compact_patch_prompt_tokens(
     *,
     prompt_unit: dict[str, Any],

@@ -31,6 +31,7 @@ _IDS_SOURCE_FIELDS = {
 _NON_MODEL_VISIBLE_SNORT_RULE_OPTIONS = {"metadata", "reference"}
 
 
+#This function removes Snort provenance options that are retained for audit but intentionally hidden from the model.
 def strip_non_model_visible_snort_rule_options(rule_declaration: str) -> str:
     """Remove provenance-only Snort options without changing detection logic."""
     rule = _require_nonempty_string(rule_declaration, "rule_declaration")
@@ -73,30 +74,35 @@ def strip_non_model_visible_snort_rule_options(rule_declaration: str) -> str:
     return rule[: opening_parenthesis + 1] + "".join(kept_segments) + rule[closing_parenthesis:]
 
 
+#This function validates that a contract field is a JSON object and returns its typed value.
 def _require_dict(value: Any, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object.")
     return value
 
 
+#This function validates that a contract field is a JSON array.
 def _require_list(value: Any, field_name: str) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a JSON array.")
     return value
 
 
+#This function rejects absent or blank identifiers and model-visible text fields.
 def _require_nonempty_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string.")
     return value
 
 
+#This function validates non-negative integer fields while excluding booleans.
 def _require_nonnegative_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field_name} must be a non-negative integer.")
     return value
 
 
+#This function validates ordered identifier collections and prevents duplicate traceability entries.
 def _require_unique_strings(value: Any, field_name: str, *, allow_empty: bool = False) -> list[str]:
     values = _require_list(value, field_name)
     if not allow_empty and not values:
@@ -107,10 +113,12 @@ def _require_unique_strings(value: Any, field_name: str, *, allow_empty: bool = 
     return normalized
 
 
+#This function returns the canonical Snort detector identity used for deduplication and joins.
 def detector_identity(record: dict[str, Any]) -> tuple[int, int, int]:
     return int(record["gid"]), int(record["sid"]), int(record["rev"])
 
 
+#This function limits model-visible SO-rule context to the approved compact summary.
 def _validate_security_context(value: Any, field_name: str) -> None:
     security_context = _require_dict(value, field_name)
     unexpected = set(security_context) - {"summary"}
@@ -121,6 +129,7 @@ def _validate_security_context(value: Any, field_name: str) -> None:
     _require_nonempty_string(security_context.get("summary"), f"{field_name}.summary")
 
 
+#This function validates one model-visible IDS record according to its detector source.
 def validate_ids_context_record(record: Any, *, field_name: str = "ids_context.records[]") -> None:
     detector = _require_dict(record, field_name)
     source = _require_nonempty_string(detector.get("detector_source"), f"{field_name}.detector_source")
@@ -170,6 +179,7 @@ def validate_ids_context_record(record: Any, *, field_name: str = "ids_context.r
         )
 
 
+#This function validates the complete model-visible IDS context and its per-connection uniqueness invariant.
 def validate_ids_context(ids_context: Any) -> None:
     context = _require_dict(ids_context, "ids_context")
     unexpected = set(context) - {"schema_version", "records"}
@@ -194,6 +204,7 @@ def validate_ids_context(ids_context: Any) -> None:
         seen.add(key)
 
 
+#This function creates the exact IDS projection allowed in a prompt after validating the source object.
 def project_ids_context(ids_context: Any) -> dict[str, Any]:
     validate_ids_context(ids_context)
     context = _require_dict(ids_context, "ids_context")
@@ -208,6 +219,7 @@ def project_ids_context(ids_context: Any) -> dict[str, Any]:
     }
 
 
+#This function validates auditable external references stored in a PRE bundle but not necessarily shown to the model.
 def _validate_external_security_context(value: Any, field_name: str) -> None:
     context = _require_dict(value, field_name)
     allowed = {"summary", "cve_ids", "mitre_attack_ids", "source_urls"}
@@ -221,6 +233,7 @@ def _validate_external_security_context(value: Any, field_name: str) -> None:
             _require_unique_strings(context[key], f"{field_name}.{key}", allow_empty=True)
 
 
+#This function validates a canonical detector definition and its source-specific evidence.
 def _validate_detector_definition(value: Any, field_name: str) -> None:
     detector = _require_dict(value, field_name)
     source = _require_nonempty_string(detector.get("detector_source"), f"{field_name}.detector_source")
@@ -251,6 +264,7 @@ def _validate_detector_definition(value: Any, field_name: str) -> None:
             raise ValueError(f"{field_name}.security_context.summary is allowed only for ruleset_so.")
 
 
+#This function validates one PRE alert and its unambiguous packet anchors.
 def _validate_pre_alert(value: Any, field_name: str) -> None:
     alert = _require_dict(value, field_name)
     allowed = {
@@ -278,6 +292,7 @@ def _validate_pre_alert(value: Any, field_name: str) -> None:
         _require_dict(alert["event_data"], f"{field_name}.event_data")
 
 
+#This function validates the complete PRE Snort bundle consumed by IDS-aware grouping.
 def validate_pre_snort_context_bundle(bundle: Any) -> None:
     source_bundle = _require_dict(bundle, "pre_snort_context_bundle")
     unexpected = set(source_bundle) - {"schema_version", "metadata", "detector_definitions", "alerts"}

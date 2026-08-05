@@ -8,7 +8,6 @@ from pathlib import Path
 
 from common.prompt_projection import (
     build_compact_patch_prompt_parts,
-    estimate_compact_patch_prompt_tokens,
     load_prompt_input_json_data_structure_from_config,
     load_prompt_instructions_profile_from_config,
 )
@@ -323,7 +322,7 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         self.assertEqual("compact_modification_units_manifest_v3", manifest["metadata"]["schema_version"])
         self.assertEqual("compact_modification_unit_v3", manifest["metadata"]["compact_view_schema_version"])
-        self.assertEqual("header_only_strategy_v1", manifest["metadata"]["strategy"])
+        self.assertEqual("header_only_strategy_v1", manifest["metadata"]["modification_strategy"])
         self.assertTrue(manifest["metadata"]["header_only"])
         self.assertFalse(manifest["metadata"]["editable_payload_regions_enabled"])
         self.assertTrue(manifest["metadata"]["editable_header_regions_enabled"])
@@ -427,7 +426,7 @@ class CanonicalStep15Tests(unittest.TestCase):
         )
         self.assertEqual([34], [unit["editable_header_region_count"] for unit in units])
 
-    def test_header_only_v3_baseline_projection_is_byte_identical_to_historical_v2(self) -> None:
+    def test_header_only_v3_baseline_projection_is_byte_identical_to_baseline_reference_v2(self) -> None:
         source = packet_json_v4(
             [
                 tcp_record(1, 1000, b"attack"),
@@ -440,11 +439,11 @@ class CanonicalStep15Tests(unittest.TestCase):
             _manifest, units = self.run_step15(source, active_config, root)
 
         v3_unit = units[0]
-        historical_v2_unit = copy.deepcopy(v3_unit)
-        historical_v2_unit["schema_version"] = "compact_modification_unit_v2"
-        historical_v2_unit.pop("capabilities")
-        historical_v2_unit.pop("editable_target_presence")
-        historical_v2_unit.pop("model_visible_projection")
+        baseline_reference_v2_unit = copy.deepcopy(v3_unit)
+        baseline_reference_v2_unit["schema_version"] = "compact_modification_unit_v2"
+        baseline_reference_v2_unit.pop("capabilities")
+        baseline_reference_v2_unit.pop("editable_target_presence")
+        baseline_reference_v2_unit.pop("model_visible_projection")
         structure = load_prompt_input_json_data_structure_from_config(active_config)
         _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
         v3_parts = build_compact_patch_prompt_parts(
@@ -452,14 +451,14 @@ class CanonicalStep15Tests(unittest.TestCase):
             prompt_input_structure=structure,
             instruction_lines=instruction_lines,
         )
-        historical_parts = build_compact_patch_prompt_parts(
-            prompt_unit=historical_v2_unit,
+        baseline_reference_parts = build_compact_patch_prompt_parts(
+            prompt_unit=baseline_reference_v2_unit,
             prompt_input_structure=structure,
             instruction_lines=instruction_lines,
         )
 
-        self.assertEqual(historical_parts["json_prompt_input"], v3_parts["json_prompt_input"])
-        self.assertEqual(historical_parts["content"], v3_parts["content"])
+        self.assertEqual(baseline_reference_parts["json_prompt_input"], v3_parts["json_prompt_input"])
+        self.assertEqual(baseline_reference_parts["content"], v3_parts["content"])
 
     def test_canonical_payload_only_v3_uses_first_alias_owner_without_editable_headers(self) -> None:
         records = [
@@ -1006,26 +1005,26 @@ class CanonicalStep15Tests(unittest.TestCase):
 
         parent_packet_ids = manifest["parent_groups"][0]["physical_packet_ids"]
         current_unit = units[0]
-        legacy_unit = copy.deepcopy(current_unit)
-        legacy_unit["group_metadata"]["physical_packet_ids"] = list(parent_packet_ids)
+        replicated_metadata_unit = copy.deepcopy(current_unit)
+        replicated_metadata_unit["group_metadata"]["physical_packet_ids"] = list(parent_packet_ids)
 
         current_prompt_source = prepare_prompt_source_unit(current_unit)
-        legacy_prompt_source = prepare_prompt_source_unit(legacy_unit)
+        replicated_prompt_source = prepare_prompt_source_unit(replicated_metadata_unit)
         current_messages, current_template = build_compact_patch_messages(
             config=active_config,
             prompt_unit=current_prompt_source,
         )
-        legacy_messages, legacy_template = build_compact_patch_messages(
+        replicated_messages, replicated_template = build_compact_patch_messages(
             config=active_config,
-            prompt_unit=legacy_prompt_source,
+            prompt_unit=replicated_prompt_source,
         )
-        self.assertEqual(current_messages, legacy_messages)
-        self.assertEqual(current_template, legacy_template)
+        self.assertEqual(current_messages, replicated_messages)
+        self.assertEqual(current_template, replicated_template)
 
         prompt_input_structure = load_prompt_input_json_data_structure_from_config(active_config)
         _, instruction_lines = load_prompt_instructions_profile_from_config(active_config)
-        legacy_plan = build_compact_patch_token_plan(
-            prompt_unit=legacy_unit,
+        replicated_plan = build_compact_patch_token_plan(
+            prompt_unit=replicated_metadata_unit,
             prompt_input_structure=prompt_input_structure,
             instruction_lines=instruction_lines,
             prompt_target_context=int(current_unit["token_plan"]["prompt_target_context"]),
@@ -1041,7 +1040,7 @@ class CanonicalStep15Tests(unittest.TestCase):
             "total_planned_tokens",
             "overflow_tokens",
         ]:
-            self.assertEqual(current_unit["token_plan"][field], legacy_plan[field])
+            self.assertEqual(current_unit["token_plan"][field], replicated_plan[field])
 
     def test_large_parent_group_index_materially_reduces_serialized_size(self) -> None:
         records = [
@@ -1070,12 +1069,12 @@ class CanonicalStep15Tests(unittest.TestCase):
         compact = {"separators": (",", ":"), "sort_keys": True}
         deduplicated_size = sum(len(json.dumps(unit, **compact)) for unit in units)
         deduplicated_size += len(json.dumps(manifest["parent_groups"], **compact))
-        legacy_units = []
+        replicated_metadata_units = []
         for unit in units:
-            legacy_unit = copy.deepcopy(unit)
-            legacy_unit["group_metadata"]["physical_packet_ids"] = list(expected_packet_ids)
-            legacy_units.append(legacy_unit)
-        replicated_size = sum(len(json.dumps(unit, **compact)) for unit in legacy_units)
+            replicated_metadata_unit = copy.deepcopy(unit)
+            replicated_metadata_unit["group_metadata"]["physical_packet_ids"] = list(expected_packet_ids)
+            replicated_metadata_units.append(replicated_metadata_unit)
+        replicated_size = sum(len(json.dumps(unit, **compact)) for unit in replicated_metadata_units)
         self.assertLess(deduplicated_size, replicated_size * 0.75)
 
     def test_flow_context_aware_splits_large_flow_into_budgeted_fragments(self) -> None:

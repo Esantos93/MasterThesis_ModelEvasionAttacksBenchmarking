@@ -268,7 +268,7 @@ def manifest_units(manifest: Mapping[str, Any]) -> tuple[dict[str, Any], dict[st
     for unit in units:
         if not isinstance(unit, Mapping):
             continue
-        unit_id = unit.get("prompt_unit_id") or unit.get("group_id")
+        unit_id = unit.get("prompt_unit_id")
         if unit_id:
             indexed[str(unit_id)] = dict(unit)
     if not indexed:

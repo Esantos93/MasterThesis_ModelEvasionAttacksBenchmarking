@@ -197,11 +197,7 @@ def parent_diverse_selection(
         return str(value) if value is not None else "__missing_parent__"
 
     def ordering(index: int) -> tuple[Any, str]:
-        unit_id = str(
-            prompt_units[index].get("prompt_unit_id")
-            or prompt_units[index].get("group_id")
-            or index
-        )
+        unit_id = str(prompt_units[index].get("prompt_unit_id") or index)
         random_rank = stable_rank(seed, label, unit_id)
         if priority is None:
             return (random_rank, "")
@@ -386,11 +382,7 @@ def payload_budget_stratified_sample(
 
     def unit_ids(indices: list[int]) -> list[str]:
         return [
-            str(
-                prompt_units[index].get("prompt_unit_id")
-                or prompt_units[index].get("group_id")
-                or index
-            )
+            str(prompt_units[index].get("prompt_unit_id") or index)
             for index in indices
         ]
 

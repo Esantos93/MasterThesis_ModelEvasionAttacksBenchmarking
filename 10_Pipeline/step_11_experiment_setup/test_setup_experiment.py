@@ -136,20 +136,6 @@ class Step11ExperimentSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported pipeline.modification_strategy"):
             validate_config_shape(config)
 
-    def test_rejects_retired_modification_strategy_names(self) -> None:
-        retired_names = (
-            "payload_only_strategy_v1",
-            "hybrid_physical_header_canonical_payload_strategy_v1",
-        )
-
-        for retired_name in retired_names:
-            with self.subTest(retired_name=retired_name):
-                config = base_config(Path("/tmp"))
-                config["pipeline"]["modification_strategy"] = retired_name
-
-                with self.assertRaisesRegex(ValueError, "Unsupported pipeline.modification_strategy"):
-                    validate_config_shape(config)
-
     def test_requires_physical_packet_grouping_unit(self) -> None:
         config = base_config(Path("/tmp"))
         config["pipeline"]["grouping_unit"] = "canonical_tcp_region"

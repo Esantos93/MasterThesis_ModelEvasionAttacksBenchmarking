@@ -260,6 +260,7 @@ def run_subprocess_with_tee(command: list[str]) -> tuple[str, str, int]:
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
+    #This nested helper mirrors one subprocess stream while retaining its exact text for artifacts.
     def tee_stream(source: Any, destination: Any, chunks: list[str]) -> None:
         for line in source:
             chunks.append(line)

@@ -66,10 +66,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("snort.detector_policy_label must be a non-empty string.")
 
 
+#This function resolves the detector-policy branch shared by PRE and POST normalized alerts.
 def detector_policy_label_from_config(config: dict[str, Any]) -> str:
     return sanitize_name_component(config["snort"]["detector_policy_label"])
 
 
+#This function obtains the rules-policy identity required for PRE/POST compatibility checks.
 def rules_policy_path_from_config(config: dict[str, Any]) -> str:
     return str(config.get("snort", {}).get("rules_policy_path", "")).strip()
 
@@ -110,6 +112,7 @@ def load_normalized_alerts(path: Path, expected_traffic_version: str) -> tuple[d
     return artifact, alerts
 
 
+#This function requires PRE and POST normalized artifacts to share experiment and detector provenance.
 def validate_normalization_metadata(
     artifact: dict[str, Any],
     *,
@@ -175,6 +178,7 @@ def alert_ref(alert: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+#This function derives the packet or TCP-conversation unit used by the selected comparison policy.
 def comparable_unit_key(alert: dict[str, Any], traffic_side: str, matching_policy: str) -> str:
     if matching_policy in {"packet", "packet_tcp_conversation"}:
         packet_id = alert.get("packet_id")
@@ -188,12 +192,14 @@ def comparable_unit_key(alert: dict[str, Any], traffic_side: str, matching_polic
     raise ValueError(f"Unsupported matching policy: {matching_policy}")
 
 
+#This function names the methodological comparison unit represented by a matching policy.
 def comparable_unit_type(matching_policy: str) -> str:
     if matching_policy in {"packet", "packet_tcp_conversation"}:
         return "packet"
     raise ValueError(f"Unsupported matching policy: {matching_policy}")
 
 
+#This function returns the normalized alert field that anchors the comparable unit.
 def comparable_unit_field(matching_policy: str) -> str:
     if matching_policy == "packet":
         return "packet_id_or_pkt_num"
@@ -202,6 +208,7 @@ def comparable_unit_field(matching_policy: str) -> str:
     raise ValueError(f"Unsupported matching policy: {matching_policy}")
 
 
+#This function resolves the stable packet anchor available for one normalized alert.
 def packet_anchor(alert: dict[str, Any]) -> str | None:
     packet_id = alert.get("packet_id")
     if isinstance(packet_id, str) and packet_id.strip():
@@ -212,6 +219,7 @@ def packet_anchor(alert: dict[str, Any]) -> str | None:
     return None
 
 
+#This function resolves the stable TCP conversation identity available for one alert.
 def tcp_conversation_anchor(alert: dict[str, Any]) -> str | None:
     connection_id = alert.get("packet_anchor_tcp_connection_id") or alert.get("tcp_connection_id")
     if isinstance(connection_id, str) and connection_id.strip():
@@ -219,6 +227,7 @@ def tcp_conversation_anchor(alert: dict[str, Any]) -> str | None:
     return None
 
 
+#This function imposes deterministic ordering before phase-based alert consumption.
 def alert_sort_key(alert: dict[str, Any]) -> tuple[Any, ...]:
     return (
         packet_anchor(alert) or "",
@@ -229,10 +238,12 @@ def alert_sort_key(alert: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+#This function returns the unique normalized alert identity used to prevent double matching.
 def alert_consumption_id(alert: dict[str, Any]) -> Any:
     return alert.get("normalized_alert_id") or id(alert)
 
 
+#This function normalizes protocol labels used in strict delayed-emission keys.
 def normalized_proto(value: Any) -> str | None:
     if value is None:
         return None
@@ -252,6 +263,7 @@ def normalized_proto(value: Any) -> str | None:
     return text.upper()
 
 
+#This function canonicalizes endpoint tuples while preserving protocol and bidirectional identity.
 def canonical_connection_key(
     proto: Any,
     src_addr: Any,
@@ -271,6 +283,7 @@ def canonical_connection_key(
     return (protocol, first, second)
 
 
+#This function derives a canonical connection tuple from the Snort event itself.
 def alert_event_connection_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
     return canonical_connection_key(
         alert.get("proto"),
@@ -281,6 +294,7 @@ def alert_event_connection_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
     )
 
 
+#This function derives the canonical connection tuple recorded for the anchored packet.
 def packet_anchor_connection_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
     return canonical_connection_key(
         alert.get("packet_anchor_proto"),
@@ -291,6 +305,7 @@ def packet_anchor_connection_key(alert: dict[str, Any]) -> tuple[Any, ...] | Non
     )
 
 
+#This function reports whether Snort's emitted packet anchor belongs to the event connection tuple.
 def packet_anchor_matches_alert_event_tuple(alert: dict[str, Any]) -> bool | None:
     event_key = alert_event_connection_key(alert)
     anchor_key = packet_anchor_connection_key(alert)
@@ -299,6 +314,7 @@ def packet_anchor_matches_alert_event_tuple(alert: dict[str, Any]) -> bool | Non
     return event_key == anchor_key
 
 
+#This function prevents cross-conversation matches while allowing strict displaced-emission recovery.
 def conversation_compatible(pre_alert: dict[str, Any], post_alert: dict[str, Any], matching_policy: str) -> bool:
     if matching_policy == "packet":
         return True
@@ -309,16 +325,19 @@ def conversation_compatible(pre_alert: dict[str, Any], post_alert: dict[str, Any
     return pre_connection == post_connection
 
 
+#This function checks whether two alerts retain the same physical packet anchor.
 def same_packet(pre_alert: dict[str, Any], post_alert: dict[str, Any], matching_policy: str) -> bool:
     return packet_anchor(pre_alert) == packet_anchor(post_alert) and conversation_compatible(pre_alert, post_alert, matching_policy)
 
 
+#This function checks stable TCP conversation identity independently of emitted packet number.
 def same_tcp_conversation(pre_alert: dict[str, Any], post_alert: dict[str, Any]) -> bool:
     pre_connection = tcp_conversation_anchor(pre_alert)
     post_connection = tcp_conversation_anchor(post_alert)
     return pre_connection is not None and pre_connection == post_connection
 
 
+#This function builds the strict signature, timestamp, and connection key for delayed Snort emissions.
 def strict_delayed_emission_key(alert: dict[str, Any]) -> tuple[Any, ...] | None:
     values = []
     for field in STRICT_DELAYED_EMISSION_FIELDS:
@@ -331,10 +350,12 @@ def strict_delayed_emission_key(alert: dict[str, Any]) -> tuple[Any, ...] | None
     return tuple(values)
 
 
+#This function serializes a strict delayed-emission key for comparison evidence.
 def strict_delayed_emission_key_summary(key: tuple[Any, ...]) -> dict[str, Any]:
     return dict(zip(STRICT_DELAYED_EMISSION_FIELDS, key))
 
 
+#This function indexes unmatched POST alerts for deterministic displaced-detection recovery.
 def alerts_by_strict_delayed_emission_key(alerts: list[dict[str, Any]]) -> dict[tuple[Any, ...], list[dict[str, Any]]]:
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for alert in alerts:
@@ -344,6 +365,7 @@ def alerts_by_strict_delayed_emission_key(alerts: list[dict[str, Any]]) -> dict[
     return {key: sorted(values, key=alert_sort_key) for key, values in grouped.items()}
 
 
+#This function consumes the first deterministic candidate satisfying one comparison phase predicate.
 def pop_first_matching(
     candidates: list[dict[str, Any]],
     predicate: Any,
@@ -354,6 +376,7 @@ def pop_first_matching(
     return None
 
 
+#This function creates one auditable PRE/POST outcome record with matching evidence.
 def make_comparison_record(
     *,
     comparison_index: int,
@@ -401,6 +424,7 @@ def compare_alerts_by_comparable_unit(
     remaining_pre = sorted(pre_alerts, key=alert_sort_key)
     remaining_post = sorted(post_alerts, key=alert_sort_key)
 
+    #This nested helper records one consumed PRE alert and its matched POST outcome in a stable shape.
     def append_record(
         classification: str,
         match_type: str,
@@ -644,12 +668,10 @@ def compare_alerts_by_comparable_unit(
             "different_signature_replacements": alert_mutation_count,
             "tcp_conversation_displaced_detection_count": tcp_displaced_count,
             "snort_event_packet_anchor_shift_count": snort_event_packet_anchor_shift_count,
-            "delayed_snort_event_re_emission_count": snort_event_packet_anchor_shift_count,
             "strict_delayed_emission_displaced_detection_count": strict_delayed_emission_displaced_count,
             "strict_delayed_emission_match_count": strict_delayed_emission_match_count,
             "ambiguous_delayed_emission_match_count": len(ambiguous_delayed_emission_matches),
             "induced_alert_count": len(induced_alerts),
-            "post_only_unmatched_count": len(induced_alerts),
             "classification_counts": dict(sorted(classification_counts.items())),
             "successful_evasion_count": successful_evasion_count,
             "alert_mutation_count": alert_mutation_count,
@@ -801,7 +823,6 @@ def compare_normalized_alerts(
         "summary": comparison["summary"],
         "comparison_records": comparison["records"],
         "induced_alerts": comparison["induced_alerts"],
-        "post_only_unmatched_alerts": comparison["induced_alerts"],
         "ambiguous_delayed_emission_matches": comparison["ambiguous_delayed_emission_matches"],
     }
     signature_artifact = {
@@ -837,12 +858,10 @@ def compare_normalized_alerts(
         "failed_evasion_count": comparison["summary"]["failed_evasion_count"],
         "tcp_conversation_displaced_detection_count": comparison["summary"]["tcp_conversation_displaced_detection_count"],
         "snort_event_packet_anchor_shift_count": comparison["summary"]["snort_event_packet_anchor_shift_count"],
-        "delayed_snort_event_re_emission_count": comparison["summary"]["delayed_snort_event_re_emission_count"],
         "strict_delayed_emission_displaced_detection_count": comparison["summary"]["strict_delayed_emission_displaced_detection_count"],
         "strict_delayed_emission_match_count": comparison["summary"]["strict_delayed_emission_match_count"],
         "ambiguous_delayed_emission_match_count": comparison["summary"]["ambiguous_delayed_emission_match_count"],
         "induced_alert_count": comparison["summary"]["induced_alert_count"],
-        "post_only_unmatched_count": comparison["summary"]["post_only_unmatched_count"],
         "alert_comparison": str(comparison_path),
         "signature_comparison_summary": str(signature_summary_path),
         "comparison_metadata": str(metadata_path),

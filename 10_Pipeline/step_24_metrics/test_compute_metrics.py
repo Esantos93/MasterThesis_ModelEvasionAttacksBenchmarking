@@ -32,7 +32,6 @@ class Step24MetricsTests(unittest.TestCase):
         induced: int = 0,
         displaced: int = 0,
         anchor_shift: int = 0,
-        weight: float = 0.0,
         detector_policy: str = "security-ips",
         signatures: list[dict] | None = None,
         post_run_label: str = "run-fixture",
@@ -43,10 +42,7 @@ class Step24MetricsTests(unittest.TestCase):
                 "experiment_id": "exp_fixture",
                 "output_root": str(root),
             },
-            "pipeline": {
-                # Historical config field kept in fixtures to prove Step 24 ignores it.
-                "signature_mutation_weight": weight,
-            },
+            "pipeline": {},
             "snort": {
                 "detector_policy_label": detector_policy,
                 "rules_policy_path": "/rules/security.states",
@@ -82,7 +78,6 @@ class Step24MetricsTests(unittest.TestCase):
             "tcp_conversation_displaced_detection_count": displaced,
             "snort_event_packet_anchor_shift_count": anchor_shift,
             "induced_alert_count": induced,
-            "post_only_unmatched_count": induced,
             "classification_counts": {
                 "Alert-Signature Mutation": mutation,
                 "Failed Evasion": failed,
@@ -115,25 +110,6 @@ class Step24MetricsTests(unittest.TestCase):
             {"metadata": metadata, "summary": {"signature_row_count": len(signature_rows)}, "signatures": signature_rows},
         )
         return config_path, comparison_dir
-
-    def test_ser_ignores_weighted_candidate_categories_from_historical_config(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config, _ = self.make_fixture(
-                root,
-                pre_count=10,
-                post_count=10,
-                failed=0,
-                successful=1,
-                mutation=2,
-                displaced=3,
-                anchor_shift=4,
-                weight=0.9,
-            )
-            result = compute_metrics(config_path=config)
-            self.assertEqual(result["metrics"]["ser"], 0.1)
-            self.assertNotIn("weighted_successful_evasion_count", result["metrics"])
-            self.assertNotIn("signature_mutation_weight", result["metrics"])
 
     def test_narr_positive_zero_and_negative(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

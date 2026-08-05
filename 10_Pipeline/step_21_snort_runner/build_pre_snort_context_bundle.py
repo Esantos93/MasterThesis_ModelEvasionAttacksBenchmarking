@@ -29,11 +29,13 @@ SNORT_VERSION_PATTERN = re.compile(r"Snort\+\+\s+([0-9][0-9A-Za-z.+_-]*)")
 OPTION_PATTERN_TEMPLATE = r"(?:^|;)\s*{name}\s*:\s*([^;]+)"
 
 
+#This function reads a source artifact used to build the canonical PRE Snort bundle.
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
+#This function hashes every consumed source artifact for reproducible bundle provenance.
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as input_file:
@@ -42,6 +44,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+#This function fails before bundle construction when a required source artifact is missing.
 def require_file(path: Path, description: str) -> Path:
     resolved = path.expanduser().resolve()
     if not resolved.exists():
@@ -51,6 +54,7 @@ def require_file(path: Path, description: str) -> Path:
     return resolved
 
 
+#This function resolves a metadata-recorded artifact against the actual PRE directory.
 def resolve_recorded_artifact(pre_snort_dir: Path, recorded_path: Any, description: str) -> Path:
     if not isinstance(recorded_path, str) or not recorded_path.strip():
         raise ValueError(f"Step 21 metadata does not record {description}.")
@@ -61,6 +65,7 @@ def resolve_recorded_artifact(pre_snort_dir: Path, recorded_path: Any, descripti
     return require_file(local_candidate, description)
 
 
+#This function rejects POST or ambiguous Snort metadata so only PRE evidence can reach the model.
 def ensure_pre_metadata(metadata: dict[str, Any], pre_snort_dir: Path) -> None:
     if metadata.get("traffic_version") != "pre":
         raise ValueError("Only Step 21 PRE metadata can be used to build the context bundle.")
@@ -73,6 +78,7 @@ def ensure_pre_metadata(metadata: dict[str, Any], pre_snort_dir: Path) -> None:
         raise ValueError("Step 21 PRE execution did not complete successfully.")
 
 
+#This function extracts the exact Snort version from the canonical PRE execution log.
 def parse_snort_version(stdout_path: Path) -> str:
     match = SNORT_VERSION_PATTERN.search(stdout_path.read_text(encoding="utf-8", errors="replace"))
     if not match:
@@ -80,6 +86,7 @@ def parse_snort_version(stdout_path: Path) -> str:
     return match.group(1)
 
 
+#This function builds the Step 14 packet identity index used to anchor PRE alerts unambiguously.
 def packet_trace_by_reduced_index(packet_json: dict[str, Any]) -> dict[int, dict[str, Any]]:
     if packet_json.get("metadata", {}).get("schema_version") != "packet_json_v4":
         raise ValueError("The PRE context bundle requires Step 14 packet_json_v4.")
@@ -106,6 +113,7 @@ def packet_trace_by_reduced_index(packet_json: dict[str, Any]) -> dict[int, dict
     return lookup
 
 
+#This function counts unquoted rule parentheses so multiline declarations can be reconstructed safely.
 def _parenthesis_delta(text: str) -> int:
     delta = 0
     quoted = False
@@ -126,6 +134,7 @@ def _parenthesis_delta(text: str) -> int:
     return delta
 
 
+#This function extracts complete Snort rule declarations from one text source.
 def extract_rule_declarations(text: str) -> list[str]:
     declarations: list[str] = []
     current: list[str] = []
@@ -152,6 +161,7 @@ def extract_rule_declarations(text: str) -> list[str]:
     return declarations
 
 
+#This function reads one scalar Snort rule option without reimplementing detector logic.
 def rule_option(declaration: str, name: str) -> str | None:
     options_start = declaration.find("(")
     options_end = declaration.rfind(")")
@@ -162,6 +172,7 @@ def rule_option(declaration: str, name: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+#This function derives the gid/sid/rev identity from a textual rule declaration.
 def rule_identity(declaration: str) -> tuple[int, int, int] | None:
     sid_text = rule_option(declaration, "sid")
     rev_text = rule_option(declaration, "rev")
@@ -174,6 +185,7 @@ def rule_identity(declaration: str) -> tuple[int, int, int] | None:
         raise ValueError(f"Invalid gid/sid/rev in rule declaration: {declaration}") from error
 
 
+#This function expands configured rule sources into a deterministic ordered file list.
 def rule_source_files(sources: Iterable[Path]) -> list[Path]:
     files: set[Path] = set()
     for source in sources:
@@ -189,6 +201,7 @@ def rule_source_files(sources: Iterable[Path]) -> list[Path]:
     return sorted(files, key=lambda path: str(path))
 
 
+#This function indexes detector declarations and rejects contradictory identities.
 def build_rule_index(files: list[Path]) -> tuple[dict[tuple[int, int, int], tuple[str, Path]], set[Path]]:
     index: dict[tuple[int, int, int], tuple[str, Path]] = {}
     duplicate_sources: set[Path] = set()
@@ -211,6 +224,7 @@ def build_rule_index(files: list[Path]) -> tuple[dict[tuple[int, int, int], tupl
     return index, duplicate_sources
 
 
+#This function loads curated SO and built-in semantics from the versioned auditable catalog.
 def load_catalog(path: Path) -> dict[tuple[int, int, int], dict[str, Any]]:
     catalog = read_json(require_file(path, "IDS detector catalog"))
     if not isinstance(catalog, dict) or catalog.get("schema_version") != CATALOG_SCHEMA_VERSION:
@@ -229,6 +243,7 @@ def load_catalog(path: Path) -> dict[tuple[int, int, int], dict[str, Any]]:
     return lookup
 
 
+#This function obtains one consistent detector message across all occurrences of a signature.
 def normalized_message(alerts: list[dict[str, Any]], identity: tuple[int, int, int]) -> str:
     messages = {str(alert.get("message", "")).strip() for alert in alerts if detector_identity(alert) == identity}
     messages.discard("")
@@ -237,6 +252,7 @@ def normalized_message(alerts: list[dict[str, Any]], identity: tuple[int, int, i
     return next(iter(messages))
 
 
+#This function builds one source-specific detector definition for a signature observed in PRE.
 def build_detector_definition(
     *,
     identity: tuple[int, int, int],
@@ -282,6 +298,7 @@ def build_detector_definition(
     }, None
 
 
+#This function retains only compact non-payload event evidence from a raw PRE alert.
 def bounded_event_data(alert: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "action",
@@ -297,11 +314,13 @@ def bounded_event_data(alert: dict[str, Any]) -> dict[str, Any]:
     return {key: alert[key] for key in keys if key in alert and alert[key] is not None}
 
 
+#This function registers one consumed artifact and its digest exactly once.
 def add_source_artifact(artifacts: dict[str, str], path: Path) -> None:
     resolved = require_file(path, "source artifact")
     artifacts[str(resolved)] = sha256_file(resolved)
 
 
+#This function derives a stable identifier from the ordered ruleset files and contents.
 def combined_ruleset_identifier(paths: list[Path]) -> str:
     digest = hashlib.sha256()
     for path in sorted(set(paths), key=lambda item: str(item)):
@@ -312,6 +331,7 @@ def combined_ruleset_identifier(paths: list[Path]) -> str:
     return f"active_pre_detector_sources_sha256:{digest.hexdigest()}"
 
 
+#This function joins PRE alerts, packet identities, rules, and execution metadata into the shared bundle.
 def build_pre_snort_context_bundle(
     *,
     pre_snort_dir: Path,
@@ -470,6 +490,7 @@ def build_pre_snort_context_bundle(
     return bundle
 
 
+#This function resolves the canonical Step 21 PRE directory below a baseline experiment root.
 def resolve_default_pre_dir(baseline_root: Path) -> Path:
     matches = sorted(path for path in (baseline_root / "11_snort_raw").glob("*/pre") if path.is_dir())
     if len(matches) != 1:
@@ -480,6 +501,7 @@ def resolve_default_pre_dir(baseline_root: Path) -> Path:
     return matches[0]
 
 
+#This function parses explicit baseline inputs without hardcoding experiment names.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build pre_snort_context_bundle_v1 from canonical PRE evidence.")
     parser.add_argument("--baseline-experiment-root", help="Baseline experiment root used to derive default paths.")
@@ -503,6 +525,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function builds, validates, and writes the reusable PRE Snort context bundle.
 def main() -> None:
     args = parse_cli_args()
     baseline_root = Path(args.baseline_experiment_root).expanduser() if args.baseline_experiment_root else None

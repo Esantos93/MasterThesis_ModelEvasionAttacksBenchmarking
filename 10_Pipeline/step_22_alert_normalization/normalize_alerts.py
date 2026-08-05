@@ -55,10 +55,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("snort.detector_policy_label must be a non-empty string.")
 
 
+#This function resolves the detector-policy branch used to locate and label Snort artifacts.
 def detector_policy_label_from_config(config: dict[str, Any]) -> str:
     return sanitize_name_component(config["snort"]["detector_policy_label"])
 
 
+#This function preserves the Snort rules-policy selector in normalization provenance.
 def rules_policy_path_from_config(config: dict[str, Any]) -> str:
     return str(config.get("snort", {}).get("rules_policy_path", "")).strip()
 
@@ -94,11 +96,13 @@ def default_normalized_output_dir(
     return detector_root / "post"
 
 
+#This function resolves the Step 14 packet trace used to map Snort packet numbers to stable packet IDs.
 def default_packet_trace_path(config: dict[str, Any], experiment_root_override: str | Path | None = None) -> Path:
     experiment_root = Path(experiment_root_override).expanduser() if experiment_root_override else build_experiment_root(config)
     return experiment_root / "04_packet_json" / "selected_packet_records.json"
 
 
+#This function builds a unique reduced-index lookup and rejects ambiguous packet provenance.
 def packet_trace_by_reduced_index(packet_json_path: Path) -> dict[int, dict[str, Any]]:
     packet_json = read_json(packet_json_path)
     if not isinstance(packet_json, dict):

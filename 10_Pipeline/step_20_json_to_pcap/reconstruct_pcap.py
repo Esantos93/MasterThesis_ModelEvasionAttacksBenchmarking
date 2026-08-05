@@ -24,14 +24,14 @@ from common.terminal_logging import default_step_log_path, terminal_log
 from common.validation_policy import resolve_post_llm_traffic_validation_policy
 
 
-REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v7"
+REPORT_SCHEMA_VERSION = "pcap_reconstruction_report_v8"
 EXPECTED_INPUT_SCHEMA_VERSION = "validated_modified_traffic_v6"
 STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD = "validated_effective_payload_projection_changes"
 STEP19_FULL_POST_RECONSTRUCTION_POLICY = "full_packet_universe_with_original_noop_for_invalid_and_failure_only_packets"
 ETHERNET_MIN_FRAME_BYTES_WITHOUT_FCS = COMMON_ETHERNET_MINIMUM_FRAME_BYTES
 TCP_SEQUENCE_MODULUS = 1 << 32
 TCP_SEQUENCE_MASK = TCP_SEQUENCE_MODULUS - 1
-STEP19_V5_REQUIRED_METADATA_FIELDS = [
+STEP19_REQUIRED_METADATA_FIELDS = [
     "experiment_id",
     "source_merged_json",
     "validation_report",
@@ -45,7 +45,7 @@ STEP19_V5_REQUIRED_METADATA_FIELDS = [
     "post_reconstruction_policy",
     "post_llm_traffic_validation_policy",
 ]
-STEP19_V5_COUNT_METADATA_FIELDS = [
+STEP19_COUNT_METADATA_FIELDS = [
     "accepted_packet_count",
     "reconstruction_packet_count",
     "rejected_packet_count",
@@ -106,7 +106,7 @@ def validate_config(config: dict[str, Any]) -> None:
 def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_json_path: Path) -> Path:
     value = metadata.get(field)
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"Step 19 V5 metadata field {field!r} must be a non-empty path string: {input_json_path}")
+        raise ValueError(f"Step 19 metadata field {field!r} must be a non-empty path string: {input_json_path}")
     recorded_path = Path(value).expanduser()
     if not recorded_path.is_absolute():
         recorded_path = input_json_path.parent / recorded_path
@@ -126,9 +126,9 @@ def resolve_step19_metadata_path(metadata: dict[str, Any], field: str, input_jso
     return recorded_path
 
 
-#This function enforces the Step 19 V5 artifact contract consumed by Step 20.
-#This function must not silently accept legacy validated traffic schemas.
-def validate_step19_v5_input(
+#This function enforces the single active Step 19 artifact contract consumed by Step 20.
+#This function rejects any input schema that does not exactly match the current contract.
+def validate_step19_input(
     validated_json: Any,
     input_json_path: Path,
     capabilities: ModificationCapabilities,
@@ -142,7 +142,7 @@ def validate_step19_v5_input(
     schema_version = metadata.get("schema_version")
     if schema_version != EXPECTED_INPUT_SCHEMA_VERSION:
         raise ValueError(
-            "Step 20 V6 requires Step 19 validated traffic schema "
+            "Step 20 requires Step 19 validated traffic schema "
             f"{EXPECTED_INPUT_SCHEMA_VERSION!r}; found {schema_version!r}: {input_json_path}"
         )
     traffic = validated_json.get("traffic")
@@ -151,45 +151,45 @@ def validate_step19_v5_input(
 
     missing_fields = [
         field
-        for field in STEP19_V5_REQUIRED_METADATA_FIELDS
+        for field in STEP19_REQUIRED_METADATA_FIELDS
         if field not in metadata
     ]
     if missing_fields:
         raise ValueError(
-            "Step 19 V5 validated traffic metadata is missing required fields "
+            "Step 19 validated traffic metadata is missing required fields "
             f"{missing_fields}: {input_json_path}"
         )
-    for field in STEP19_V5_COUNT_METADATA_FIELDS:
+    for field in STEP19_COUNT_METADATA_FIELDS:
         value = metadata.get(field)
         if not is_int_like(value) or int(value) < 0:
             raise ValueError(
-                f"Step 19 V5 metadata field {field!r} must be a non-negative integer; "
+                f"Step 19 metadata field {field!r} must be a non-negative integer; "
                 f"found {value!r}: {input_json_path}"
             )
     reconstruction_packet_count = int(metadata["reconstruction_packet_count"])
     if reconstruction_packet_count != len(traffic):
         raise ValueError(
-            "Step 19 V5 reconstruction_packet_count must equal the emitted traffic list length; "
+            "Step 19 reconstruction_packet_count must equal the emitted traffic list length; "
             f"metadata={reconstruction_packet_count}, traffic={len(traffic)}: {input_json_path}"
         )
     if metadata.get("post_reconstruction_policy") != STEP19_FULL_POST_RECONSTRUCTION_POLICY:
         raise ValueError(
-            "Step 20 V6 requires Step 19 full POST reconstruction policy "
+            "Step 20 requires Step 19 full POST reconstruction policy "
             f"{STEP19_FULL_POST_RECONSTRUCTION_POLICY!r}; "
             f"found {metadata.get('post_reconstruction_policy')!r}: {input_json_path}"
         )
     policy_metadata = metadata.get("post_llm_traffic_validation_policy")
     if not isinstance(policy_metadata, dict):
         raise ValueError(
-            f"Step 19 V5 metadata.post_llm_traffic_validation_policy must be an object: {input_json_path}"
+            f"Step 19 metadata.post_llm_traffic_validation_policy must be an object: {input_json_path}"
         )
     if policy_metadata.get("policy_id") != validation_policy.policy_id:
         raise ValueError(
-            "Step 19 V5 validation policy metadata does not match the active Step 20 config; "
+            "Step 19 validation policy metadata does not match the active Step 20 config; "
             f"metadata={policy_metadata.get('policy_id')!r}, config={validation_policy.policy_id!r}: {input_json_path}"
         )
     if not isinstance(metadata.get("validation_report"), str) or not metadata["validation_report"].strip():
-        raise ValueError(f"Step 20 V6 reconstruction requires metadata.validation_report: {input_json_path}")
+        raise ValueError(f"Step 20 reconstruction requires metadata.validation_report: {input_json_path}")
     projections = validated_json.get(STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD)
     projection_contract = validate_step19_effective_payload_projection_contract(
         projections=projections,
@@ -210,7 +210,7 @@ def record_is_preserved_invalid_or_failure_only(record: dict[str, Any]) -> bool:
     return evaluation_status in {"Invalid Traffic", "LLM Output Failure"}
 
 
-#This helper checks the V5 effective payload projection records that Step 19 already validated.
+#This helper checks the effective payload projection records that Step 19 already validated.
 #This helper summarizes projection evidence before the independent packet-level replay performed during the PCAP audit.
 def summarize_payload_projection_evidence(
     projections: list[Any],
@@ -248,12 +248,12 @@ def summarize_payload_projection_evidence(
     for index, projection in enumerate(projections, start=1):
         if not isinstance(projection, dict):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} is not an object: {input_json_path}"
+                f"Step 19 effective payload projection record {index} is not an object: {input_json_path}"
             )
         missing_fields = [field for field in required_projection_fields if field not in projection]
         if missing_fields:
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} is missing fields "
+                f"Step 19 effective payload projection record {index} is missing fields "
                 f"{missing_fields}: {input_json_path}"
             )
         replaced_length = projection.get("replaced_length_bytes")
@@ -261,14 +261,14 @@ def summarize_payload_projection_evidence(
         payload_delta = projection.get("payload_length_delta_bytes")
         if not is_int_like(replaced_length) or not is_int_like(replacement_length) or not is_int_like(payload_delta):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has non-integer length metadata: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has non-integer length metadata: {input_json_path}"
             )
         replaced_length = int(replaced_length)
         replacement_length = int(replacement_length)
         payload_delta = int(payload_delta)
         if payload_delta != replacement_length - replaced_length:
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has inconsistent length delta metadata: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has inconsistent length delta metadata: {input_json_path}"
             )
         canonical_start = projection.get("canonical_edit_start_offset_bytes")
         canonical_end = projection.get("canonical_edit_end_offset_bytes")
@@ -286,36 +286,36 @@ def summarize_payload_projection_evidence(
             ]
         ):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has invalid canonical edit lengths: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has invalid canonical edit lengths: {input_json_path}"
             )
         if (
             int(canonical_end) - int(canonical_start) != int(canonical_replaced_length)
             or int(canonical_replacement_length) - int(canonical_replaced_length) != int(canonical_delta)
         ):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has inconsistent canonical edit bounds: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has inconsistent canonical edit bounds: {input_json_path}"
             )
         original_segment_hex = projection.get("original_segment_hex")
         replacement_hex = projection.get("replacement_hex")
         if not isinstance(original_segment_hex, str) or not isinstance(replacement_hex, str):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has non-string payload hex evidence: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has non-string payload hex evidence: {input_json_path}"
             )
         try:
             original_segment = binascii.unhexlify(original_segment_hex)
             replacement_segment = binascii.unhexlify(replacement_hex)
         except (binascii.Error, ValueError) as error:
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} contains invalid hex evidence: {error}"
+                f"Step 19 effective payload projection record {index} contains invalid hex evidence: {error}"
             ) from error
         if len(original_segment) != replaced_length or len(replacement_segment) != replacement_length:
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has hex evidence lengths inconsistent with metadata: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has hex evidence lengths inconsistent with metadata: {input_json_path}"
             )
         recalculation = projection.get("requires_pipeline_recalculation")
         if not isinstance(recalculation, list):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has invalid requires_pipeline_recalculation: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has invalid requires_pipeline_recalculation: {input_json_path}"
             )
         for field in recalculation:
             recalculation_fields[str(field)] += 1
@@ -330,7 +330,7 @@ def summarize_payload_projection_evidence(
         previous = seen_identity_keys.get(identity_key)
         if previous is not None:
             raise ValueError(
-                "Step 19 V5 effective payload projection records contain a duplicate deterministic identity key: "
+                "Step 19 effective payload projection records contain a duplicate deterministic identity key: "
                 f"{identity_key}: {input_json_path}"
             )
         seen_identity_keys[identity_key] = projection
@@ -366,7 +366,7 @@ def summarize_payload_projection_evidence(
             }
             if comparable_fields != previous_comparable_fields:
                 raise ValueError(
-                    "Step 19 V5 payload projections disagree about one canonical edit: "
+                    "Step 19 payload projections disagree about one canonical edit: "
                     f"{canonical_identity}: {input_json_path}"
                 )
         else:
@@ -375,13 +375,13 @@ def summarize_payload_projection_evidence(
         reaches_end = projection.get("projection_reaches_canonical_edit_end")
         if not isinstance(reaches_end, bool):
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} has invalid end-boundary evidence: {input_json_path}"
+                f"Step 19 effective payload projection record {index} has invalid end-boundary evidence: {input_json_path}"
             )
         end_packet_offset = projection.get("canonical_edit_end_packet_payload_offset_bytes")
         if reaches_end:
             if not is_int_like(end_packet_offset):
                 raise ValueError(
-                    f"Step 19 V5 effective payload projection record {index} reaches the canonical edit end without a packet offset: {input_json_path}"
+                    f"Step 19 effective payload projection record {index} reaches the canonical edit end without a packet offset: {input_json_path}"
                 )
             previous_canonical_evidence["end_boundary_anchors"].append(
                 {
@@ -392,7 +392,7 @@ def summarize_payload_projection_evidence(
             )
         elif end_packet_offset is not None:
             raise ValueError(
-                f"Step 19 V5 effective payload projection record {index} declares an end offset without covering the edit end: {input_json_path}"
+                f"Step 19 effective payload projection record {index} declares an end offset without covering the edit end: {input_json_path}"
             )
         projected_packet_ids.add(str(projection.get("packet_id")))
         net_delta += payload_delta
@@ -415,7 +415,7 @@ def summarize_payload_projection_evidence(
         if canonical_evidence["canonical_payload_length_delta_bytes"] != 0:
             if not anchors:
                 raise ValueError(
-                    "Step 19 V5 length-changing canonical payload edit has no physical representation "
+                    "Step 19 length-changing canonical payload edit has no physical representation "
                     f"covering its end boundary: {canonical_evidence}"
                 )
             canonical_resize_events.append(canonical_evidence)
@@ -457,7 +457,7 @@ def validate_step19_effective_payload_projection_contract(
 ) -> dict[str, Any]:
     validation_report_path = resolve_step19_metadata_path(metadata, "validation_report", input_json_path)
     summary = {
-        "schema_version": "step19_v5_effective_payload_projection_contract_v1",
+        "schema_version": "step19_effective_payload_projection_contract_v1",
         "validated_traffic_schema_version": metadata.get("schema_version"),
         "full_post_reconstruction_policy": metadata.get("post_reconstruction_policy"),
         "validation_report": str(validation_report_path),
@@ -466,16 +466,16 @@ def validate_step19_effective_payload_projection_contract(
     if not projection_collection_present:
         if capabilities.allows_payload_edits:
             raise ValueError(
-                f"Step 20 V6 payload-capable reconstruction requires {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}: {input_json_path}"
+                f"Step 20 payload-capable reconstruction requires {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}: {input_json_path}"
             )
         projections = []
     elif not isinstance(projections, list):
         raise ValueError(
-            f"Step 19 V5 {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD} must be a list: {input_json_path}"
+            f"Step 19 {STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD} must be a list: {input_json_path}"
         )
     if not capabilities.allows_payload_edits and projections:
         raise ValueError(
-            "Step 19 V5 header-only reconstruction must not contain effective payload projection changes: "
+            "Step 19 header-only reconstruction must not contain effective payload projection changes: "
             f"{input_json_path}"
         )
     if not capabilities.allows_payload_edits:
@@ -497,13 +497,13 @@ def validate_step19_effective_payload_projection_contract(
         traffic_by_packet_id[packet_id] = record
     if duplicate_packet_ids:
         raise ValueError(
-            f"Step 19 V5 traffic contains duplicate packet_id values before Step 20 reconstruction: {sorted(duplicate_packet_ids)}"
+            f"Step 19 traffic contains duplicate packet_id values before Step 20 reconstruction: {sorted(duplicate_packet_ids)}"
         )
     projected_packet_ids = {str(projection.get("packet_id")) for projection in projections if isinstance(projection, dict)}
     unknown_packet_ids = sorted(projected_packet_ids - set(traffic_by_packet_id))
     if unknown_packet_ids:
         raise ValueError(
-            "Step 19 V5 effective payload projections reference packet_id values outside the validated traffic universe: "
+            "Step 19 effective payload projections reference packet_id values outside the validated traffic universe: "
             f"{unknown_packet_ids}: {input_json_path}"
         )
     preserved_projected_packet_ids = sorted(
@@ -513,13 +513,13 @@ def validate_step19_effective_payload_projection_contract(
     )
     if preserved_projected_packet_ids:
         raise ValueError(
-            "Step 19 V5 effective payload projections must not target Invalid Traffic or LLM Output Failure-only packets: "
+            "Step 19 effective payload projections must not target Invalid Traffic or LLM Output Failure-only packets: "
             f"{preserved_projected_packet_ids}: {input_json_path}"
         )
     expected_count = metadata.get("validated_effective_payload_projection_change_count")
     if not is_int_like(expected_count) or int(expected_count) != len(projections):
         raise ValueError(
-            "Step 19 V5 metadata.validated_effective_payload_projection_change_count must match "
+            "Step 19 metadata.validated_effective_payload_projection_change_count must match "
             f"{STEP19_EFFECTIVE_PAYLOAD_PROJECTIONS_FIELD}; metadata={expected_count!r}, actual={len(projections)}: {input_json_path}"
         )
     projection_summary = summarize_payload_projection_evidence(projections, input_json_path)
@@ -532,7 +532,7 @@ def validate_step19_effective_payload_projection_contract(
             value = metadata[optional_delta_field]
             if not is_int_like(value) or int(value) != projection_summary["net_payload_delta_bytes"]:
                 raise ValueError(
-                    f"Step 19 V5 metadata.{optional_delta_field} must match the effective payload projection net delta; "
+                    f"Step 19 metadata.{optional_delta_field} must match the effective payload projection net delta; "
                     f"metadata={value!r}, computed={projection_summary['net_payload_delta_bytes']}: {input_json_path}"
                 )
 
@@ -1616,24 +1616,6 @@ def rebuild_from_reference_packet(
     return packet
 
 
-#This function extracts group-level context from the Step 18 merge trace when it is present.
-#This function stores context in packet and group results so later alert comparison can map reconstructed POST packets back to their LLM group.
-def group_context_for_record(record: dict[str, Any], record_index: int) -> dict[str, Any]:
-    merge_trace = record.get("_merge_trace")
-    if isinstance(merge_trace, dict):
-        return {
-            "condition": merge_trace.get("condition"),
-            "model_name": merge_trace.get("model_name"),
-            "group_id": merge_trace.get("group_id"),
-            "group_key": f"{merge_trace.get('condition')}::{merge_trace.get('group_id')}",
-            "_merge_trace": merge_trace,
-        }
-    group_id = record.get("group_id")
-    if group_id is not None:
-        return {"condition": None, "model_name": None, "group_id": str(group_id), "group_key": f"unknown::{group_id}"}
-    return {"condition": None, "model_name": None, "group_id": None, "group_key": f"unassigned_record_{record_index}"}
-
-
 #This function reconstructs one packet and returns both the Scapy packet object and its report entry.
 #This function withholds the Scapy packet when a packet has any error-level issue, classifying it as Invalid Traffic.
 def reconstruct_one_packet(
@@ -1660,7 +1642,6 @@ def reconstruct_one_packet(
             },
         }
 
-    context = group_context_for_record(record, record_index)
     payload = payload_bytes(record, packet_issues)
     packet = rebuild_from_reference_packet(
         reference_packet=reference_packet,
@@ -1744,11 +1725,6 @@ def reconstruct_one_packet(
         "original_packet_number": record.get("original_packet_number"),
         "reduced_packet_index": record.get("reduced_packet_index"),
         "timestamp_epoch_pcap": record.get("timestamp_epoch_pcap"),
-        "group_key": context["group_key"],
-        "condition": context["condition"],
-        "model_name": context["model_name"],
-        "group_id": context["group_id"],
-        "_merge_trace": context.get("_merge_trace"),
         "tcp_sequence_translation": tcp_translation,
         "status": "failed" if has_error else "reconstructed",
         "evaluation_status": "Invalid Traffic" if has_error else "Reconstructed Traffic",
@@ -2382,58 +2358,6 @@ def audit_reconstructed_pcap(
     }
 
 
-#This function aggregates packet-level reconstruction results into group-level results.
-#This function keeps the same group validity principle used in Step 19: if any packet in a group fails, the group is marked as Invalid Traffic.
-#This function does not copy full packet issue objects into the group result because those details already live in packet_results.
-def summarize_groups(packet_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[str, dict[str, Any]] = {}
-    for result in packet_results:
-        key = result["group_key"]
-        if key not in groups:
-            groups[key] = {
-                "group_key": key,
-                "condition": result.get("condition"),
-                "model_name": result.get("model_name"),
-                "group_id": result.get("group_id"),
-                "packet_ids": [],
-                "record_indexes": [],
-                "reconstructed_packet_count": 0,
-                "failed_packet_count": 0,
-                "issue_counts_by_reason": defaultdict(int),
-                "warning_count": 0,
-                "error_count": 0,
-            }
-        group = groups[key]
-        group["record_indexes"].append(result["record_index"])
-        if result.get("packet_id") is not None:
-            group["packet_ids"].append(result["packet_id"])
-        if result["status"] == "reconstructed":
-            group["reconstructed_packet_count"] += 1
-        else:
-            group["failed_packet_count"] += 1
-        for item in result["issues"]:
-            group["issue_counts_by_reason"][item["reason"]] += 1
-            if item["severity"] == "warning":
-                group["warning_count"] += 1
-            elif item["severity"] == "error":
-                group["error_count"] += 1
-
-    group_results = []
-    for group in groups.values():
-        failed = group["failed_packet_count"] > 0
-        issue_counts_by_reason = dict(sorted(group.pop("issue_counts_by_reason").items()))
-        group_results.append(
-            {
-                **group,
-                "status": "Invalid Traffic" if failed else "Reconstructed Traffic",
-                "invalid_traffic": failed,
-                "packet_count": len(group["record_indexes"]),
-                "issue_counts_by_reason": issue_counts_by_reason,
-            }
-        )
-    return sorted(group_results, key=lambda item: item["group_key"])
-
-
 #This function runs the core Step 20 reconstruction logic.
 #This function reads Step 19 validated traffic, reconstructs accepted POST packets, writes the PCAP, and writes a detailed reconstruction report.
 def reconstruct_validated_traffic(
@@ -2450,7 +2374,7 @@ def reconstruct_validated_traffic(
     capabilities = resolve_modification_strategy(config)
     validation_policy = resolve_post_llm_traffic_validation_policy(config)
     validated_json = read_json(input_json_path)
-    metadata, traffic, source_validation_contract = validate_step19_v5_input(
+    metadata, traffic, source_validation_contract = validate_step19_input(
         validated_json,
         input_json_path,
         capabilities,
@@ -2519,9 +2443,6 @@ def reconstruct_validated_traffic(
             "input_packet_count": len(traffic),
             "reconstructed_packet_count": 0,
             "failed_packet_count": len(traffic),
-            "group_count": 0,
-            "reconstructed_group_count": 0,
-            "invalid_traffic_group_count": 0,
             "warning_count": 0,
             "error_count": 1,
             "issue_counts_by_reason": {reason: 1},
@@ -2561,7 +2482,6 @@ def reconstruct_validated_traffic(
                 "tcp_reconstruction_summary": tcp_failure_summary,
                 "tcp_direction_results": [],
                 "tcp_reconstruction_errors": [error_detail],
-                "group_results": [],
                 "packet_results": [],
             },
         )
@@ -2623,7 +2543,6 @@ def reconstruct_validated_traffic(
             "observed_inventory": {},
             "issues_by_record_index": {},
         }
-    group_results = summarize_groups(packet_results)
     issue_counts_by_reason: dict[str, int] = defaultdict(int)
     severity_counts: Counter[str] = Counter()
     for result in packet_results:
@@ -2696,9 +2615,6 @@ def reconstruct_validated_traffic(
             "failed_packet_count": sum(
                 1 for result in packet_results if result["status"] == "failed"
             ),
-            "group_count": len(group_results),
-            "reconstructed_group_count": sum(1 for group in group_results if not group["invalid_traffic"]),
-            "invalid_traffic_group_count": sum(1 for group in group_results if group["invalid_traffic"]),
             "warning_count": severity_counts.get("warning", 0),
             "error_count": severity_counts.get("error", 0),
             "issue_counts_by_reason": dict(sorted(issue_counts_by_reason.items())),
@@ -2711,7 +2627,6 @@ def reconstruct_validated_traffic(
         "tcp_direction_results": translation_plan["direction_results"],
         "tcp_reconstruction_errors": [],
         "network_protocol_validation": network_protocol_validation,
-        "group_results": group_results,
         "packet_results": packet_results,
     }
     write_json(report_path, report)
@@ -2822,8 +2737,6 @@ def main() -> None:
         print(f"Input packets: {result['input_packet_count']}")
         print(f"Reconstructed packets: {result['reconstructed_packet_count']}")
         print(f"Failed packets: {result['failed_packet_count']}")
-        print(f"Reconstructed groups: {result['reconstructed_group_count']}")
-        print(f"Invalid traffic groups: {result['invalid_traffic_group_count']}")
         print(f"Warnings: {result['warning_count']}")
         print(f"Errors: {result['error_count']}")
         print(f"TCP connections: {result['tcp_connection_count']}")

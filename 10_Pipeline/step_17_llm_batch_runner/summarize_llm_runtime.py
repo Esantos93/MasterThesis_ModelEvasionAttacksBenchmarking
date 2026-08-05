@@ -121,7 +121,7 @@ def resolve_prompt_package_path(metadata: dict[str, Any], prompt_dirs: list[Path
             if candidate.exists():
                 return candidate
 
-    prompt_unit_id = metadata.get("prompt_unit_id") or metadata.get("group_id")
+    prompt_unit_id = metadata.get("prompt_unit_id")
     if isinstance(prompt_unit_id, str) and prompt_unit_id:
         for prompt_dir in prompt_dirs:
             candidate = prompt_dir / f"{prompt_unit_id}.prompt.json"

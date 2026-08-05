@@ -241,6 +241,7 @@ def set_nested_header_value(header: dict[str, Any], field_name: str, value: Any)
 def scalar_header_paths(record: dict[str, Any]) -> dict[str, Any]:
     paths: dict[str, Any] = {}
 
+    #This nested helper flattens stable scalar header values into deterministic dotted paths.
     def walk(prefix: str, value: Any) -> None:
         if isinstance(value, dict):
             for key in sorted(value):

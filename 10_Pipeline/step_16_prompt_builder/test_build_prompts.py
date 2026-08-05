@@ -64,7 +64,6 @@ def build_v3_header_modification_unit() -> dict:
     }
     unit = {
         "schema_version": "compact_modification_unit_v3",
-        "strategy": "header_only_strategy_v1",
         "modification_strategy": "header_only_strategy_v1",
         "capabilities": capabilities,
         "editable_target_presence": {
@@ -214,7 +213,6 @@ def build_v3_payload_modification_unit(*, hybrid: bool = False) -> dict:
         "modification_unit_id": "group_000001",
         "unit_type": "hybrid_fixed_packet_count_compact_unit" if hybrid else "payload_only_fixed_packet_count_compact_unit",
         "source_packet_json_schema_version": "packet_json_v4",
-        "strategy": strategy,
         "modification_strategy": strategy,
         "capabilities": capabilities,
         "editable_target_presence": {
@@ -439,21 +437,19 @@ class Step16V3Test(unittest.TestCase):
             ),
         )
 
-    def test_rejects_historical_source_contracts(self) -> None:
+    def test_rejects_unsupported_source_contract(self) -> None:
         capabilities = build_prompts.resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "header_only_strategy_v1"}}
         )
-        for schema_version in ("compact_modification_unit_v1", "compact_modification_unit_v2"):
-            with self.subTest(schema_version=schema_version):
-                modification_unit = build_v3_header_modification_unit()
-                modification_unit["schema_version"] = schema_version
+        modification_unit = build_v3_header_modification_unit()
+        modification_unit["schema_version"] = "unsupported_contract"
 
-                with self.assertRaisesRegex(ValueError, "compact_modification_unit_v3"):
-                    build_prompts.validate_modification_unit(
-                        modification_unit,
-                        Path(f"historical_{schema_version}.json"),
-                        capabilities,
-                    )
+        with self.assertRaisesRegex(ValueError, "compact_modification_unit_v3"):
+            build_prompts.validate_modification_unit(
+                modification_unit,
+                Path("unsupported_contract.json"),
+                capabilities,
+            )
 
     def test_builds_header_only_prompt_from_compact_modification_unit_v3(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -488,7 +484,6 @@ class Step16V3Test(unittest.TestCase):
                     "metadata": {
                         "schema_version": "compact_modification_units_manifest_v3",
                         "compact_view_schema_version": "compact_modification_unit_v3",
-                        "strategy": "header_only_strategy_v1",
                         "modification_strategy": "header_only_strategy_v1",
                         "capabilities": {
                             "strategy": "header_only_strategy_v1",
@@ -779,7 +774,6 @@ class Step16V3Test(unittest.TestCase):
             "requires_payload_preservation": False,
         }
         header_unit = build_v3_header_modification_unit()
-        header_unit["strategy"] = hybrid_capabilities["strategy"]
         header_unit["modification_strategy"] = hybrid_capabilities["strategy"]
         header_unit["capabilities"] = hybrid_capabilities
         header_unit["editable_target_presence"] = {
@@ -810,12 +804,12 @@ class Step16V3Test(unittest.TestCase):
         self.assertNotIn('"patches": []', header_prompt["messages"][0]["content"])
         self.assertNotIn('"header_edits": []', payload_prompt["messages"][0]["content"])
 
-    def test_baseline_header_only_v3_visible_prompt_matches_historical_v2(self) -> None:
+    def test_baseline_header_only_v3_visible_prompt_matches_baseline_reference_v2(self) -> None:
         v3_unit = build_v3_header_modification_unit()
-        historical_v2 = json.loads(json.dumps(v3_unit))
-        historical_v2["schema_version"] = "compact_modification_unit_v2"
-        historical_v2.pop("capabilities")
-        historical_v2.pop("editable_target_presence")
+        baseline_reference_v2 = json.loads(json.dumps(v3_unit))
+        baseline_reference_v2["schema_version"] = "compact_modification_unit_v2"
+        baseline_reference_v2.pop("capabilities")
+        baseline_reference_v2.pop("editable_target_presence")
         structure = prompt_projection.load_prompt_input_json_data_structure("baseline_input_profile_v1")
         instructions = prompt_projection.load_prompt_instructions_profile(
             "baseline_instructions_profile_v1"
@@ -827,7 +821,7 @@ class Step16V3Test(unittest.TestCase):
             instruction_lines=instructions,
         )["content"]
         v2_content = prompt_projection.build_compact_patch_prompt_parts(
-            prompt_unit=historical_v2,
+            prompt_unit=baseline_reference_v2,
             prompt_input_structure=structure,
             instruction_lines=instructions,
         )["content"]

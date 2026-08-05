@@ -23,6 +23,7 @@ class PostLlmTrafficValidationPolicy:
     step20_protocol_audit_error_action: str
     policy_path: str
 
+    #This method serializes the validated policy and its supported actions for downstream audit.
     def as_metadata(self) -> dict[str, Any]:
         return {
             "schema_version": VALIDATION_POLICY_SCHEMA_VERSION,
@@ -35,6 +36,7 @@ class PostLlmTrafficValidationPolicy:
         }
 
 
+#This function loads the selected post-LLM validation policy and rejects unsupported actions before execution.
 def resolve_post_llm_traffic_validation_policy(
     config: dict[str, Any],
 ) -> PostLlmTrafficValidationPolicy:

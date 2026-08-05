@@ -279,6 +279,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function extracts the configured CICIDS attack flows and writes the canonical Step 12 manifest.
 def main() -> None:
     args = parse_cli_args()
     result = run_extraction(args.config, args.output)

@@ -18,19 +18,23 @@ from typing import Iterator, NoReturn, TextIO
 OutputLineHandler = Callable[[str], None]
 
 
+# This stream keeps terminal output and the persistent runner log byte-aligned.
 class TeeStream:
     """Mirror runner output to the interactive terminal and its execution log."""
 
+    # Store both destinations without taking ownership of their lifecycle.
     def __init__(self, stream: TextIO, log_file: TextIO) -> None:
         self.stream = stream
         self.log_file = log_file
 
+    # Flush the log immediately so a process failure does not hide its last output.
     def write(self, text: str) -> int:
         written = self.stream.write(text)
         self.log_file.write(text)
         self.log_file.flush()
         return written
 
+    # Honour the file-like protocol for redirected stdout and stderr.
     def flush(self) -> None:
         self.stream.flush()
         self.log_file.flush()
@@ -47,6 +51,7 @@ class PipelineRunnerLogState:
 class PipelineCommandError(RuntimeError):
     """A pipeline command failed and downstream commands must not run."""
 
+    # Preserve structured command data so the runner can report the exact failure.
     def __init__(self, *, label: str, command: Sequence[str], return_code: int) -> None:
         self.label = label
         self.command = tuple(command)
@@ -54,17 +59,20 @@ class PipelineCommandError(RuntimeError):
         super().__init__(f"{label} failed with exit code {return_code}")
 
     @property
+    # Convert signal-style or invalid statuses into a portable non-zero process code.
     def process_exit_code(self) -> int:
         """Return a portable non-zero exit code for the runner process."""
 
         return self.return_code if self.return_code > 0 else 1
 
 
+# Runner logs use UTC to remain comparable between the VM and cloud environments.
 def utc_timestamp_for_filename() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 @contextmanager
+# Keep a failed Step 11 log outside the experiment until that directory exists.
 def pipeline_runner_log(
     *,
     experiment_root: Path,
@@ -121,6 +129,7 @@ def pipeline_runner_log(
             )
 
 
+# Execute one step as a child process and fail before any downstream step can start.
 def run_checked_command(
     *,
     label: str,
@@ -167,6 +176,7 @@ def run_checked_command(
     print(f"{label} completed.", flush=True)
 
 
+# Terminate the runner with the child status after recording a concise diagnosis.
 def exit_after_pipeline_failure(error: PipelineCommandError) -> NoReturn:
     """Report the stopping point and terminate without running downstream steps."""
 

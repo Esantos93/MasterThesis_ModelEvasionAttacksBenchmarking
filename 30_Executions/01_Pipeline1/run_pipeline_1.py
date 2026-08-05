@@ -56,11 +56,13 @@ CANONICAL_PRE_SNORT_CONTEXT_RELATIVE_PATH = (
 )
 
 
+# Reject missing prerequisites before launching a costly pipeline step.
 def check_exists(path: Path, description: str) -> None:
     if not path.exists():
         raise SystemExit(f"Missing {description}: {path}")
 
 
+# Use the same strict config loader as the step implementations.
 def load_pipeline_config() -> dict:
     sys.path.insert(0, str(PIPELINE_ROOT))
     from common.config import load_json_config
@@ -68,6 +70,7 @@ def load_pipeline_config() -> dict:
     return load_json_config(CONFIG_PATH)
 
 
+# Hash staged IDS evidence to prevent a later-step run from using another bundle.
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as input_file:
@@ -76,6 +79,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Delegate profile classification to the shared prompt contract.
 def prompt_engineering_profiles_selected(config_data: dict) -> bool:
     sys.path.insert(0, str(PIPELINE_ROOT))
     from common.prompt_projection import prompt_engineering_profiles_selected as shared_profile_check
@@ -83,6 +87,7 @@ def prompt_engineering_profiles_selected(config_data: dict) -> bool:
     return shared_profile_check(config_data)
 
 
+# Validate PRE Snort evidence before Step 11 copies or a later run reuses it.
 def load_and_validate_bundle(path: Path) -> dict:
     check_exists(path, "PRE Snort context bundle")
     if not path.is_file():
@@ -99,6 +104,7 @@ def load_and_validate_bundle(path: Path) -> dict:
     return bundle
 
 
+# Enforce IDS bundle presence only for profiles whose visible input requires it.
 def preflight_pre_snort_context(
     *,
     config_data: dict,
@@ -137,6 +143,7 @@ def preflight_pre_snort_context(
     return source_path
 
 
+# Route every child command through the shared fail-fast subprocess contract.
 def run_command(label: str, command: list[str]) -> None:
     run_checked_command(
         label=label,
@@ -146,6 +153,7 @@ def run_command(label: str, command: list[str]) -> None:
     )
 
 
+# Respect the configured step interval without constructing an alternative workflow.
 def maybe_run_step(step: int, command: list[str]) -> None:
     if step < START_STEP or step > END_STEP:
         print(f"Skipping Step {step} because START_STEP={START_STEP}, END_STEP={END_STEP}.")
@@ -153,6 +161,7 @@ def maybe_run_step(step: int, command: list[str]) -> None:
     run_command(f"STEP {step}", command)
 
 
+# Keep the IDS bundle as the only runtime argument; experiment choices remain explicit above.
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local Pipeline 1 steps sequentially.")
     parser.add_argument(
@@ -162,6 +171,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Validate the run once, then execute Steps 11-15 in their canonical order.
 def main() -> None:
     args = parse_cli_args()
     check_exists(PIPELINE_ROOT, "pipeline root")

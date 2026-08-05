@@ -101,6 +101,7 @@ def validate_config_shape(config: dict[str, Any]) -> None:
     resolve_post_llm_traffic_validation_policy(config)
 
 
+#This function hashes a source artifact so later steps can verify exactly which PRE evidence was staged.
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as input_file:
@@ -109,6 +110,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+#This function loads the optional PRE Snort bundle and validates it against the shared IDS contract.
 def load_and_validate_pre_snort_context_bundle(bundle_path: Path) -> dict[str, Any]:
     with bundle_path.open("r", encoding="utf-8") as input_file:
         bundle = json.load(input_file)
@@ -116,6 +118,7 @@ def load_and_validate_pre_snort_context_bundle(bundle_path: Path) -> dict[str, A
     return bundle
 
 
+#This function copies a validated PRE bundle into the experiment using a fixed path and auditable provenance.
 def prepare_pre_snort_context_source(
     *,
     config: dict[str, Any],
@@ -257,6 +260,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#This function initializes the experiment directories, metadata, and optional IDS context from the selected config.
 def main() -> None:
     args = parse_cli_args()
     metadata = run_setup(args.config, args.check_inputs, args.pre_snort_context_bundle)

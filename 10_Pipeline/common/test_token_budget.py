@@ -36,20 +36,6 @@ class TokenBudgetConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "output_token_estimation_safety_factor"):
             load_token_budget_config(config)
 
-    def test_rejects_old_parallel_chars_per_token_location(self) -> None:
-        config = active_config()
-        config["llm"]["chars_per_token_estimate"] = 3.0
-
-        with self.assertRaisesRegex(ValueError, "llm.chars_per_token_estimate is obsolete"):
-            load_token_budget_config(config)
-
-    def test_rejects_obsolete_token_budget_safety_factor(self) -> None:
-        config = active_config()
-        config["llm"]["token_budget_safety_factor"] = 0.85
-
-        with self.assertRaisesRegex(ValueError, "token_budget_safety_factor is obsolete"):
-            load_token_budget_config(config)
-
     def test_rejects_nonpositive_chars_per_token(self) -> None:
         with self.assertRaisesRegex(ValueError, "chars_per_token_estimate must be greater than zero"):
             load_token_budget_config(active_config(chars_per_token=0.0))

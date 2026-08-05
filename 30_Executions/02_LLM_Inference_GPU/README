@@ -175,8 +175,7 @@ STEP17_ARCHIVE
 ```
 
 Step 17 output budgets come exclusively from each prompt unit's
-`token_plan.planned_output_tokens`. `EXPECTED_OUTPUT_PATCH_TOKENS` is obsolete;
-the wrapper rejects it when set instead of silently overriding the shared plan.
+`token_plan.planned_output_tokens`.
 
 `DISABLE_THINKING=1` forwards `--disable-thinking` to the vLLM Step 17 runner.
 Use it for models such as Qwen3 when the experiment requires non-thinking mode

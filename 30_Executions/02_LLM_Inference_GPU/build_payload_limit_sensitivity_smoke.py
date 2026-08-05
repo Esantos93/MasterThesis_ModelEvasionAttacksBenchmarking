@@ -676,7 +676,6 @@ def build_prompt_summary(prompt_package: dict[str, Any]) -> dict[str, Any]:
     return {
         "parent_group_id": prompt_package["parent_group_id"],
         "prompt_unit_id": prompt_package["prompt_unit_id"],
-        "group_id": prompt_package["group_id"],
         "prompt_file": f"{prompt_package['prompt_unit_id']}.prompt.json",
         "source_modification_unit_id": prompt_package[
             "source_modification_unit_id"

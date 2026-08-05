@@ -16,6 +16,7 @@ class ModificationCapabilities:
     allows_payload_edits: bool
     requires_payload_preservation: bool
 
+    #This method serializes the resolved strategy capabilities into artifact metadata.
     def as_metadata(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy,
@@ -47,6 +48,7 @@ SUPPORTED_MODIFICATION_STRATEGIES: dict[str, ModificationCapabilities] = {
 }
 
 
+#This function resolves the configured modification strategy and fails closed on unknown capabilities.
 def resolve_modification_strategy(config: dict[str, Any]) -> ModificationCapabilities:
     strategy = config.get("pipeline", {}).get("modification_strategy")
     if not isinstance(strategy, str) or not strategy.strip():

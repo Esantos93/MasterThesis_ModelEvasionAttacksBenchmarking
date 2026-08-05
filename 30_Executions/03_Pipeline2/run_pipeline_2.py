@@ -53,11 +53,13 @@ CONFIG_PATH = PIPELINE_ROOT / CONFIG
 POST_RUN_PATTERN = re.compile(r"\bpost_run_label=([A-Za-z0-9_.-]+)\b")
 
 
+# Reject missing prerequisites before launching a downstream step.
 def check_exists(path: Path, description: str) -> None:
     if not path.exists():
         raise SystemExit(f"Missing {description}: {path}")
 
 
+# Recognize both the canonical prompt manifest and explicitly stored prompt files.
 def has_prompt_packages(path: Path) -> bool:
     if not path.exists():
         return False
@@ -66,6 +68,7 @@ def has_prompt_packages(path: Path) -> bool:
     return any(path.glob("*.prompt.json")) or any(path.rglob("*.prompt.json"))
 
 
+# Require concrete Step 17 output evidence rather than trusting a directory name.
 def has_step17_outputs(path: Path) -> bool:
     if not path.exists():
         return False
@@ -74,6 +77,7 @@ def has_step17_outputs(path: Path) -> bool:
     return any((path / name).exists() for name in expected_dirs + expected_files)
 
 
+# Resolve ordered layout candidates and fail clearly when none satisfies the contract.
 def first_matching_path(candidates: list[Path], description: str, predicate) -> Path:
     for candidate in candidates:
         if predicate(candidate):
@@ -82,6 +86,7 @@ def first_matching_path(candidates: list[Path], description: str, predicate) -> 
     raise SystemExit(f"Missing {description}. Tried:\n{formatted}")
 
 
+# Support canonical and extracted RISE layouts without changing prompt contents.
 def resolve_step16_prompt_root(
     *,
     experiment_root: Path,
@@ -106,6 +111,7 @@ def resolve_step16_prompt_root(
     return first_matching_path(candidates, "Step 16 prompt root", has_prompt_packages)
 
 
+# Resolve exactly one model output root across canonical and extracted RISE layouts.
 def resolve_step17_model_root(
     *,
     experiment_root: Path,
@@ -165,6 +171,7 @@ def resolve_step17_model_root(
     raise SystemExit(f"Missing Step 17 model output root. Tried:\n{formatted}")
 
 
+# Use the same strict config loader as the step implementations.
 def load_pipeline_config() -> dict:
     sys.path.insert(0, str(PIPELINE_ROOT))
     from common.config import load_json_config
@@ -172,6 +179,7 @@ def load_pipeline_config() -> dict:
     return load_json_config(CONFIG_PATH)
 
 
+# Derive the Step 15 directory label from the configured grouping policy.
 def grouping_output_label(config: dict) -> str:
     pipeline = config["pipeline"]
     grouping_policy = pipeline["grouping_policy"]
@@ -181,9 +189,11 @@ def grouping_output_label(config: dict) -> str:
     return str(grouping_policy)
 
 
+# Run one downstream step and optionally capture the POST label emitted by Step 21.
 def run_command(step: int, command: list[str], capture_post_run_label: bool = False) -> str | None:
     captured_post_run_label = None
 
+    # Inspect streamed output without suppressing it from the terminal or runner log.
     def capture_output_metadata(line: str) -> None:
         nonlocal captured_post_run_label
         if capture_post_run_label:
@@ -201,6 +211,7 @@ def run_command(step: int, command: list[str], capture_post_run_label: bool = Fa
     return captured_post_run_label
 
 
+# Respect the configured interval while preserving canonical downstream ordering.
 def maybe_run(step: int, command: list[str], capture_post_run_label: bool = False) -> str | None:
     if step < START_STEP or step > END_STEP:
         print(f"Skipping Step {step} because START_STEP={START_STEP}, END_STEP={END_STEP}.")
@@ -208,6 +219,7 @@ def maybe_run(step: int, command: list[str], capture_post_run_label: bool = Fals
     return run_command(step, command, capture_post_run_label=capture_post_run_label)
 
 
+# Build Step 25 through the same checked subprocess path as Steps 18-24.
 def build_step25_command(*, python_command: list[str], config_path: Path) -> list[str]:
     """Build the Step 25 command without duplicating subprocess execution."""
 
@@ -218,6 +230,7 @@ def build_step25_command(*, python_command: list[str], config_path: Path) -> lis
     ]
 
 
+# Resolve upstream artifacts once, then execute Steps 18-25 in canonical order.
 def main() -> None:
     check_exists(PIPELINE_ROOT, "pipeline root")
     check_exists(CONFIG_PATH, "config")

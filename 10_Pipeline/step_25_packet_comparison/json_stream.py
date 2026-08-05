@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterator, TextIO
 class JsonStreamReader:
     """Small buffered character reader used to select values from large JSON objects."""
 
+    #This initializer creates a bounded buffer around a text stream for large artifact traversal.
     def __init__(self, input_file: TextIO, chunk_size: int = 1024 * 1024):
         self.input_file = input_file
         self.chunk_size = chunk_size
@@ -15,6 +16,7 @@ class JsonStreamReader:
         self.position = 0
         self.eof = False
 
+    #This method discards consumed characters and refills the bounded buffer.
     def _fill(self) -> None:
         if self.position:
             self.buffer = self.buffer[self.position :]
@@ -27,21 +29,25 @@ class JsonStreamReader:
         else:
             self.eof = True
 
+    #This method returns the next character without consuming it.
     def peek(self) -> str:
         while self.position >= len(self.buffer) and not self.eof:
             self._fill()
         return "" if self.position >= len(self.buffer) else self.buffer[self.position]
 
+    #This method consumes and returns the next character.
     def get(self) -> str:
         value = self.peek()
         if value:
             self.position += 1
         return value
 
+    #This method advances past insignificant JSON whitespace.
     def skip_whitespace(self) -> None:
         while self.peek() and self.peek().isspace():
             self.position += 1
 
+    #This method requires one structural token at the current stream position.
     def expect(self, expected: str) -> None:
         self.skip_whitespace()
         actual = self.get()
@@ -77,6 +83,7 @@ def read_json_value_text(reader: JsonStreamReader, *, collect: bool) -> str:
 
     output: list[str] = []
 
+    #This nested helper consumes one character and optionally appends it to the retained JSON text.
     def consume() -> str:
         character = reader.get()
         if collect:

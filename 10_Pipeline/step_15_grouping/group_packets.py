@@ -497,10 +497,12 @@ def token_plan_fits(prompt_unit: dict[str, Any]) -> bool:
     return isinstance(token_plan, dict) and bool(token_plan.get("fits_prompt_target_context"))
 
 
+#This function reports whether the selected input profile requires IDS evidence in each Compact Unit.
 def ids_context_enabled(token_config: dict[str, Any]) -> bool:
     return token_config["prompt_input_structure"].get("ids_context_field_name") == "ids_context"
 
 
+#This function preserves the validated header-only model-visible projection while all internal units use V3.
 def uses_header_only_v2_visible_projection(
     capabilities: ModificationCapabilities,
     token_config: dict[str, Any],
@@ -842,6 +844,7 @@ def build_parent_group_index(
     return entries
 
 
+#This function removes absent optional metadata recursively before writing Compact Unit artifacts.
 def compact_without_none(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -854,6 +857,7 @@ def compact_without_none(value: Any) -> Any:
     return value
 
 
+#This function attaches the shared token plan and final V3 contract metadata to one candidate unit.
 def finalize_v3_unit(unit: dict[str, Any], token_config: dict[str, Any]) -> None:
     header_count = editable_header_region_count(unit)
     payload_count = sum(
@@ -881,6 +885,7 @@ def finalize_v3_unit(unit: dict[str, Any], token_config: dict[str, Any]) -> None
     unit["estimated_input_tokens"] = int(token_plan["estimated_input_tokens"])
 
 
+#This function materializes one V3 Compact Unit from ordered header and canonical-payload atoms.
 def build_v3_unit(
     *,
     experiment_id: str,
@@ -907,7 +912,6 @@ def build_v3_unit(
         "unit_type": unit_type,
         "source_packet_json": str(source_packet_json),
         "source_packet_json_schema_version": source_packet_json_schema_version,
-        "strategy": capabilities.strategy,
         "modification_strategy": capabilities.strategy,
         "capabilities": capability_metadata,
         "header_only": capabilities.allows_header_edits and not capabilities.allows_payload_edits,
@@ -958,6 +962,7 @@ def build_v3_unit(
     return compact_without_none(unit)
 
 
+#This function returns the physical packets needed to provide context for one semantic modification atom.
 def atom_source_packets(atom: dict[str, Any]) -> list[dict[str, Any]]:
     source_packets = atom.get("source_packets", [])
     if not isinstance(source_packets, list):
@@ -965,6 +970,7 @@ def atom_source_packets(atom: dict[str, Any]) -> list[dict[str, Any]]:
     return [packet for packet in source_packets if isinstance(packet, dict)]
 
 
+#This function derives the V3 unit type from the target capabilities actually present in the unit.
 def unit_type_for_atoms(atoms: list[dict[str, Any]], grouping_policy: str, fragmented: bool) -> str:
     has_headers = any(atom["kind"] == "physical_header" for atom in atoms)
     has_payload = any(atom["kind"] == "canonical_payload" for atom in atoms)
@@ -982,6 +988,7 @@ def unit_type_for_atoms(atoms: list[dict[str, Any]], grouping_policy: str, fragm
     return f"{surface}_{grouping}_compact_unit{suffix}"
 
 
+#This function partitions one Parent Group into ordered token-budget-compliant V3 Compact Units.
 def build_v3_modification_units_for_group(
     *,
     experiment_id: str,
@@ -1022,6 +1029,7 @@ def build_v3_modification_units_for_group(
         for position, packet in enumerate(parent_packets, start=1)
     }
 
+    #This nested helper derives deterministic fragment identities without renaming unsplit Parent Groups.
     def fragment_id(fragment_index: int, fragment_count: int) -> str:
         return (
             parent_group_id
@@ -1029,6 +1037,7 @@ def build_v3_modification_units_for_group(
             else f"{parent_group_id}_fragment_{fragment_index:04d}"
         )
 
+    #This nested helper materializes one candidate unit from semantic atoms and its final fragment envelope.
     def build_from_atoms(
         atoms: list[dict[str, Any]],
         fragment_index: int,
@@ -1106,6 +1115,7 @@ def build_v3_modification_units_for_group(
             fragment_compact_unit_context=fragment_compact_unit_context,
         )
 
+    #This nested helper binds one canonical payload entry to its physical packet context and ordering key.
     def payload_atom(entry: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
         _region_id, start, _end = payload_entry_interval(entry)
         source_packets = [
@@ -1135,6 +1145,7 @@ def build_v3_modification_units_for_group(
         for record in parent_group.get("records", [])
     }
 
+    #This nested helper tests one payload candidate with a conservative final-fragment metadata envelope.
     def candidate_entry_fits(entry: dict[str, Any], record: dict[str, Any]) -> bool:
         # Reserve the longest normal fragment id/count envelope during range sizing.
         # Final units can then add their real fragment metadata without invalidating
@@ -1142,6 +1153,7 @@ def build_v3_modification_units_for_group(
         candidate = build_from_atoms([payload_atom(entry, record)], 999999, 999999)
         return token_plan_fits(candidate)
 
+    #This nested helper applies the shared payload context and replacement-limit configuration to one range.
     def build_entry(
         record: dict[str, Any],
         *,
@@ -1166,6 +1178,7 @@ def build_v3_modification_units_for_group(
             anchor_group_fragment_id=parent_group_id,
         )
 
+    #This nested helper searches each replacement tier for the largest payload window that fits by itself.
     def maximum_fitting_bytes(
         record: dict[str, Any],
         *,
@@ -1230,6 +1243,7 @@ def build_v3_modification_units_for_group(
             best = max(best, interval_best)
         return best
 
+    #This nested helper records a payload target compactly so planning does not retain full aliases in memory.
     def payload_descriptor(
         record: dict[str, Any],
         *,
@@ -1257,6 +1271,7 @@ def build_v3_modification_units_for_group(
             "range_count": range_count,
         }
 
+    #This nested iterator emits one indivisible physical-header descriptor per packet when headers are enabled.
     def iter_header_descriptors() -> Iterator[dict[str, Any]]:
         if not capabilities.allows_header_edits:
             return
@@ -1273,6 +1288,7 @@ def build_v3_modification_units_for_group(
                 "packet_id": packet_id,
             }
 
+    #This nested iterator emits full, semantic, or balanced-window payload descriptors in stream order.
     def iter_payload_descriptors() -> Iterator[dict[str, Any]]:
         if not capabilities.allows_payload_edits:
             return
@@ -1373,6 +1389,7 @@ def build_v3_modification_units_for_group(
                         range_count=len(ranges),
                     )
 
+    #This nested helper expands one bounded descriptor into the complete atom needed for final serialization.
     def materialize_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
         if descriptor["kind"] == "physical_header":
             packet_id = str(descriptor["packet_id"])
@@ -1395,6 +1412,7 @@ def build_v3_modification_units_for_group(
         )
         return payload_atom(entry, record)
 
+    #This nested helper materializes an ordered descriptor chunk and builds its final Compact Unit.
     def build_from_descriptors(
         descriptors: list[dict[str, Any]],
         fragment_index: int,
@@ -1429,6 +1447,7 @@ def build_v3_modification_units_for_group(
     )
     spool_path = Path(spool_handle.name)
 
+    #This nested helper spools one planned descriptor chunk as compact deterministic JSON.
     def write_chunk(handle: Any, chunk: list[dict[str, Any]]) -> None:
         handle.write(
             json.dumps(
@@ -1440,6 +1459,7 @@ def build_v3_modification_units_for_group(
         )
         handle.write("\n")
 
+    #This nested iterator validates and yields planned chunks without loading the complete Parent Group plan.
     def iter_spooled_chunks(path: Path) -> Iterator[list[dict[str, Any]]]:
         with path.open("r", encoding="utf-8") as input_file:
             for line in input_file:
@@ -1533,13 +1553,14 @@ def build_v3_modification_units_for_group(
         spool_path.unlink(missing_ok=True)
 
 
+#This function validates one completed V3 unit before publication and rejects any token-plan inconsistency.
 def validate_v3_prompt_unit(
     prompt_unit: dict[str, Any],
     capabilities: ModificationCapabilities,
 ) -> None:
     if prompt_unit.get("schema_version") != MODIFICATION_UNIT_SCHEMA_VERSION:
         raise ValueError(f"Step 15 units must use {MODIFICATION_UNIT_SCHEMA_VERSION}.")
-    if prompt_unit.get("strategy") != capabilities.strategy:
+    if prompt_unit.get("modification_strategy") != capabilities.strategy:
         raise ValueError("V3 unit strategy does not match resolved capabilities.")
     if prompt_unit.get("capabilities") != capabilities.as_metadata():
         raise ValueError("V3 unit capabilities do not match common.modification_strategy.")
@@ -1599,6 +1620,7 @@ def validate_v3_prompt_unit(
                 raise ValueError("V3 payload replacement byte/hex limits are inconsistent.")
 
 
+#This function builds the bounded manifest entry for one fully validated Compact Unit.
 def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -> dict[str, Any]:
     group_metadata = prompt_unit.get("group_metadata", {})
     summary = {
@@ -1628,6 +1650,7 @@ def summarize_prompt_unit(prompt_unit: dict[str, Any], prompt_unit_path: Path) -
 
 
 class UnitPopulationAccumulator:
+    #This initializer creates bounded counters for population-wide unit and IDS diagnostics.
     def __init__(self) -> None:
         self.modification_unit_count = 0
         self.over_budget_summary = {
@@ -1640,6 +1663,7 @@ class UnitPopulationAccumulator:
         self.ids_context_compact_units_with_records = 0
         self.ids_context_total_materialized_detector_record_count = 0
 
+    #This method incorporates one emitted unit without retaining the unit itself.
     def observe(self, prompt_unit: dict[str, Any]) -> None:
         self.modification_unit_count += 1
         token_plan = prompt_unit["token_plan"]
@@ -1660,11 +1684,13 @@ class UnitPopulationAccumulator:
 
 
 class EditableOwnershipCoverageTracker:
+    #This initializer creates header and canonical-payload ownership indexes for exact coverage checks.
     def __init__(self) -> None:
         self.header_packet_counts: Counter[str] = Counter()
         self.payload_region_cursors: dict[str, int] = {}
         self.payload_editable_byte_count = 0
 
+    #This method consumes one unit and rejects payload gaps or overlaps immediately.
     def observe(self, prompt_unit: dict[str, Any]) -> None:
         self.header_packet_counts.update(
             str(packet["packet_id"])
@@ -1682,6 +1708,7 @@ class EditableOwnershipCoverageTracker:
             self.payload_region_cursors[region_id] = end
             self.payload_editable_byte_count += end - start
 
+    #This method compares accumulated ownership with the complete source packet and canonical-region universe.
     def finalize(
         self,
         *,
@@ -1743,6 +1770,7 @@ class EditableOwnershipCoverageTracker:
 
 
 class ManifestSummarySpool:
+    #This initializer opens a temporary line-oriented manifest-summary spool in the final output directory.
     def __init__(self, output_dir: Path) -> None:
         handle = tempfile.NamedTemporaryFile(
             mode="w",
@@ -1757,6 +1785,7 @@ class ManifestSummarySpool:
         self._handle = handle
         self._closed = False
 
+    #This method appends one deterministic summary without retaining prior entries.
     def append(self, summary: dict[str, Any]) -> None:
         self._handle.write(
             json.dumps(
@@ -1768,16 +1797,19 @@ class ManifestSummarySpool:
         )
         self._handle.write("\n")
 
+    #This method closes the spool exactly once before manifest streaming begins.
     def close(self) -> None:
         if not self._closed:
             self._handle.close()
             self._closed = True
 
+    #This method closes and removes temporary planning state after success or failure.
     def remove(self) -> None:
         self.close()
         self.path.unlink(missing_ok=True)
 
 
+#This function writes the potentially large V3 manifest incrementally without retaining all unit summaries in memory.
 def write_manifest_streaming(
     *,
     manifest_path: Path,
@@ -1805,6 +1837,7 @@ def write_manifest_streaming(
         output_file.write("]\n}\n")
 
 
+#This function proves that Parent Groups cover each source physical packet exactly once and preserve order.
 def validate_physical_parent_group_coverage(parent_groups: list[dict[str, Any]], ordered_packets: list[dict[str, Any]]) -> dict[str, Any]:
     expected_packet_ids = [str(packet["packet_id"]) for packet in ordered_packets]
     seen_packet_ids: list[str] = []
@@ -1859,7 +1892,6 @@ def build_manifest_metadata(
             "source_packet_json": str(input_json_path),
             "source_packet_json_schema_version": packet_json.get("metadata", {}).get("schema_version"),
             "output_dir": str(output_dir),
-            "strategy": capabilities.strategy,
             "modification_strategy": capabilities.strategy,
             "capabilities": capability_metadata,
             "header_only": capabilities.allows_header_edits and not capabilities.allows_payload_edits,

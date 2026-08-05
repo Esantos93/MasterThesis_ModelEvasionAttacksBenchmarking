@@ -11,16 +11,19 @@ from typing import Iterator, TextIO
 class TeeStream:
     """Mirror writes to the original terminal stream and to a log file."""
 
+    #This initializer binds the interactive terminal stream to the persistent step log.
     def __init__(self, stream: TextIO, log_file: TextIO):
         self.stream = stream
         self.log_file = log_file
 
+    #This method mirrors text immediately so a crash does not leave buffered diagnostic output behind.
     def write(self, text: str) -> int:
         written = self.stream.write(text)
         self.log_file.write(text)
         self.log_file.flush()
         return written
 
+    #This method flushes both destinations to keep terminal and log output synchronized.
     def flush(self) -> None:
         self.stream.flush()
         self.log_file.flush()
@@ -33,10 +36,12 @@ class TerminalLogState:
     log_path: Path
 
 
+#This function returns a filesystem-safe UTC timestamp for deterministic log naming.
 def utc_timestamp_for_filename() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
+#This function builds the standard per-experiment log location for one pipeline step.
 def default_step_log_path(
     *,
     experiment_root: str | Path,
@@ -55,6 +60,7 @@ def default_step_log_path(
     return log_dir / f"{prefix}_{utc_timestamp_for_filename()}.log"
 
 
+#This context manager tees stdout and stderr to a log while preserving interactive terminal output.
 @contextmanager
 def terminal_log(log_path: str | Path, *, banner: str | None = None) -> Iterator[TerminalLogState]:
     """Capture script terminal output while still showing it interactively."""

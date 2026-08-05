@@ -88,7 +88,7 @@ def packet_record(packet: Any, packet_number: int, dataset_packet_number: int) -
     }
 
 
-class RawPcapReaderCompatibilityTests(unittest.TestCase):
+class ManagedRawPcapReaderTests(unittest.TestCase):
     def test_managed_reader_closes_reader_without_context_manager_protocol(self) -> None:
         class ReaderWithoutContextManager:
             def __init__(self, path: str):
@@ -218,7 +218,7 @@ class Step25Fixture:
             json.dumps(
                 {
                     "metadata": {
-                        "schema_version": "pcap_reconstruction_report_v7",
+                        "schema_version": "pcap_reconstruction_report_v8",
                         "status": "completed",
                         "experiment_id": self.experiment_id,
                     },
@@ -302,7 +302,6 @@ class PacketComparisonTests(unittest.TestCase):
             fixture.run()
             summary_path = fixture.output_dir / "packet_comparisons_summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            summary["metadata"]["schema_version"] = "packet_comparisons_manifest_v1"
             summary["packet_comparisons"][0].pop("llm_target_surface")
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
 

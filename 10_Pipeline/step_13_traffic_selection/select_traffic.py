@@ -406,6 +406,7 @@ def build_flow_mapping(
     }
 
 
+#This function resolves CICIDS flow rows to non-overlapping packet windows under the configured conservative policy.
 def resolve_flow_mappings(
     flows: list[dict[str, Any]],
     flow_packet_refs: dict[str, list[dict[str, Any]]],
@@ -618,6 +619,7 @@ def validate_inputs(config: dict[str, Any], flow_manifest: dict[str, Any]) -> No
         raise ValueError("Selected flow manifest must be a JSON object with a 'flows' list.")
 
 
+#This function streams the source PCAP, writes selected malicious packets, and records complete packet provenance.
 def select_packets(
     config: dict[str, Any],
     flow_manifest: dict[str, Any],

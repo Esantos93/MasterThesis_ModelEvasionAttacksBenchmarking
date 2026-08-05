@@ -20,7 +20,7 @@ from step_20_json_to_pcap.reconstruct_pcap import (
     tcp_option_kinds_from_bytes,
     translate_tcp_number,
     validate_step19_effective_payload_projection_contract,
-    validate_step19_v5_input,
+    validate_step19_input,
 )
 
 
@@ -31,10 +31,10 @@ class FakeValidationPolicy:
     policy_id = "reject_invalid_v1"
 
 
-def step19_v5_metadata(
+def step19_metadata(
     *,
     packet_count: int,
-    experiment_id: str = "test-step20-v5",
+    experiment_id: str = "test-step20-current",
     source_merged_json: str = "merged_modified_traffic.json",
     validation_report: str = "validation_report.json",
 ) -> dict:
@@ -556,14 +556,14 @@ class ActiveReconstructionContractTests(unittest.TestCase):
 
 
 class Step19InputSchemaTests(unittest.TestCase):
-    def test_accepts_validated_traffic_v5(self):
+    def test_accepts_current_validated_traffic(self):
         validated = {
-            "metadata": step19_v5_metadata(packet_count=0),
+            "metadata": step19_metadata(packet_count=0),
             "traffic": [],
         }
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
-        metadata, traffic = validate_step19_v5_input(
+        metadata, traffic = validate_step19_input(
             validated,
             Path("validated_modified_traffic.json"),
             capabilities,
@@ -573,40 +573,40 @@ class Step19InputSchemaTests(unittest.TestCase):
         self.assertEqual(EXPECTED_INPUT_SCHEMA_VERSION, metadata["schema_version"])
         self.assertEqual([], traffic)
 
-    def test_rejects_legacy_validated_traffic_schema(self):
+    def test_rejects_unsupported_validated_traffic_schema(self):
         validated = {
-            "metadata": {**step19_v5_metadata(packet_count=0), "schema_version": "validated_modified_traffic_v3"},
+            "metadata": {**step19_metadata(packet_count=0), "schema_version": "unsupported_schema"},
             "traffic": [],
         }
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
         with self.assertRaisesRegex(ValueError, "requires Step 19 validated traffic schema"):
-            validate_step19_v5_input(
+            validate_step19_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
                 FakeValidationPolicy(),
             )
 
-    def test_rejects_v4_without_full_post_reconstruction_metadata(self):
-        metadata = step19_v5_metadata(packet_count=0)
+    def test_rejects_missing_full_post_reconstruction_metadata(self):
+        metadata = step19_metadata(packet_count=0)
         metadata.pop("post_reconstruction_policy")
         validated = {"metadata": metadata, "traffic": []}
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
         with self.assertRaisesRegex(ValueError, "missing required fields"):
-            validate_step19_v5_input(
+            validate_step19_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
                 FakeValidationPolicy(),
             )
 
-    def test_rejects_legacy_full_post_reconstruction_policy(self):
+    def test_rejects_unsupported_full_post_reconstruction_policy(self):
         validated = {
             "metadata": {
-                **step19_v5_metadata(packet_count=0),
-                "post_reconstruction_policy": "full_packet_universe_with_original_noop_for_failed_or_invalid_groups",
+                **step19_metadata(packet_count=0),
+                "post_reconstruction_policy": "unsupported_policy",
             },
             "traffic": [],
             "validated_effective_payload_projection_changes": [],
@@ -614,7 +614,7 @@ class Step19InputSchemaTests(unittest.TestCase):
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
         with self.assertRaisesRegex(ValueError, "full POST reconstruction policy"):
-            validate_step19_v5_input(
+            validate_step19_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
@@ -623,7 +623,7 @@ class Step19InputSchemaTests(unittest.TestCase):
 
     def test_payload_capable_requires_step19_effective_projection_collection(self):
         validated = {
-            "metadata": step19_v5_metadata(packet_count=0),
+            "metadata": step19_metadata(packet_count=0),
             "traffic": [],
         }
         capabilities = resolve_modification_strategy(
@@ -631,7 +631,7 @@ class Step19InputSchemaTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "requires validated_effective_payload_projection_changes"):
-            validate_step19_v5_input(
+            validate_step19_input(
                 validated,
                 Path("validated_modified_traffic.json"),
                 capabilities,
@@ -639,7 +639,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_projection_count_mismatch(self):
-        metadata = step19_v5_metadata(packet_count=1)
+        metadata = step19_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 2
         capabilities = resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
@@ -656,7 +656,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_unknown_projection_packet_id(self):
-        metadata = step19_v5_metadata(packet_count=1)
+        metadata = step19_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 1
         capabilities = resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
@@ -673,7 +673,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_rejects_projection_for_failure_only_packet(self):
-        metadata = step19_v5_metadata(packet_count=1)
+        metadata = step19_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 1
         capabilities = resolve_modification_strategy(
             {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
@@ -690,7 +690,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             )
 
     def test_header_only_rejects_effective_payload_projection_collection(self):
-        metadata = step19_v5_metadata(packet_count=1)
+        metadata = step19_metadata(packet_count=1)
         metadata["validated_effective_payload_projection_change_count"] = 1
         capabilities = resolve_modification_strategy({"pipeline": {"modification_strategy": "header_only_strategy_v1"}})
 
@@ -704,7 +704,7 @@ class Step19InputSchemaTests(unittest.TestCase):
                 input_json_path=Path("validated_modified_traffic.json"),
             )
 
-    def test_payload_capable_v5_source_contract_summarizes_step19_effective_projection_evidence(self):
+    def test_payload_capable_source_contract_summarizes_step19_effective_projection_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             validation_report = temp_dir / "validation_report.json"
@@ -712,7 +712,7 @@ class Step19InputSchemaTests(unittest.TestCase):
             capabilities = resolve_modification_strategy(
                 {"pipeline": {"modification_strategy": "canonical_payload_only_strategy_v1"}}
             )
-            metadata = step19_v5_metadata(
+            metadata = step19_metadata(
                 packet_count=1,
                 validation_report=str(validation_report),
             )
@@ -770,7 +770,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
     def config(strategy: str) -> dict:
         return {
             "experiment": {
-                "experiment_id": "test-step20-v5",
+                "experiment_id": "test-step20-current",
                 "output_root": ".",
             },
             "pipeline": {
@@ -929,7 +929,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         ]
 
     @classmethod
-    def write_step19_v5_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes, original_payload: bytes = b"abc") -> tuple[Path, list[dict]]:
+    def write_step19_source_artifacts(cls, *, root: Path, strategy: str, first_payload: bytes, original_payload: bytes = b"abc") -> tuple[Path, list[dict]]:
         validation_report = root / "validation_report.json"
         payload_capable = strategy in {
             "canonical_payload_only_strategy_v1",
@@ -966,7 +966,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         output_pcap = root / "modified_traffic.pcap"
         report_path = root / "reconstruction_report.json"
         self.write_reference_pcap(reference_pcap, first_payload=original_payload)
-        validation_report, projections = self.write_step19_v5_source_artifacts(
+        validation_report, projections = self.write_step19_source_artifacts(
             root=root,
             strategy=strategy,
             first_payload=bytes.fromhex(traffic[0]["payload_hex"]),
@@ -974,7 +974,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         )
         if projections_override is not None:
             projections = projections_override
-        metadata = step19_v5_metadata(
+        metadata = step19_metadata(
             packet_count=len(traffic),
             source_merged_json=str(root / "merged_modified_traffic.json"),
             validation_report=str(validation_report),
@@ -1011,7 +1011,7 @@ class PcapReconstructionIntegrationTests(unittest.TestCase):
         packets = rdpcap(str(output_pcap))
 
         self.assertEqual("completed", result["report"]["metadata"]["status"])
-        self.assertEqual("pcap_reconstruction_report_v7", result["report"]["metadata"]["schema_version"])
+        self.assertEqual("pcap_reconstruction_report_v8", result["report"]["metadata"]["schema_version"])
         self.assertEqual(EXPECTED_INPUT_SCHEMA_VERSION, result["report"]["metadata"]["source_validation_schema_version"])
         self.assertEqual(
             "not_required_by_modification_strategy",

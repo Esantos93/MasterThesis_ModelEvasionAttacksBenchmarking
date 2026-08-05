@@ -471,7 +471,7 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         )
         self.assertEqual(1, result["summary"]["invalid_traffic_packet_count"])
 
-    def test_step18_v5_to_step19_v5_header_integration_fixture(self) -> None:
+    def test_step18_to_step19_header_integration_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             config_path = temp_dir / "config.json"
@@ -1090,13 +1090,13 @@ class HeaderOnlyValidationTests(unittest.TestCase):
         self.assertEqual("canonical_payload_region_ownership_missing", report["patch_application"]["errors"][0]["reason"])
         self.assertIsNone(validation_result)
 
-    def test_step18_payload_v3_rejects_legacy_packet_alias_shape(self) -> None:
+    def test_step18_payload_v3_rejects_unrecognized_packet_alias_shape(self) -> None:
         region = self.payload_region()
         region.pop("physical_aliases")
         region["packet_aliases"] = [
             {
                 "packet_id": "packet_000001",
-                "alias_id": "legacy_alias",
+                "alias_id": "unrecognized_alias",
                 "canonical_region_id": "payload_region_000001",
                 "canonical_start_offset_bytes": 0,
                 "payload_start_offset_bytes": 1,

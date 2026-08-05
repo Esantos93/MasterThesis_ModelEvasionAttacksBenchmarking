@@ -34,14 +34,12 @@ from step_25_packet_comparison.json_stream import (
 
 
 MANIFEST_SCHEMA_VERSION = "packet_comparisons_manifest_v3"
-LEGACY_MANIFEST_SCHEMA_VERSIONS = {"packet_comparisons_manifest_v1", "packet_comparisons_manifest_v2"}
 COMPARISON_SCHEMA_VERSION = "packet_comparison_v2"
-LEGACY_COMPARISON_SCHEMA_VERSION = "packet_comparison_v1"
 STEP14_SCHEMA_VERSION = "packet_json_v4"
 STEP18_SCHEMA_VERSION = "patch_applied_traffic_v6"
 STEP18_PATCH_SCHEMA_VERSION = "patch_application_report_v6"
 STEP19_SCHEMA_VERSION = "merged_traffic_validation_report_v6"
-STEP20_SCHEMA_VERSION = "pcap_reconstruction_report_v7"
+STEP20_SCHEMA_VERSION = "pcap_reconstruction_report_v8"
 PACKET_CORRESPONDENCE_POLICY = "same_order_and_packet_count_v1"
 CHANGE_ORIGINS = {
     "llm_explicit",
@@ -508,12 +506,14 @@ def load_traceability_indexes(
     payload_edits_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
     step18_patch_schema: list[Any] = []
 
+    #This callback indexes accepted explicit header edits by packet and logical field.
     def consume_effective_header_edit(edit: Any) -> None:
         if isinstance(edit, dict):
             explicit_headers_by_packet_field[str(edit.get("packet_id"))][
                 normalize_logical_field(edit.get("field"))
             ].append(edit)
 
+    #This callback indexes pipeline-derived header changes separately from LLM decisions.
     def consume_derived_header_change(change: Any) -> None:
         if isinstance(change, dict):
             field = normalize_logical_field(change.get("derived_field"))
@@ -522,6 +522,7 @@ def load_traceability_indexes(
                     field
                 ].append(change)
 
+    #This callback indexes effective canonical payload edits and rejects contradictory identities.
     def consume_payload_edit(edit: Any) -> None:
         if not isinstance(edit, dict):
             return
@@ -557,6 +558,7 @@ def load_traceability_indexes(
     accepted_packet_ids = set()
     payload_projections_by_packet: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
+    #This callback records which physical packets survived Step 19 validation.
     def consume_step19_packet_result(packet_result: Any) -> None:
         if not isinstance(packet_result, dict):
             raise ValueError("Step 19 packet_results contains a non-object value.")
@@ -566,6 +568,7 @@ def load_traceability_indexes(
                 raise ValueError("Accepted Step 19 packet result lacks packet_id.")
             accepted_packet_ids.add(str(packet_id))
 
+    #This callback indexes validated payload projections by their physical packet target.
     def consume_payload_projection(projection: Any) -> None:
         if not isinstance(projection, dict) or projection.get("packet_id") is None:
             raise ValueError(
@@ -603,6 +606,7 @@ def load_traceability_indexes(
     step20_summary_values: list[Any] = []
     tcp_translation_by_packet: dict[str, dict[str, Any]] = {}
 
+    #This callback extracts only effective TCP sequence, ACK, or SACK translations from Step 20.
     def consume_step20_packet_result(packet_result: Any) -> None:
         if not isinstance(packet_result, dict):
             raise ValueError("Step 20 packet_results contains a non-object value.")
@@ -1196,10 +1200,7 @@ def rebuild_summary_from_existing_details(
     with summary_path.open("r", encoding="utf-8") as input_file:
         manifest = json.load(input_file)
     metadata = manifest.get("metadata")
-    if not isinstance(metadata, dict) or metadata.get("schema_version") not in {
-        *LEGACY_MANIFEST_SCHEMA_VERSIONS,
-        MANIFEST_SCHEMA_VERSION,
-    }:
+    if not isinstance(metadata, dict) or metadata.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         raise ValueError("Existing Step 25 summary has an unsupported schema.")
     if metadata.get("experiment_id") != config["experiment"]["experiment_id"]:
         raise ValueError("Existing Step 25 summary experiment_id does not match config.")
@@ -1226,11 +1227,7 @@ def rebuild_summary_from_existing_details(
         with detail_path.open("r", encoding="utf-8") as input_file:
             detail = json.load(input_file)
         if (
-            detail.get("schema_version")
-            not in {
-                LEGACY_COMPARISON_SCHEMA_VERSION,
-                COMPARISON_SCHEMA_VERSION,
-            }
+            detail.get("schema_version") != COMPARISON_SCHEMA_VERSION
             or detail.get("comparison_id") != comparison_id
         ):
             raise ValueError(f"Invalid Step 25 detail identity: {detail_path}.")

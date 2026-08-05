@@ -570,39 +570,6 @@ def accepted_group_by_packet_id(group_outcomes: dict[str, Any]) -> dict[str, str
     return packet_to_group
 
 
-#This function verifies that header-only Step 18 output preserves the original packet payload.
-def validate_payload_preservation_for_record(
-    *,
-    record: dict[str, Any],
-    record_index: int,
-    original_by_packet_id: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if not original_by_packet_id:
-        return []
-    packet_id = record.get("packet_id")
-    if packet_id is None:
-        return []
-    packet_id_text = str(packet_id)
-    original_packet = original_by_packet_id.get(packet_id_text)
-    if original_packet is None:
-        return []
-    original_payload = original_packet.get("payload_hex")
-    actual_payload = record.get("payload_hex")
-    issues = []
-    if actual_payload != original_payload:
-        issues.append(
-            issue(
-                "error",
-                "payload_changed_in_header_only_output",
-                "payload_hex differs from Step 14 in a header-only Step 18 output.",
-                record_index=record_index,
-                packet_id=packet_id,
-            )
-        )
-
-    return issues
-
-
 #This function performs explicit protocol-semantic checks that are safe to classify without guessing intent.
 def validate_semantic_protocol_rules(record: dict[str, Any], record_index: int) -> list[dict[str, Any]]:
     issues = []

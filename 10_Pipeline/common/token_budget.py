@@ -26,22 +26,26 @@ DEFAULT_PAYLOAD_REPLACEMENT_SIZE_POLICY = {
 }
 
 
+#This function serializes JSON in the compact form used for output-token planning.
 def compact_json(data: Any) -> str:
     return json.dumps(data, separators=(",", ":"), sort_keys=False)
 
 
+#This function rounds character-based token estimates upward so planning never gains capacity from truncation.
 def ceil_token_estimate_from_chars(*, char_count: int, chars_per_token_estimate: float) -> int:
     if chars_per_token_estimate <= 0:
         raise ValueError("chars_per_token_estimate must be greater than zero.")
     return max(1, math.ceil(char_count / chars_per_token_estimate))
 
 
+#This function applies the model-specific output margin and rounds the result upward.
 def apply_output_safety_factor(*, token_count: int, output_token_estimation_safety_factor: float) -> int:
     if output_token_estimation_safety_factor < 1.0:
         raise ValueError("output_token_estimation_safety_factor must be greater than or equal to 1.0.")
     return max(1, math.ceil(token_count * output_token_estimation_safety_factor))
 
 
+#This function resolves a named value from the compact editable-header row representation.
 def get_column_value(row: list[Any], columns: list[str], name: str, default: Any = None) -> Any:
     try:
         index = columns.index(name)
@@ -52,6 +56,7 @@ def get_column_value(row: list[Any], columns: list[str], name: str, default: Any
     return row[index]
 
 
+#This function normalizes a header replacement candidate to a valid unsigned integer.
 def coerce_uint_replacement(value: Any, *, default: int = 0) -> int:
     if isinstance(value, bool):
         return int(value)
@@ -67,6 +72,7 @@ def coerce_uint_replacement(value: Any, *, default: int = 0) -> int:
     return default
 
 
+#This function materializes one maximum-cost valid output edit for every authorized header target.
 def build_worst_case_header_edits(prompt_input: dict[str, Any]) -> list[list[Any]]:
     columns = prompt_input.get("editable_headers_columns", [])
     rows = prompt_input.get("editable_headers", [])
@@ -88,6 +94,7 @@ def build_worst_case_header_edits(prompt_input: dict[str, Any]) -> list[list[Any
     return header_edits
 
 
+#This function selects the configured payload growth tier from the target's original byte length.
 def select_payload_replacement_tier(*, original_size_bytes: int, policy: dict[str, Any]) -> dict[str, Any]:
     tiers = policy.get("tiers", [])
     if not isinstance(tiers, list) or not tiers:
@@ -101,6 +108,7 @@ def select_payload_replacement_tier(*, original_size_bytes: int, policy: dict[st
     raise ValueError("payload replacement size policy must include a final open-ended tier.")
 
 
+#This function combines the tiered relative limit with the absolute cap for one payload target.
 def compute_payload_replacement_limit_bytes(
     *,
     original_size_bytes: int,
@@ -133,6 +141,7 @@ def compute_payload_replacement_limit_bytes(
     }
 
 
+#This function resolves the authorized payload target length from its canonical coordinate fields.
 def get_payload_region_original_size(region: dict[str, Any]) -> int:
     for key in ("length_bytes", "payload_length_bytes", "original_size_bytes", "original_length_bytes"):
         value = region.get(key)
@@ -151,6 +160,7 @@ def get_payload_region_original_size(region: dict[str, Any]) -> int:
     return 0
 
 
+#This function builds maximum-size valid replacements for every authorized canonical payload target.
 def build_worst_case_payload_patches(
     prompt_input: dict[str, Any],
     *,
@@ -204,6 +214,7 @@ def build_worst_case_payload_patches(
     return patches, limits
 
 
+#This function combines all authorized header and payload edits into the maximum-cost valid response shape.
 def build_worst_case_patch_output(
     *,
     parent_group_id: str,
@@ -236,6 +247,7 @@ def build_worst_case_patch_output(
     return output, breakdown
 
 
+#This function builds the alternative explicit-abstention response used by prompt-engineering profiles.
 def build_abstention_patch_output(
     *,
     parent_group_id: str,
@@ -251,6 +263,7 @@ def build_abstention_patch_output(
     }
 
 
+#This function reserves the larger serialized cost of all edits or explicit abstention and applies the output margin.
 def estimate_worst_case_output_tokens(
     *,
     parent_group_id: str,
@@ -306,20 +319,11 @@ def estimate_worst_case_output_tokens(
     }
 
 
+#This function loads and validates the only token-budget contract supported by the active pipeline.
 def load_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
     llm_config = config.get("llm")
     if not isinstance(llm_config, dict):
         raise ValueError("Active compact-patch configs require an llm object.")
-    if "chars_per_token_estimate" in llm_config:
-        raise ValueError(
-            "llm.chars_per_token_estimate is obsolete; use "
-            "llm.token_budget.chars_per_token_estimate."
-        )
-    if "token_budget_safety_factor" in llm_config:
-        raise ValueError(
-            "llm.token_budget_safety_factor is obsolete and must not be used by the active token plan."
-        )
-
     token_budget_config = llm_config.get("token_budget")
     if not isinstance(token_budget_config, dict):
         raise ValueError("Active compact-patch configs require an llm.token_budget object.")
@@ -359,6 +363,7 @@ def load_token_budget_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#This function produces the shared input-plus-output token plan and the prompt-target overflow decision.
 def build_compact_patch_token_plan(
     *,
     prompt_unit: dict[str, Any],

@@ -11,6 +11,7 @@ PAYLOAD_SEGMENTATION_POLICY = "semantic_first_adaptive_fallback_v1"
 APPLICATION_SEMANTIC_ELEMENTS_FIELD = "application_semantic_elements"
 
 
+#This function decodes canonical payload hex and reports malformed source records before segmentation.
 def payload_bytes(record: dict[str, Any]) -> bytes:
     payload_hex = str(record.get("payload_hex", "") or "")
     try:
@@ -28,6 +29,7 @@ def payload_bytes(record: dict[str, Any]) -> bytes:
     return payload
 
 
+#This function normalizes one protocol-derived payload element into canonical stream coordinates.
 def _semantic_element(record: dict[str, Any], raw: dict[str, Any], index: int) -> dict[str, Any]:
     region_id = str(record["canonical_region_id"])
     element_id = str(raw.get("semantic_element_id", "")).strip()
@@ -52,6 +54,7 @@ def _semantic_element(record: dict[str, Any], raw: dict[str, Any], index: int) -
     }
 
 
+#This function derives non-overlapping semantic payload atoms and explicitly covers unclassified bytes.
 def build_semantic_partitions(record: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     payload_length = int(record.get("payload_length_bytes", record.get("length", 0)) or 0)
     raw_elements = record.get(APPLICATION_SEMANTIC_ELEMENTS_FIELD)
@@ -138,6 +141,7 @@ def build_semantic_partitions(record: dict[str, Any]) -> tuple[list[dict[str, An
     }
 
 
+#This function creates the minimum number of balanced contiguous fallback windows required to cover a payload.
 def balanced_contiguous_ranges(
     *,
     start_offset_bytes: int,
@@ -165,6 +169,7 @@ def balanced_contiguous_ranges(
     return ranges
 
 
+#This function builds one authorized canonical payload target with ownership, aliases, coordinates, and limits.
 def build_payload_entry(
     *,
     record: dict[str, Any],
@@ -287,6 +292,7 @@ def build_payload_entry(
     }
 
 
+#This function returns the canonical stream identity and half-open interval represented by a payload entry.
 def payload_entry_interval(entry: dict[str, Any]) -> tuple[str, int, int]:
     editable_regions = entry.get("editable_regions", [])
     if not isinstance(editable_regions, list) or len(editable_regions) != 1:
@@ -297,56 +303,3 @@ def payload_entry_interval(entry: dict[str, Any]) -> tuple[str, int, int]:
         int(region["start_offset_bytes"]),
         int(region["end_offset_bytes"]),
     )
-
-
-def validate_canonical_payload_coverage(
-    *,
-    entries: list[dict[str, Any]],
-    canonical_records: list[dict[str, Any]],
-) -> dict[str, Any]:
-    intervals_by_region: dict[str, list[tuple[int, int]]] = {}
-    for entry in entries:
-        region_id, start, end = payload_entry_interval(entry)
-        intervals_by_region.setdefault(region_id, []).append((start, end))
-
-    editable_byte_count = 0
-    for record in canonical_records:
-        region_id = str(record["canonical_region_id"])
-        payload_length = int(record.get("payload_length_bytes", record.get("length", 0)) or 0)
-        intervals = sorted(intervals_by_region.pop(region_id, []))
-        if payload_length == 0:
-            if intervals:
-                raise ValueError(f"Empty canonical region {region_id!r} unexpectedly has editable intervals.")
-            continue
-        cursor = 0
-        for start, end in intervals:
-            if start != cursor:
-                relationship = "overlap" if start < cursor else "gap"
-                raise ValueError(
-                    f"Canonical payload ownership {relationship} for region {region_id!r}: "
-                    f"expected_start={cursor}, actual_start={start}."
-                )
-            if end <= start or end > payload_length:
-                raise ValueError(f"Canonical payload interval for region {region_id!r} is out of bounds.")
-            editable_byte_count += end - start
-            cursor = end
-        if cursor != payload_length:
-            raise ValueError(
-                f"Canonical payload ownership gap for region {region_id!r}: "
-                f"covered={cursor}, expected={payload_length}."
-            )
-    if intervals_by_region:
-        raise ValueError(
-            f"V3 payload entries reference unknown canonical regions: {sorted(intervals_by_region)[:10]}"
-        )
-    return {
-        "canonical_region_count": len(canonical_records),
-        "editable_canonical_region_count": sum(
-            int(record.get("payload_length_bytes", record.get("length", 0)) or 0) > 0
-            for record in canonical_records
-        ),
-        "editable_canonical_payload_byte_count": editable_byte_count,
-        "duplicate_editable_byte_count": 0,
-        "missing_editable_byte_count": 0,
-        "overlapping_editable_interval_count": 0,
-    }
