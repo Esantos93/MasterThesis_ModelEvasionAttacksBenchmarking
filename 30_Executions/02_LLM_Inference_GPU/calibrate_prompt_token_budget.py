@@ -26,25 +26,36 @@ REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v3"
 # USER CONFIGURATION
 # Edit only this block before running the script in the RISE vLLM environment.
 # =============================================================================
+# Values normally changed for a new experiment or calibration run.
+CLOUD_ROOT = Path("/tf/thesis_Santos")
+EXPERIMENT_ID = "21_exp_payload_only_baseline_flow_context_gemma-4-26B-A4B-it"
+GROUPING_LABEL = "flow_context_aware"
+MODEL_ROOT = Path("/models_root")
+MODEL_NAME = "gemma-4-26B-A4B-it"
+STEP16_RUN_ID = "run_20260818_082221_exp21_step16_full"
+PROMPT_MANIFEST_FILENAME = "payload_budget_sample_512.json"
+STEP17_RUN_ID = "run_20260818_100355_exp21_payload_only_smoke512_batch192"
+CALIBRATION_RUN_ID = STEP17_RUN_ID
+
+# Paths derived from the values above. They normally require no manual edits.
+EXPERIMENT_OUTPUT_DIR = CLOUD_ROOT / "02_OutputFiles" / EXPERIMENT_ID
+STEP16_PROMPT_DIR = (
+    EXPERIMENT_OUTPUT_DIR / "06_prompts" / GROUPING_LABEL / STEP16_RUN_ID
+)
+STEP17_RUN_DIR = (
+    EXPERIMENT_OUTPUT_DIR
+    / "07_llm_outputs"
+    / GROUPING_LABEL
+    / MODEL_NAME
+    / STEP17_RUN_ID
+)
+
 CONFIG = {
-    "prompt_manifest": Path(
-        "/tf/thesis_Santos/02_OutputFiles/"
-        "20_exp_payload_baseline_flow_context_gemma-4-26B-A4B-it/"
-        "06_prompts/flow_context_aware/"
-        "run_20260727_020049_baseline_hybrid_flow_context_aware_gemma26_smoke/"
-        "prompt_units_manifest_v2.json"
-    ),
-    "model_path": "/models_root/gemma-4-26B-A4B-it",
-    "step17_run_dir": Path(
-        "/tf/thesis_Santos/02_OutputFiles/"
-        "20_exp_payload_baseline_flow_context_gemma-4-26B-A4B-it/"
-        "07_llm_outputs/flow_context_aware/gemma-4-26B-A4B-it/"
-        "run_20260727_020049_baseline_hybrid_flow_context_aware_gemma26_smoke"
-    ),
-    "output_dir": Path(
-        "/tf/thesis_Santos/02_OutputFiles/"
-        "20_exp_payload_baseline_flow_context_gemma-4-26B-A4B-it/"
-        "tokenizer_calibration/run_20260727_020049_gemma26_smoke_v3"
+    "prompt_manifest": STEP16_PROMPT_DIR / PROMPT_MANIFEST_FILENAME,
+    "model_path": str(MODEL_ROOT / MODEL_NAME),
+    "step17_run_dir": STEP17_RUN_DIR,
+    "output_dir": (
+        EXPERIMENT_OUTPUT_DIR / "tokenizer_calibration" / CALIBRATION_RUN_ID
     ),
     "trust_remote_code": False,
     "calibration_margin": 0.10,

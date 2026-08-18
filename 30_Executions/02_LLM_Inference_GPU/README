@@ -13,6 +13,44 @@ build_prompt_manifest_sample.py
 calibrate_prompt_token_budget.py
 ```
 
+Quick script guide:
+
+| Script | Purpose | Use it when |
+|---|---|---|
+| `run_step16_17.sh` | Main single-experiment launcher for Step 16, Step 17, or both on RISE. It performs preflight checks, writes logs/status, summarizes Step 17, and optionally compresses the current run. | Running one model/experiment, including a full Step 16 followed by a sampled Step 17 smoke. |
+| `run_multi_model_inference.sh` | Sequential queue wrapper around `run_step16_17.sh` for several configured models. It does not run models concurrently. | Executing the same campaign across multiple models. It is unnecessary for one Gemma run. |
+| `build_prompt_manifest_sample.py` | Creates a deterministic reduced Prompt Unit manifest. `payload_budget_stratified` builds separate representative and output-budget stress panels from a complete Step 16 population. | Preparing a meaningful Step 17 smoke without using a prefix-only sample. |
+| `calibrate_prompt_token_budget.py` | Read-only post-smoke analysis with the exact model tokenizer. It checks real input/output tokens, truncation evidence, and recommends the token-estimation pair. | Deciding whether `chars_per_token_estimate` and `output_token_estimation_safety_factor` remain valid. |
+| `calibrate_step17_batch_sizes.sh` | Runs several Step 17 batch sizes sequentially over one fixed sample and records GPU metrics. | Recalibrating VRAM/throughput after a model, context-length, backend, or hardware change. |
+| `compare_step17_batch_calibration.py` | Converts batch-calibration run data into ranked CSV and Markdown comparisons. | Interpreting a campaign produced by `calibrate_step17_batch_sizes.sh`; normally not invoked by itself. |
+| `build_payload_limit_sensitivity_smoke.py` | Builds the dedicated paired payload-limit sensitivity variants used by the Experiment 20 study. | Reproducing that specific payload-limit experiment, not an ordinary Experiment 21 smoke. |
+| `compression/compression_step_16.sh` | Transactionally packages only the selected Step 16 run subtree. | Called automatically by `run_step16_17.sh` when `COMPRESS_STEP16=1`. |
+| `compression/compression_step_17.sh` | Transactionally packages only the selected Step 17 model/run subtree. | Called automatically by `run_step16_17.sh` when `COMPRESS_STEP17=1`. |
+| `test_*.py` | Regression tests for the sampler, token calibration, and payload-limit utility. | Validating future edits to the corresponding scripts. |
+
+Possible future folder organization:
+
+```text
+02_LLM_Inference_GPU/
+  orchestration/   run_step16_17.sh, run_multi_model_inference.sh
+  sampling/        build_prompt_manifest_sample.py,
+                   build_payload_limit_sensitivity_smoke.py
+  calibration/     calibrate_prompt_token_budget.py,
+                   calibrate_step17_batch_sizes.sh,
+                   compare_step17_batch_calibration.py
+  compression/     compression_step_16.sh, compression_step_17.sh
+  tests/           test_*.py
+```
+
+This reorganization is feasible but is intentionally deferred while final
+experiments are active. It requires coordinated updates to the flat
+`/tf/thesis_Santos/04_Steps/` deployment paths, the runner/comparator/sampler
+references in the shell orchestrators, tests that currently locate a sibling
+script with `Path(__file__).with_name(...)`, and the commands in this README
+and historical experiment notes. Perform it as a separate refactor, keep the
+current command surface stable until the migration is complete, and run all
+GPU-execution utility tests before publishing the new layout.
+
 Post-smoke input/output token calibration is intentionally independent from
 the pipeline. Run it after Step 17 inside the same RISE vLLM environment so it
 can load the exact tokenizer used by the model:
@@ -332,3 +370,28 @@ target because the selector never cuts a Prompt Unit. Check
 `paired_prompt_manifest_sample_report.json` before inference. The two output
 manifests may contain different Prompt Unit counts; their physical packet sets
 must be identical.
+
+
+export EXP21_SMOKE_RUN="run_$(date -u +%Y%m%d_%H%M%S)_exp21_payload_only_smoke512_batch192"
+
+unset LIMIT_PROMPTS_S16
+unset LIMIT_PROMPTS_S17
+
+CLOUD_ROOT="${EXP21_CLOUD_ROOT}" \
+VLLM_VENV="${EXP21_CLOUD_ROOT}/.venv-vllm" \
+EXPERIMENT_ID="${EXP21_ID}" \
+GROUPING_LABEL="flow_context_aware" \
+RUN_ID="${EXP21_SMOKE_RUN}" \
+CONFIG_PATH="${EXP21_CONFIG}" \
+PROMPT_DIR="${EXP21_FULL_PROMPTS}" \
+PROMPT_MANIFEST="${EXP21_SAMPLE_MANIFEST}" \
+SKIP_STEP16=1 \
+SKIP_STEP17=0 \
+MODEL_DIR="/models_root" \
+MODEL_PATH="/models_root/gemma-4-26B-A4B-it" \
+BATCH_SIZE=192 \
+RUNTIME_MAX_MODEL_LEN=12288 \
+VLLM_GPU_MEMORY_UTILIZATION=0.90 \
+DISABLE_THINKING=0 \
+COMPRESS_STEP17=1 \
+bash "${EXP21_CLOUD_ROOT}/04_Steps/run_step16_17.sh"
