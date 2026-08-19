@@ -199,6 +199,10 @@ class CalibrationTests(unittest.TestCase):
                 limit_proximity_tokens=8,
             )
             report_dir = root / "report"
+            report_dir.mkdir()
+            (report_dir / "token_budget_postflight_records.csv").write_text(
+                "legacy output\n", encoding="utf-8"
+            )
             calibration.write_reports(report_dir, records, summary)
             self.assertFalse(
                 (report_dir / "token_budget_postflight_records.csv").exists()

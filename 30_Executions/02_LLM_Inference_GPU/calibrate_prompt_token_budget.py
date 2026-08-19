@@ -1301,6 +1301,9 @@ def write_reports(
     output_dir: Path, records: list[dict[str, Any]], summary: dict[str, Any]
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    legacy_csv = output_dir / "token_budget_postflight_records.csv"
+    if legacy_csv.exists():
+        legacy_csv.unlink()
     with (output_dir / "token_budget_postflight_records.jsonl").open(
         "w", encoding="utf-8", newline="\n"
     ) as handle:
