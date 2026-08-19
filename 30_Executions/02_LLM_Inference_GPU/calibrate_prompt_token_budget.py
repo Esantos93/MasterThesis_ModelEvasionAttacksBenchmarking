@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 import statistics
 import sys
 from collections import Counter
@@ -19,7 +20,14 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v3"
+REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v4"
+
+COMPLETED_VALID_RESPONSE = "completed_valid_response"
+CONFIRMED_RUNAWAY = "confirmed_runaway"
+LEGITIMATE_TRUNCATION = "legitimate_truncation_candidate"
+COMPLETE_AT_LIMIT = "complete_at_limit"
+IN_BUDGET_INVALID_RESPONSE = "In_budget_Invalid_response"
+AMBIGUOUS_TRUNCATION = "ambiguous_truncation"
 
 
 # =============================================================================
@@ -32,9 +40,9 @@ EXPERIMENT_ID = "21_exp_payload_only_baseline_flow_context_gemma-4-26B-A4B-it"
 GROUPING_LABEL = "flow_context_aware"
 MODEL_ROOT = Path("/models_root")
 MODEL_NAME = "gemma-4-26B-A4B-it"
-STEP16_RUN_ID = "run_20260818_082221_exp21_step16_full"
+STEP16_RUN_ID = "run_20260819_015719_exp21_step16_full"
 PROMPT_MANIFEST_FILENAME = "payload_budget_sample_512.json"
-STEP17_RUN_ID = "run_20260818_100355_exp21_payload_only_smoke512_batch192"
+STEP17_RUN_ID = "run_20260819_020800_exp21_payload_only_smoke512_batch192"
 CALIBRATION_RUN_ID = STEP17_RUN_ID
 
 # Paths derived from the values above. They normally require no manual edits.
@@ -107,6 +115,11 @@ def encode_without_special_tokens(tokenizer: Any, text: str) -> list[int]:
     if hasattr(encoded, "tolist"):
         encoded = encoded.tolist()
     return list(encoded)
+
+
+def compact_json(value: Any) -> str:
+    """Serialize a selected model JSON using the Step 16 planning form."""
+    return json.dumps(value, separators=(",", ":"), sort_keys=False)
 
 
 def percentile(values: Sequence[float], probability: float) -> float | None:
@@ -204,6 +217,239 @@ def scan_json_structure(text: str) -> JsonStructure:
         mismatched_closer=mismatched_closer,
         trailing_non_whitespace=trailing_non_whitespace,
     )
+
+
+def extract_complete_top_level_json_objects(
+    raw_text: str,
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Return complete top-level objects; nested objects are never counted."""
+    candidates: list[dict[str, Any]] = []
+    candidate_start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, character in enumerate(raw_text):
+        if candidate_start is None:
+            if character == "{":
+                candidate_start = index
+                depth = 1
+                in_string = False
+                escaped = False
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                candidate_text = raw_text[candidate_start:end]
+                try:
+                    value = json.loads(candidate_text)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(value, dict):
+                        candidates.append(
+                            {
+                                "value": value,
+                                "start_char": candidate_start,
+                                "end_char": end,
+                            }
+                        )
+                candidate_start = None
+                in_string = False
+                escaped = False
+    return candidates, candidate_start
+
+
+def strip_json_fence(text: str) -> str:
+    stripped = text.strip()
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def editable_payload_limits(unit: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    traceability = unit.get("input_traceability")
+    if isinstance(traceability, Mapping):
+        regions = traceability.get("editable_regions")
+        if isinstance(regions, list):
+            for region in regions:
+                if not isinstance(region, Mapping) or not region.get("region_id"):
+                    continue
+                result[str(region["region_id"])] = dict(region)
+
+    token_plan = unit.get("token_plan")
+    breakdown = token_plan.get("breakdown") if isinstance(token_plan, Mapping) else None
+    planned_limits = (
+        breakdown.get("payload_replacement_limits")
+        if isinstance(breakdown, Mapping)
+        else None
+    )
+    if isinstance(planned_limits, list):
+        for region in planned_limits:
+            if not isinstance(region, Mapping) or not region.get("region_id"):
+                continue
+            normalized = dict(region)
+            normalized.setdefault(
+                "max_replacement_hex_chars",
+                region.get("effective_limit_hex_chars"),
+            )
+            result.setdefault(str(region["region_id"]), normalized)
+    return result
+
+
+def extracted_string_values(raw_text: str, field_name: str) -> list[str]:
+    pattern = re.compile(
+        rf'"{re.escape(field_name)}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
+    )
+    return [match.group(1) for match in pattern.finditer(raw_text)]
+
+
+def partial_replacement_evidence(
+    raw_text: str,
+    unit: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    matches = list(
+        re.finditer(r'"replacement"\s*:\s*"([0-9A-Fa-f]*)', raw_text)
+    )
+    if not matches:
+        return None
+    match = matches[-1]
+    closed = match.end() < len(raw_text) and raw_text[match.end()] == '"'
+    region_matches = list(
+        re.finditer(r'"region_id"\s*:\s*"([^"]+)"', raw_text[: match.start()])
+    )
+    region_id = region_matches[-1].group(1) if region_matches else None
+    region = editable_payload_limits(unit).get(str(region_id)) if region_id else None
+    limit = None
+    if region is not None:
+        limit = as_int(region.get("max_replacement_hex_chars"))
+    replacement_chars = len(match.group(1))
+    return {
+        "region_id": region_id,
+        "replacement_hex_chars_observed": replacement_chars,
+        "max_replacement_hex_chars": limit,
+        "replacement_string_closed": closed,
+        "replacement_exceeds_limit": (
+            replacement_chars > limit if limit is not None else None
+        ),
+    }
+
+
+def prefix_matches_prompt_contract(
+    raw_text: str,
+    unit: Mapping[str, Any],
+) -> tuple[bool, list[str]]:
+    evidence: list[str] = []
+    expected_parent = unit.get("parent_group_id")
+    expected_unit = unit.get("prompt_unit_id")
+    parent_values = extracted_string_values(raw_text, "parent_group_id")
+    unit_values = extracted_string_values(raw_text, "prompt_unit_id")
+    if parent_values and expected_parent is not None and any(
+        value != str(expected_parent) for value in parent_values
+    ):
+        evidence.append("parent_group_id_mismatch")
+    if unit_values and expected_unit is not None and any(
+        value != str(expected_unit) for value in unit_values
+    ):
+        evidence.append("prompt_unit_id_mismatch")
+
+    regions = editable_payload_limits(unit)
+    for region_id in extracted_string_values(raw_text, "region_id"):
+        if region_id not in regions:
+            evidence.append(f"unknown_region_id={region_id}")
+    operations = extracted_string_values(raw_text, "operation")
+    region_ids = extracted_string_values(raw_text, "region_id")
+    for region_id, operation in zip(region_ids, operations):
+        region = regions.get(region_id)
+        allowed = region.get("allowed_operations") if region else None
+        if isinstance(allowed, list) and operation not in allowed:
+            evidence.append(f"operation_not_allowed={operation}")
+    return not evidence, evidence
+
+
+def classify_truncation_cause(
+    *,
+    probable_truncation: bool,
+    finish_reason: str | None,
+    status: str,
+    raw_text: str,
+    unit: Mapping[str, Any],
+    selected_json_present: bool,
+) -> tuple[str, list[str], dict[str, Any] | None]:
+    """Classify censoring cause after probable-truncation detection."""
+    if not probable_truncation:
+        if status == "accepted" and selected_json_present:
+            return COMPLETED_VALID_RESPONSE, ["accepted_complete_output"], None
+        return IN_BUDGET_INVALID_RESPONSE, ["invalid_without_limit_censoring"], None
+
+    candidates, incomplete_start = extract_complete_top_level_json_objects(raw_text)
+    evidence = [f"complete_top_level_object_count={len(candidates)}"]
+    partial_replacement = partial_replacement_evidence(raw_text, unit)
+
+    if len(candidates) > 1:
+        evidence.append("multiple_complete_top_level_objects")
+        return CONFIRMED_RUNAWAY, evidence, partial_replacement
+    if len(candidates) == 1:
+        selected_end = int(candidates[0]["end_char"])
+        trailing = raw_text[selected_end:]
+        if incomplete_start is not None and incomplete_start >= selected_end:
+            evidence.append("new_incomplete_object_after_complete_object")
+            return CONFIRMED_RUNAWAY, evidence, partial_replacement
+        if strip_json_fence(trailing):
+            evidence.append("substantive_output_after_complete_object")
+            return CONFIRMED_RUNAWAY, evidence, partial_replacement
+        if status == "accepted" and selected_json_present:
+            evidence.append("single_valid_object_completed_at_limit")
+            return COMPLETE_AT_LIMIT, evidence, partial_replacement
+        evidence.append("complete_but_invalid_object_at_limit")
+        return IN_BUDGET_INVALID_RESPONSE, evidence, partial_replacement
+
+    if raw_text.count('"schema_version"') > 1:
+        evidence.append("multiple_top_level_response_starts")
+        return CONFIRMED_RUNAWAY, evidence, partial_replacement
+    if partial_replacement and partial_replacement.get(
+        "replacement_exceeds_limit"
+    ):
+        evidence.append("replacement_exceeds_declared_limit_before_cutoff")
+        return CONFIRMED_RUNAWAY, evidence, partial_replacement
+
+    structure = scan_json_structure(raw_text)
+    if incomplete_start is None or not structure.structurally_incomplete:
+        evidence.append("no_single_structurally_incomplete_top_level_object")
+        return AMBIGUOUS_TRUNCATION, evidence, partial_replacement
+
+    compatible, compatibility_evidence = prefix_matches_prompt_contract(
+        raw_text, unit
+    )
+    if not compatible:
+        evidence.extend(compatibility_evidence)
+        return AMBIGUOUS_TRUNCATION, evidence, partial_replacement
+    if finish_reason in {"length", "max_tokens", "max_length"}:
+        evidence.append("single_contract_compatible_partial_top_level_object")
+        if partial_replacement is not None:
+            if partial_replacement.get("max_replacement_hex_chars") is None:
+                evidence.append("replacement_limit_unavailable")
+                return AMBIGUOUS_TRUNCATION, evidence, partial_replacement
+            if partial_replacement.get("replacement_exceeds_limit") is False:
+                evidence.append("partial_replacement_within_declared_limit")
+        return LEGITIMATE_TRUNCATION, evidence, partial_replacement
+
+    evidence.append("censoring_cause_not_assignable")
+    return AMBIGUOUS_TRUNCATION, evidence, partial_replacement
 
 
 def nested_first(mapping: Any, keys: set[str]) -> Any:
@@ -442,6 +688,16 @@ def analyze_run(
             encode_without_special_tokens(tokenizer, raw_text) if raw_present else []
         )
         generated_tokens = len(generated_token_ids) if raw_present else None
+        parsed_path = run_dir / "parsed" / f"{unit_id}.parsed.json"
+        selected_json_present = parsed_path.is_file()
+        selected_json_text: str | None = None
+        selected_json_tokens: int | None = None
+        if selected_json_present:
+            selected_json_value = load_json(parsed_path)
+            selected_json_text = compact_json(selected_json_value)
+            selected_json_tokens = len(
+                encode_without_special_tokens(tokenizer, selected_json_text)
+            )
         structure = scan_json_structure(raw_text)
         failure = failures.get(unit_id, {})
         failure_reason = (
@@ -460,6 +716,7 @@ def analyze_run(
                 metadata.get("generation_response_metadata"),
                 {
                     "generated_tokens",
+                    "generated_token_count",
                     "output_tokens",
                     "completion_tokens",
                     "num_generated_tokens",
@@ -485,7 +742,26 @@ def analyze_run(
             if generated_tokens not in (None, 0)
             else None
         )
+        selected_json_characters = (
+            len(selected_json_text) if selected_json_text is not None else None
+        )
+        selected_json_chars_per_token = (
+            selected_json_characters / selected_json_tokens
+            if selected_json_characters is not None
+            and selected_json_tokens not in (None, 0)
+            else None
+        )
         status = str(metadata.get("status") or ("failed" if failure else "unknown"))
+        truncation_class, classification_evidence, replacement_evidence = (
+            classify_truncation_cause(
+                probable_truncation=probable_truncation,
+                finish_reason=finish_reason,
+                status=status,
+                raw_text=raw_text,
+                unit=unit,
+                selected_json_present=selected_json_present,
+            )
+        )
         record = {
             "prompt_unit_id": unit_id,
             "parent_group_id": metadata.get("parent_group_id")
@@ -504,6 +780,16 @@ def analyze_run(
                 else None
             ),
             "chars_per_generated_token": chars_per_generated_token,
+            "selected_json_present": selected_json_present,
+            "selected_json_characters": selected_json_characters,
+            "selected_json_tokens_tokenizer": selected_json_tokens,
+            "selected_json_chars_per_token": selected_json_chars_per_token,
+            "raw_extra_characters_over_selected_json": (
+                raw_characters - selected_json_characters
+                if raw_present and selected_json_characters is not None
+                else None
+            ),
+            "output_recovery_applied": metadata.get("output_recovery") is not None,
             "finish_reason": finish_reason,
             "finish_reason_available": finish_reason is not None,
             "max_tokens": budget["max_tokens"],
@@ -522,6 +808,14 @@ def analyze_run(
             "trailing_non_whitespace_after_json": structure.trailing_non_whitespace,
             "probable_truncation": probable_truncation,
             "truncation_evidence": truncation_evidence,
+            "truncation_class": truncation_class,
+            "truncation_classification_evidence": classification_evidence,
+            "partial_replacement_evidence": replacement_evidence,
+            "valid_completed_output_for_calibration": truncation_class
+            in {COMPLETED_VALID_RESPONSE, COMPLETE_AT_LIMIT},
+            "valid_censored_output_for_lower_bound": (
+                truncation_class == LEGITIMATE_TRUNCATION
+            ),
             **budget,
         }
         record["input_chars_per_real_token"] = (
@@ -549,19 +843,30 @@ def conservative_recommendation(
     calibration_margin: float,
     minimum_output_tokens: int,
 ) -> dict[str, Any]:
-    eligible_outputs = [
+    censored_outputs = [
+        record for record in records if bool(record.get("probable_truncation"))
+    ]
+    completed_outputs = [
         record
         for record in records
-        if (record.get("generated_tokens_tokenizer") or 0) >= minimum_output_tokens
-        and record.get("chars_per_generated_token") is not None
+        if bool(record.get("valid_completed_output_for_calibration"))
+        and (record.get("selected_json_tokens_tokenizer") or 0)
+        >= minimum_output_tokens
+        and record.get("selected_json_chars_per_token") is not None
+    ]
+    legitimate_truncations = [
+        record
+        for record in records
+        if record.get("truncation_class") == LEGITIMATE_TRUNCATION
     ]
     output_ratios = [
-        float(record["chars_per_generated_token"])
-        for record in eligible_outputs
+        float(record["selected_json_chars_per_token"])
+        for record in completed_outputs
     ]
     if not output_ratios:
         raise ValueError(
-            "No outputs were long enough to calibrate the output safety factor."
+            "No completed valid selected JSON outputs were long enough "
+            "to calibrate the output safety factor."
         )
     eligible_inputs = [
         record
@@ -613,17 +918,17 @@ def conservative_recommendation(
 
     expansion_eligible_outputs: list[dict[str, Any]] = []
     observed_expansion_factors: list[float] = []
-    for record in eligible_outputs:
+    for record in completed_outputs:
         output_chars = record.get("planned_output_chars")
-        generated_tokens = record.get("generated_tokens_tokenizer")
+        selected_json_tokens = record.get("selected_json_tokens_tokenizer")
         if output_chars is None or float(output_chars) <= 0:
             continue
         base_output_tokens = math.ceil(
             float(output_chars) / recommended_chars_per_token
         )
-        if base_output_tokens <= 0 or generated_tokens is None:
+        if base_output_tokens <= 0 or selected_json_tokens is None:
             continue
-        expansion_factor = float(generated_tokens) / base_output_tokens
+        expansion_factor = float(selected_json_tokens) / base_output_tokens
         record["output_base_tokens_at_recommended_chars_per_token"] = (
             base_output_tokens
         )
@@ -640,14 +945,59 @@ def conservative_recommendation(
     raw_expansion_safety_factor = (
         observed_maximum_expansion_factor / (1.0 - calibration_margin)
     )
-    selected_raw_output_safety_factor = max(
+    completed_output_factor_raw = max(
         raw_output_safety_factor,
         raw_expansion_safety_factor,
     )
-    recommended_output_safety_factor = max(
+    completed_output_factor = max(
         1.0,
-        ceil_to_increment(selected_raw_output_safety_factor, 0.05),
+        ceil_to_increment(completed_output_factor_raw, 0.05),
     )
+
+    legitimate_lower_bounds: list[float] = []
+    for record in legitimate_truncations:
+        output_chars = record.get("planned_output_chars")
+        generated_tokens = record.get("generated_tokens_tokenizer")
+        if output_chars is None or float(output_chars) <= 0:
+            continue
+        compact_base_tokens = math.ceil(
+            float(output_chars) / recommended_chars_per_token
+        )
+        if compact_base_tokens <= 0 or generated_tokens is None:
+            continue
+        # generated_tokens is the actual number of model-output tokens observed
+        # before the legitimate response was cut off. compact_base_tokens is the
+        # Step 16 worst-case JSON character plan converted to tokens before any
+        # output safety factor is applied.
+        lower_bound = float(generated_tokens) / compact_base_tokens
+        record["legitimate_truncation_generated_tokens"] = generated_tokens
+        record["legitimate_truncation_compact_base_tokens"] = (
+            compact_base_tokens
+        )
+        record["legitimate_truncation_factor_lower_bound"] = lower_bound
+        legitimate_lower_bounds.append(lower_bound)
+
+    legitimate_truncation_lower_bound = (
+        max(legitimate_lower_bounds) if legitimate_lower_bounds else None
+    )
+    if legitimate_truncation_lower_bound is not None:
+        next_probe_factor_raw = max(
+            completed_output_factor,
+            legitimate_truncation_lower_bound / (1.0 - calibration_margin),
+        )
+        recommended_next_probe_factor = max(
+            1.0,
+            ceil_to_increment(next_probe_factor_raw, 0.05),
+        )
+        final_calibrated_factor = None
+        calibration_status = "probe_required_legitimate_truncations_present"
+        operational_output_factor = recommended_next_probe_factor
+    else:
+        next_probe_factor_raw = None
+        recommended_next_probe_factor = None
+        final_calibrated_factor = completed_output_factor
+        calibration_status = "calibrated_no_legitimate_truncations"
+        operational_output_factor = final_calibrated_factor
 
     pair_output_tokens: list[int] = []
     pair_totals: list[int] = []
@@ -664,7 +1014,7 @@ def conservative_recommendation(
             float(output_chars) / recommended_chars_per_token
         )
         pair_output = math.ceil(
-            base_output_tokens * recommended_output_safety_factor
+            base_output_tokens * operational_output_factor
         )
         record["config_pair_output_tokens"] = pair_output
         pair_output_tokens.append(pair_output)
@@ -689,10 +1039,10 @@ def conservative_recommendation(
             record["config_pair_prompt_target_overflow_tokens"] = 0
 
     recommended_config_pair = {
-        "mode": "joint_density_and_response_expansion_calibration_v2",
+        "mode": "causal_truncation_and_selected_json_calibration_v4",
         "chars_per_token_estimate": recommended_chars_per_token,
         "output_token_estimation_safety_factor": (
-            recommended_output_safety_factor
+            operational_output_factor
         ),
         "input_formula": (
             "floor_to_0.05(min_observed_input_chars_per_real_token * "
@@ -703,16 +1053,24 @@ def conservative_recommendation(
             "recommended_chars_per_token_estimate / "
             "(min_observed_output_chars_per_token * "
             "(1 - calibration_margin)), "
-            "max_observed_generated_tokens_over_compact_base_tokens / "
+            "max_selected_json_tokens_over_compact_base_tokens / "
+            "(1 - calibration_margin), "
+            "max_legitimate_truncation_lower_bound / "
             "(1 - calibration_margin)))"
         ),
         "density_derived_output_safety_factor_raw": raw_output_safety_factor,
         "response_expansion_output_safety_factor_raw": (
             raw_expansion_safety_factor
         ),
-        "selected_output_safety_factor_raw": (
-            selected_raw_output_safety_factor
+        "completed_output_factor_raw": completed_output_factor_raw,
+        "completed_output_factor": completed_output_factor,
+        "legitimate_truncation_lower_bound": (
+            legitimate_truncation_lower_bound
         ),
+        "recommended_next_probe_factor_raw": next_probe_factor_raw,
+        "recommended_next_probe_factor": recommended_next_probe_factor,
+        "final_calibrated_factor": final_calibrated_factor,
+        "calibration_status": calibration_status,
         "observed_output_expansion_factor_distribution": distribution(
             observed_expansion_factors
         ),
@@ -723,9 +1081,14 @@ def conservative_recommendation(
     }
 
     return {
-        "method": "joint_density_and_response_expansion_calibration_v2",
+        "method": "causal_truncation_and_selected_json_calibration_v4",
         "eligible_input_count": len(eligible_inputs),
-        "eligible_output_count": len(eligible_outputs),
+        "eligible_output_count": len(completed_outputs),
+        "censored_probable_truncation_count": len(censored_outputs),
+        "legitimate_truncation_count": len(legitimate_truncations),
+        "legitimate_truncation_lower_bound_count": len(
+            legitimate_lower_bounds
+        ),
         "response_expansion_eligible_output_count": len(
             expansion_eligible_outputs
         ),
@@ -746,17 +1109,24 @@ def conservative_recommendation(
         "raw_response_expansion_safety_factor_candidate": (
             raw_expansion_safety_factor
         ),
-        "selected_raw_output_safety_factor_candidate": (
-            selected_raw_output_safety_factor
+        "completed_output_factor_raw": completed_output_factor_raw,
+        "completed_output_factor": completed_output_factor,
+        "legitimate_truncation_lower_bound": (
+            legitimate_truncation_lower_bound
         ),
+        "recommended_next_probe_factor": recommended_next_probe_factor,
+        "final_calibrated_factor": final_calibrated_factor,
+        "calibration_status": calibration_status,
         "recommended_config_pair": recommended_config_pair,
         "caveat": (
             "The pair is empirically calibrated from this smoke. Input uses "
-            "real chat-template token counts persisted by Step 17; output uses "
-            "the larger of exact-tokenizer density and observed generated-token "
-            "expansion relative to the compact planned JSON. A truncated "
-            "response only establishes a lower bound on its required output, "
-            "so this does not replace a representative repeat smoke."
+            "real chat-template token counts persisted by Step 17. Output uses "
+            "completed valid selected JSON objects for exact density and "
+            "expansion measurements. Confirmed runaways and invalid or "
+            "ambiguous responses never increase the factor. Legitimate "
+            "truncations contribute a right-censored lower bound; when any are "
+            "present, the report provides a next probe factor and withholds a "
+            "final calibrated factor until a smoke completes without them."
         ),
     }
 
@@ -784,6 +1154,9 @@ def build_summary(
         if record.get("chars_per_generated_token") is not None
     ]
     truncations = [record for record in records if record["probable_truncation"]]
+    truncation_classes = Counter(
+        str(record["truncation_class"]) for record in records
+    )
     finish_reasons = Counter(
         str(record["finish_reason"])
         for record in records
@@ -814,6 +1187,22 @@ def build_summary(
             ),
             "within_token_limit_proximity": sum(
                 record["within_limit_proximity"] for record in records
+            ),
+            "selected_json_available": sum(
+                record["selected_json_present"] for record in records
+            ),
+            "output_recovery_applied": sum(
+                record["output_recovery_applied"] for record in records
+            ),
+            "truncation_classes": dict(sorted(truncation_classes.items())),
+            "invalid_response_count": sum(
+                record["truncation_class"]
+                in {
+                    CONFIRMED_RUNAWAY,
+                    IN_BUDGET_INVALID_RESPONSE,
+                    AMBIGUOUS_TRUNCATION,
+                }
+                for record in records
             ),
         },
         "finish_reason": {
@@ -871,10 +1260,40 @@ def build_summary(
                     if record["chars_per_generated_token"] is not None
                 ]
             ),
+            "selected_json_tokens_tokenizer": distribution(
+                [
+                    record["selected_json_tokens_tokenizer"]
+                    for record in records
+                    if record["selected_json_tokens_tokenizer"] is not None
+                ]
+            ),
+            "selected_json_chars_per_token": distribution(
+                [
+                    record["selected_json_chars_per_token"]
+                    for record in records
+                    if record["selected_json_chars_per_token"] is not None
+                ]
+            ),
+            "raw_extra_characters_over_selected_json": distribution(
+                [
+                    record["raw_extra_characters_over_selected_json"]
+                    for record in records
+                    if record["raw_extra_characters_over_selected_json"]
+                    is not None
+                ]
+            ),
         },
         "probable_truncation_prompt_unit_ids": [
             record["prompt_unit_id"] for record in truncations
         ],
+        "prompt_unit_ids_by_truncation_class": {
+            class_name: [
+                record["prompt_unit_id"]
+                for record in records
+                if record["truncation_class"] == class_name
+            ]
+            for class_name in sorted(truncation_classes)
+        },
         "recommendation": recommendation,
     }
 
@@ -890,6 +1309,12 @@ CSV_FIELDS = [
     "reported_generated_tokens",
     "generated_token_count_delta",
     "chars_per_generated_token",
+    "selected_json_present",
+    "selected_json_characters",
+    "selected_json_tokens_tokenizer",
+    "selected_json_chars_per_token",
+    "raw_extra_characters_over_selected_json",
+    "output_recovery_applied",
     "finish_reason",
     "finish_reason_available",
     "max_tokens",
@@ -899,6 +1324,11 @@ CSV_FIELDS = [
     "unclosed_json_container_count",
     "probable_truncation",
     "truncation_evidence",
+    "truncation_class",
+    "truncation_classification_evidence",
+    "partial_replacement_evidence",
+    "valid_completed_output_for_calibration",
+    "valid_censored_output_for_lower_bound",
     "real_input_tokens",
     "planned_input_chars",
     "input_chars_per_real_token",
@@ -906,6 +1336,9 @@ CSV_FIELDS = [
     "planned_output_chars",
     "output_base_tokens_at_recommended_chars_per_token",
     "observed_output_expansion_factor",
+    "legitimate_truncation_generated_tokens",
+    "legitimate_truncation_compact_base_tokens",
+    "legitimate_truncation_factor_lower_bound",
     "current_chars_per_token",
     "safety_factor",
     "prompt_target_context",
@@ -935,6 +1368,12 @@ def write_reports(
         for record in records:
             row = dict(record)
             row["truncation_evidence"] = "|".join(record["truncation_evidence"])
+            row["truncation_classification_evidence"] = "|".join(
+                record["truncation_classification_evidence"]
+            )
+            row["partial_replacement_evidence"] = json.dumps(
+                record["partial_replacement_evidence"], sort_keys=True
+            )
             writer.writerow(row)
 
     with (output_dir / "token_budget_postflight_summary.json").open(
@@ -948,13 +1387,24 @@ def write_reports(
     counts = summary["counts"]
     input_ratio = summary["distributions"]["input_chars_per_real_token"]
     output_ratio = summary["distributions"]["raw_chars_per_generated_token"]
+    selected_output_ratio = summary["distributions"][
+        "selected_json_chars_per_token"
+    ]
     finish = summary["finish_reason"]
+    truncation_classes = counts["truncation_classes"]
+    final_factor = recommendation["final_calibrated_factor"]
+    next_probe_factor = recommendation["recommended_next_probe_factor"]
+    lower_bound = recommendation["legitimate_truncation_lower_bound"]
     lines = [
         "# Step 17 token-budget postflight",
         "",
         f"- Records analyzed: {counts['records']}",
         f"- Status counts: `{json.dumps(counts['status'], sort_keys=True)}`",
         f"- Probable truncations: {counts['probable_truncations']}",
+        f"- Truncation classes: `{json.dumps(truncation_classes, sort_keys=True)}`",
+        f"- Invalid responses after causal classification: {counts['invalid_response_count']}",
+        f"- Selected validated JSON objects: {counts['selected_json_available']}",
+        f"- Outputs requiring JSON recovery: {counts['output_recovery_applied']}",
         f"- Outputs ending inside a string: {counts['ends_inside_string']}",
         (
             "- `finish_reason`: "
@@ -969,21 +1419,53 @@ def write_reports(
             else "- Input characters/real token: unavailable"
         ),
         (
-            "- Output characters/token: "
+            "- Raw output characters/token (diagnostic only): "
             f"min={output_ratio['min']:.6f}, p05={output_ratio['p05']:.6f}, "
             f"median={output_ratio['p50']:.6f}, max={output_ratio['max']:.6f}"
             if output_ratio["count"]
-            else "- Output characters/token: unavailable"
+            else "- Raw output characters/token: unavailable"
+        ),
+        (
+            "- Selected JSON characters/token: "
+            f"min={selected_output_ratio['min']:.6f}, "
+            f"p05={selected_output_ratio['p05']:.6f}, "
+            f"median={selected_output_ratio['p50']:.6f}, "
+            f"max={selected_output_ratio['max']:.6f}"
+            if selected_output_ratio["count"]
+            else "- Selected JSON characters/token: unavailable"
         ),
         "",
         "## Recommendation",
         "",
+        f"- Calibration status: `{recommendation['calibration_status']}`",
+        (
+            "- Completed output factor: "
+            f"{recommendation['completed_output_factor']}"
+        ),
+        (
+            "- Minimum factor implied by legitimate truncations: "
+            f"{lower_bound:.6f}"
+            if lower_bound is not None
+            else "- Minimum factor implied by legitimate truncations: unavailable"
+        ),
+        (
+            "- Recommended next probe factor: "
+            f"{next_probe_factor}"
+            if next_probe_factor is not None
+            else "- Recommended next probe factor: not required"
+        ),
+        (
+            "- Final calibrated factor: "
+            f"{final_factor}"
+            if final_factor is not None
+            else "- Final calibrated factor: unavailable"
+        ),
         (
             "- Conservative margin for input and output: "
             f"{recommendation['calibration_margin']:.1%}"
         ),
         "",
-        "### Recommended input/output configuration pair",
+        "### Operational input/output pair for the next run",
         "",
         (
             "- `chars_per_token_estimate`: "
@@ -992,7 +1474,7 @@ def write_reports(
             else "- Configuration pair unavailable."
         ),
         (
-            "- `output_token_estimation_safety_factor`: "
+            "- `output_token_estimation_safety_factor` (final or next probe): "
             f"**{config_pair['output_token_estimation_safety_factor']}**"
             if config_pair
             else ""
@@ -1004,7 +1486,7 @@ def write_reports(
             else ""
         ),
         (
-            "- Response-expansion-derived raw output factor: "
+            "- Selected-JSON-expansion-derived raw output factor: "
             f"{config_pair['response_expansion_output_safety_factor_raw']:.6f}"
             if config_pair
             else ""
@@ -1024,14 +1506,24 @@ def write_reports(
         "",
         recommendation["caveat"],
         "",
-        "## Probable truncations",
+        "## Responses by truncation class",
         "",
     ]
-    truncation_ids = summary["probable_truncation_prompt_unit_ids"]
-    if truncation_ids:
-        lines.extend(f"- `{unit_id}`" for unit_id in truncation_ids)
-    else:
-        lines.append("- None detected.")
+    class_ids = summary["prompt_unit_ids_by_truncation_class"]
+    for class_name in (
+        CONFIRMED_RUNAWAY,
+        LEGITIMATE_TRUNCATION,
+        COMPLETE_AT_LIMIT,
+        IN_BUDGET_INVALID_RESPONSE,
+        AMBIGUOUS_TRUNCATION,
+    ):
+        unit_ids = class_ids.get(class_name, [])
+        lines.extend((f"### {class_name}", ""))
+        if unit_ids:
+            lines.extend(f"- `{unit_id}`" for unit_id in unit_ids)
+        else:
+            lines.append("- None detected.")
+        lines.append("")
     lines.append("")
     (output_dir / "token_budget_postflight_report.md").write_text(
         "\n".join(lines), encoding="utf-8", newline="\n"
@@ -1117,8 +1609,20 @@ def main() -> int:
     )
     config_pair = recommendation["recommended_config_pair"]
     if config_pair:
+        print(f"Calibration status: {recommendation['calibration_status']}")
+        if recommendation["final_calibrated_factor"] is None:
+            print("Final calibrated factor: unavailable")
+            print(
+                "Recommended next probe factor: "
+                f"{recommendation['recommended_next_probe_factor']}"
+            )
+        else:
+            print(
+                "Final calibrated factor: "
+                f"{recommendation['final_calibrated_factor']}"
+            )
         print(
-            "Recommended config pair: "
+            "Operational config pair for the next run: "
             "chars_per_token_estimate="
             f"{config_pair['chars_per_token_estimate']}, "
             "output_token_estimation_safety_factor="
