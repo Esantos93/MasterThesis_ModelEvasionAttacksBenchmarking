@@ -200,6 +200,9 @@ class CalibrationTests(unittest.TestCase):
             )
             report_dir = root / "report"
             calibration.write_reports(report_dir, records, summary)
+            self.assertFalse(
+                (report_dir / "token_budget_postflight_records.csv").exists()
+            )
             report_text = (
                 report_dir / "token_budget_postflight_report.md"
             ).read_text(encoding="utf-8")

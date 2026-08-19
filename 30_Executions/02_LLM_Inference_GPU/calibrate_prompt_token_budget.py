@@ -7,7 +7,6 @@ manifests, experiment configurations, or Step 17 outputs.
 
 from __future__ import annotations
 
-import csv
 import json
 import math
 import re
@@ -1298,58 +1297,6 @@ def build_summary(
     }
 
 
-CSV_FIELDS = [
-    "prompt_unit_id",
-    "parent_group_id",
-    "shape",
-    "status",
-    "failure_reason",
-    "raw_characters",
-    "generated_tokens_tokenizer",
-    "reported_generated_tokens",
-    "generated_token_count_delta",
-    "chars_per_generated_token",
-    "selected_json_present",
-    "selected_json_characters",
-    "selected_json_tokens_tokenizer",
-    "selected_json_chars_per_token",
-    "raw_extra_characters_over_selected_json",
-    "output_recovery_applied",
-    "finish_reason",
-    "finish_reason_available",
-    "max_tokens",
-    "remaining_tokens",
-    "within_limit_proximity",
-    "raw_ends_inside_string",
-    "unclosed_json_container_count",
-    "probable_truncation",
-    "truncation_evidence",
-    "truncation_class",
-    "truncation_classification_evidence",
-    "partial_replacement_evidence",
-    "valid_completed_output_for_calibration",
-    "valid_censored_output_for_lower_bound",
-    "real_input_tokens",
-    "planned_input_chars",
-    "input_chars_per_real_token",
-    "planned_output_tokens",
-    "planned_output_chars",
-    "output_base_tokens_at_recommended_chars_per_token",
-    "observed_output_expansion_factor",
-    "legitimate_truncation_generated_tokens",
-    "legitimate_truncation_compact_base_tokens",
-    "legitimate_truncation_factor_lower_bound",
-    "current_chars_per_token",
-    "safety_factor",
-    "prompt_target_context",
-    "runtime_max_model_len",
-    "config_pair_output_tokens",
-    "config_pair_total_tokens",
-    "config_pair_runtime_overflow_tokens",
-    "config_pair_prompt_target_overflow_tokens",
-]
-
-
 def write_reports(
     output_dir: Path, records: list[dict[str, Any]], summary: dict[str, Any]
 ) -> None:
@@ -1359,22 +1306,6 @@ def write_reports(
     ) as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-
-    with (output_dir / "token_budget_postflight_records.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        for record in records:
-            row = dict(record)
-            row["truncation_evidence"] = "|".join(record["truncation_evidence"])
-            row["truncation_classification_evidence"] = "|".join(
-                record["truncation_classification_evidence"]
-            )
-            row["partial_replacement_evidence"] = json.dumps(
-                record["partial_replacement_evidence"], sort_keys=True
-            )
-            writer.writerow(row)
 
     with (output_dir / "token_budget_postflight_summary.json").open(
         "w", encoding="utf-8", newline="\n"
