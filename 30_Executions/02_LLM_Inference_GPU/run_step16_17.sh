@@ -43,18 +43,30 @@ STEP17_BACKEND="${STEP17_BACKEND:-vllm}"
 BATCH_SIZE="${BATCH_SIZE:-168}"
 LIMIT_PROMPTS_S16="${LIMIT_PROMPTS_S16:-}"
 LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-}"
-if [[ -z "${RUNTIME_MAX_MODEL_LEN:-}" ]]; then
-  RUNTIME_MAX_MODEL_LEN="$(python3 -c '
+RUNTIME_MAX_MODEL_LEN_FALLBACK="${RUNTIME_MAX_MODEL_LEN:-12288}"
+CONFIG_RUNTIME_MAX_MODEL_LEN="$(python3 -c '
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     config = json.load(handle)
-value = config.get("llm", {}).get("runtime_max_model_len")
+llm = config.get("llm", {})
+if not isinstance(llm, dict):
+    raise SystemExit("Config llm must be a JSON object")
+if "runtime_max_model_len" not in llm or llm["runtime_max_model_len"] is None:
+    print("")
+    raise SystemExit(0)
+value = llm["runtime_max_model_len"]
 if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
     raise SystemExit("llm.runtime_max_model_len must be a positive integer")
 print(value)
 ' "${CONFIG_PATH}")"
+if [[ -n "${CONFIG_RUNTIME_MAX_MODEL_LEN}" ]]; then
+  RUNTIME_MAX_MODEL_LEN="${CONFIG_RUNTIME_MAX_MODEL_LEN}"
+  RUNTIME_MAX_MODEL_LEN_SOURCE="config"
+else
+  RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN_FALLBACK}"
+  RUNTIME_MAX_MODEL_LEN_SOURCE="fallback"
 fi
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-30}"
@@ -278,6 +290,7 @@ echo "vLLM virtual environment: ${VLLM_VENV}"
 echo "Step 17 runner: ${STEP17_RUNNER:-<skipped>}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Runtime max model len: ${RUNTIME_MAX_MODEL_LEN}"
+echo "Runtime max model len source: ${RUNTIME_MAX_MODEL_LEN_SOURCE}"
 echo "Output token budget source: prompt_unit.token_plan.planned_output_tokens"
 echo "Disable thinking: ${DISABLE_THINKING}"
 echo "Limit Step 16: ${LIMIT_PROMPTS_S16:-<none>}"
