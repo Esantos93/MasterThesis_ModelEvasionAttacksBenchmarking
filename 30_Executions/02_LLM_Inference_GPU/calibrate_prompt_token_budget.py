@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Post-smoke calibration of Step 17 output-token budgets.
+"""Post-smoke calibration of Step 17 input and output token budgets.
 
-This is a read-only, standalone RISE utility. It does not modify prompt
-manifests, experiment configurations, or Step 17 outputs.
+The script joins a Prompt Unit manifest with the corresponding Step 17 raw,
+parsed, metadata, and failure artifacts. It uses the exact model tokenizer,
+classifies token-limit events causally, separates representative and stress
+panel evidence, and recommends the next operational token-planning pair. It is
+read-only: prompt manifests, experiment configurations, and Step 17 outputs
+are never modified.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v4"
+REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v5"
 
 COMPLETED_VALID_RESPONSE = "completed_valid_response"
 CONFIRMED_RUNAWAY = "confirmed_runaway"
@@ -74,6 +78,7 @@ CONFIG = {
 
 @dataclass(frozen=True)
 class JsonStructure:
+    # This data class records whether the raw model output contains one complete JSON value or an incomplete structure.
     complete_top_level_value: bool
     ends_inside_string: bool
     unclosed_container_count: int
@@ -89,11 +94,13 @@ class JsonStructure:
         )
 
 
+# This function loads one JSON artifact from disk.
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
+# This function loads the exact Hugging Face tokenizer used by the Step 17 model.
 def load_tokenizer(model_path: str, trust_remote_code: bool) -> Any:
     try:
         from transformers import AutoTokenizer
@@ -109,6 +116,7 @@ def load_tokenizer(model_path: str, trust_remote_code: bool) -> Any:
     )
 
 
+# This function tokenizes text without adding model-specific start or end tokens.
 def encode_without_special_tokens(tokenizer: Any, text: str) -> list[int]:
     encoded = tokenizer.encode(text, add_special_tokens=False)
     if hasattr(encoded, "tolist"):
@@ -116,11 +124,13 @@ def encode_without_special_tokens(tokenizer: Any, text: str) -> list[int]:
     return list(encoded)
 
 
+# This function serializes a selected JSON response in the compact form used by Step 16 planning.
 def compact_json(value: Any) -> str:
     """Serialize a selected model JSON using the Step 16 planning form."""
     return json.dumps(value, separators=(",", ":"), sort_keys=False)
 
 
+# This function calculates a linearly interpolated percentile from numeric observations.
 def percentile(values: Sequence[float], probability: float) -> float | None:
     if not values:
         return None
@@ -136,6 +146,7 @@ def percentile(values: Sequence[float], probability: float) -> float | None:
     return float(ordered[lower] * (1.0 - weight) + ordered[upper] * weight)
 
 
+# This function produces the standard count/minimum/percentile/maximum/mean summary used in the reports.
 def distribution(values: Sequence[float | int]) -> dict[str, float | int | None]:
     if not values:
         return {
@@ -159,12 +170,14 @@ def distribution(values: Sequence[float | int]) -> dict[str, float | int | None]
     }
 
 
+# This function rounds a positive recommendation upward to the configured operational increment.
 def ceil_to_increment(value: float, increment: float) -> float:
     if increment <= 0:
         raise ValueError("Rounding increment must be greater than zero.")
     return round(math.ceil((value / increment) - 1e-12) * increment, 10)
 
 
+# This function scans raw text character by character to identify incomplete or trailing JSON structure.
 def scan_json_structure(text: str) -> JsonStructure:
     stack: list[str] = []
     in_string = False
@@ -218,6 +231,7 @@ def scan_json_structure(text: str) -> JsonStructure:
     )
 
 
+# This function extracts every complete top-level JSON object from wrapped or repeated model output.
 def extract_complete_top_level_json_objects(
     raw_text: str,
 ) -> tuple[list[dict[str, Any]], int | None]:
@@ -272,6 +286,7 @@ def extract_complete_top_level_json_objects(
     return candidates, candidate_start
 
 
+# This function removes a Markdown JSON fence before structural inspection when one is present.
 def strip_json_fence(text: str) -> str:
     stripped = text.strip()
     stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
@@ -279,6 +294,7 @@ def strip_json_fence(text: str) -> str:
     return stripped.strip()
 
 
+# This function indexes the editable payload regions and their contractual operation and size limits.
 def editable_payload_limits(unit: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     traceability = unit.get("input_traceability")
@@ -310,6 +326,7 @@ def editable_payload_limits(unit: Mapping[str, Any]) -> dict[str, dict[str, Any]
     return result
 
 
+# This function recovers complete string values already emitted for a named JSON field.
 def extracted_string_values(raw_text: str, field_name: str) -> list[str]:
     pattern = re.compile(
         rf'"{re.escape(field_name)}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
@@ -317,6 +334,7 @@ def extracted_string_values(raw_text: str, field_name: str) -> list[str]:
     return [match.group(1) for match in pattern.finditer(raw_text)]
 
 
+# This function inspects a partial replacement string for limit overflow and periodic runaway evidence.
 def partial_replacement_evidence(
     raw_text: str,
     unit: Mapping[str, Any],
@@ -348,6 +366,7 @@ def partial_replacement_evidence(
     }
 
 
+# This function checks whether an incomplete first JSON object is still compatible with the Prompt Unit contract.
 def prefix_matches_prompt_contract(
     raw_text: str,
     unit: Mapping[str, Any],
@@ -380,6 +399,7 @@ def prefix_matches_prompt_contract(
     return not evidence, evidence
 
 
+# This function assigns probable truncations to the five causal categories used by token-budget policy.
 def classify_truncation_cause(
     *,
     probable_truncation: bool,
@@ -451,6 +471,7 @@ def classify_truncation_cause(
     return AMBIGUOUS_TRUNCATION, evidence, partial_replacement
 
 
+# This function searches nested response metadata for the first available value with a known key.
 def nested_first(mapping: Any, keys: set[str]) -> Any:
     if isinstance(mapping, Mapping):
         for key, value in mapping.items():
@@ -468,6 +489,7 @@ def nested_first(mapping: Any, keys: set[str]) -> Any:
     return None
 
 
+# This function converts optional metadata values to integers without failing the complete calibration.
 def as_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -477,6 +499,7 @@ def as_int(value: Any) -> int | None:
         return None
 
 
+# This function converts optional metadata values to floating point numbers.
 def as_float(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -486,6 +509,7 @@ def as_float(value: Any) -> float | None:
         return None
 
 
+# This function normalises backend-specific finish-reason values into a comparable string.
 def normalize_finish_reason(value: Any) -> str | None:
     if value is None:
         return None
@@ -494,6 +518,7 @@ def normalize_finish_reason(value: Any) -> str | None:
     return str(value).strip().lower() or None
 
 
+# This function resolves either an exact Step 17 run directory or a parent containing exactly one valid run.
 def find_step17_run_dir(candidate: Path) -> Path:
     candidate = candidate.expanduser().resolve()
     if (candidate / "raw").is_dir() and (candidate / "metadata").is_dir():
@@ -516,6 +541,7 @@ def find_step17_run_dir(candidate: Path) -> Path:
     )
 
 
+# This function indexes Prompt Units by ID and preserves manifest-level sampling metadata.
 def manifest_units(manifest: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     units = manifest.get("prompt_units")
     if not isinstance(units, list):
@@ -533,6 +559,39 @@ def manifest_units(manifest: Mapping[str, Any]) -> tuple[dict[str, Any], dict[st
     return indexed, dict(metadata) if isinstance(metadata, Mapping) else {}
 
 
+# This function reconstructs representative, stress, and stress-component membership from sample metadata.
+def calibration_panel_membership(
+    manifest_metadata: Mapping[str, Any],
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Read sampler panel/component membership embedded in a sample manifest."""
+    sample = manifest_metadata.get("calibration_sample")
+    if not isinstance(sample, Mapping):
+        return {}, {}
+    panels = sample.get("payload_budget_panels")
+    if not isinstance(panels, Mapping):
+        return {}, {}
+    panel_by_id: dict[str, str] = {}
+    stress_components_by_id: dict[str, list[str]] = {}
+    for panel_name, panel_value in panels.items():
+        if not isinstance(panel_value, Mapping):
+            continue
+        unit_ids = panel_value.get("prompt_unit_ids")
+        if isinstance(unit_ids, list):
+            for unit_id in unit_ids:
+                panel_by_id[str(unit_id)] = str(panel_name)
+        component_ids = panel_value.get("component_prompt_unit_ids")
+        if isinstance(component_ids, Mapping):
+            for component_name, component_unit_ids in component_ids.items():
+                if not isinstance(component_unit_ids, list):
+                    continue
+                for unit_id in component_unit_ids:
+                    stress_components_by_id.setdefault(str(unit_id), []).append(
+                        str(component_name)
+                    )
+    return panel_by_id, stress_components_by_id
+
+
+# This function loads Step 17 failure sidecars and indexes them by Prompt Unit ID.
 def load_failure_map(failure_dir: Path) -> dict[str, dict[str, Any]]:
     failures: dict[str, dict[str, Any]] = {}
     if not failure_dir.is_dir():
@@ -548,6 +607,7 @@ def load_failure_map(failure_dir: Path) -> dict[str, dict[str, Any]]:
     return failures
 
 
+# This function derives the editable-target shape used in calibration summaries.
 def infer_shape(unit: Mapping[str, Any]) -> str:
     presence = unit.get("editable_target_presence")
     if not isinstance(presence, Mapping):
@@ -563,6 +623,7 @@ def infer_shape(unit: Mapping[str, Any]) -> str:
     return "no_editable_target"
 
 
+# This first-stage function flags outputs that may have been censored by the generation-token limit.
 def classify_probable_truncation(
     *,
     finish_reason: str | None,
@@ -597,6 +658,7 @@ def classify_probable_truncation(
     return explicit_length or incomplete_near_limit or failed_near_limit, evidence
 
 
+# This function merges Step 16 and Step 17 token-plan fields into one normalised budget record.
 def prompt_budget_fields(
     unit: Mapping[str, Any], metadata: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -653,6 +715,7 @@ def prompt_budget_fields(
     }
 
 
+# This function joins the manifest, raw outputs, parsed JSON, metadata, and failures into per-unit calibration records.
 def analyze_run(
     *,
     manifest_path: Path,
@@ -664,6 +727,10 @@ def analyze_run(
     if not isinstance(manifest, Mapping):
         raise ValueError("Prompt manifest root must be a JSON object.")
     units, manifest_metadata = manifest_units(manifest)
+    panel_by_id, stress_components_by_id = calibration_panel_membership(
+        manifest_metadata
+    )
+    has_sample_panels = bool(panel_by_id)
     failures = load_failure_map(run_dir / "failures")
     records: list[dict[str, Any]] = []
 
@@ -763,6 +830,13 @@ def analyze_run(
         )
         record = {
             "prompt_unit_id": unit_id,
+            "calibration_panel": panel_by_id.get(
+                unit_id,
+                "unassigned_sample_unit" if has_sample_panels else "full_population",
+            ),
+            "calibration_stress_components": stress_components_by_id.get(
+                unit_id, []
+            ),
             "parent_group_id": metadata.get("parent_group_id")
             or unit.get("parent_group_id"),
             "shape": infer_shape(unit or metadata),
@@ -832,10 +906,15 @@ def analyze_run(
         "manifest_units_without_metadata": len(set(units) - executed_ids),
         "metadata_units_missing_from_manifest": len(executed_ids - set(units)),
         "manifest_metadata": manifest_metadata,
+        "calibration_panel_membership_available": has_sample_panels,
+        "calibration_panel_manifest_counts": dict(
+            sorted(Counter(panel_by_id.values()).items())
+        ),
     }
     return records, provenance
 
 
+# This function derives the conservative input/output configuration pair from valid outputs and legitimate lower bounds.
 def conservative_recommendation(
     records: list[dict[str, Any]],
     *,
@@ -1130,6 +1209,109 @@ def conservative_recommendation(
     }
 
 
+# This function calculates a 95% Wilson confidence interval for a representative-panel proportion.
+def wilson_interval_95(successes: int, total: int) -> dict[str, float | None]:
+    """Wilson 95% interval for a binomial proportion."""
+    if total <= 0:
+        return {"lower": None, "upper": None}
+    z = 1.959963984540054
+    proportion = successes / total
+    denominator = 1.0 + (z * z / total)
+    centre = (proportion + z * z / (2.0 * total)) / denominator
+    half_width = (
+        z
+        * math.sqrt(
+            proportion * (1.0 - proportion) / total
+            + z * z / (4.0 * total * total)
+        )
+        / denominator
+    )
+    return {
+        "lower": max(0.0, centre - half_width),
+        "upper": min(1.0, centre + half_width),
+    }
+
+
+# This function reports representative prevalence separately from deliberately biased stress-panel diagnostics.
+def build_panel_summaries(
+    records: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Keep prevalence evidence separate from deliberately biased stress data."""
+    by_panel: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_panel.setdefault(
+            str(record.get("calibration_panel") or "unassigned"), []
+        ).append(record)
+    summaries: dict[str, dict[str, Any]] = {}
+    for panel_name, panel_records in sorted(by_panel.items()):
+        total = len(panel_records)
+        legitimate = sum(
+            record.get("truncation_class") == LEGITIMATE_TRUNCATION
+            for record in panel_records
+        )
+        probable = sum(
+            bool(record.get("probable_truncation")) for record in panel_records
+        )
+        expansion_factors = [
+            float(record["observed_output_expansion_factor"])
+            for record in panel_records
+            if record.get("observed_output_expansion_factor") is not None
+        ]
+        legitimate_lower_bounds = [
+            float(record["legitimate_truncation_factor_lower_bound"])
+            for record in panel_records
+            if record.get("legitimate_truncation_factor_lower_bound") is not None
+        ]
+        role = {
+            "representative": "population_prevalence_estimation",
+            "stress": "targeted_tail_and_failure_discovery",
+            "full_population": "population_census",
+        }.get(panel_name, "unassigned_diagnostic")
+        summaries[panel_name] = {
+            "role": role,
+            "records": total,
+            "status": dict(
+                sorted(Counter(str(record["status"]) for record in panel_records).items())
+            ),
+            "truncation_classes": dict(
+                sorted(
+                    Counter(
+                        str(record["truncation_class"])
+                        for record in panel_records
+                    ).items()
+                )
+            ),
+            "probable_truncations": probable,
+            "probable_truncation_rate": probable / total if total else None,
+            "legitimate_truncations": legitimate,
+            "legitimate_truncation_rate": legitimate / total if total else None,
+            "legitimate_truncation_rate_wilson_95": wilson_interval_95(
+                legitimate, total
+            ),
+            "eligible_completed_output_count": len(expansion_factors),
+            "maximum_observed_completed_output_expansion_factor": (
+                max(expansion_factors) if expansion_factors else None
+            ),
+            "maximum_legitimate_truncation_lower_bound": (
+                max(legitimate_lower_bounds)
+                if legitimate_lower_bounds
+                else None
+            ),
+            "prevalence_interpretation": (
+                "Representative-panel rates and confidence intervals may be "
+                "used for population prevalence estimation."
+                if panel_name == "representative"
+                else "This panel is not a representative prevalence estimate."
+                if panel_name == "stress"
+                else "Counts cover the complete analyzed population."
+                if panel_name == "full_population"
+                else "Panel membership is incomplete; interpret diagnostically."
+            ),
+        }
+    return summaries
+
+
+# This function assembles all counts, distributions, provenance, panel evidence, and recommendations into the JSON report.
 def build_summary(
     *,
     records: list[dict[str, Any]],
@@ -1293,10 +1475,12 @@ def build_summary(
             ]
             for class_name in sorted(truncation_classes)
         },
+        "panel_summaries": build_panel_summaries(records),
         "recommendation": recommendation,
     }
 
 
+# This function writes JSONL records plus machine-readable and human-readable post-flight reports.
 def write_reports(
     output_dir: Path, records: list[dict[str, Any]], summary: dict[str, Any]
 ) -> None:
@@ -1440,9 +1624,58 @@ def write_reports(
         "",
         recommendation["caveat"],
         "",
-        "## Responses by truncation class",
-        "",
     ]
+    panel_summaries = summary.get("panel_summaries", {})
+    if panel_summaries:
+        lines.extend(
+            [
+                "## Calibration panels",
+                "",
+                (
+                    "Representative-panel rates estimate population prevalence; "
+                    "stress-panel rates are deliberately biased diagnostics. "
+                    "Factor evidence may use valid extremes from either panel."
+                ),
+                "",
+                "| Panel | Records | Legitimate truncations | Rate | Wilson 95% interval | Probable truncations | Max completed factor | Max legitimate lower bound |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for panel_name, panel in panel_summaries.items():
+            interval = panel["legitimate_truncation_rate_wilson_95"]
+            lower = interval.get("lower")
+            upper = interval.get("upper")
+            interval_text = (
+                f"{lower:.4%}–{upper:.4%}"
+                if lower is not None and upper is not None
+                else "n/a"
+            )
+            rate = panel.get("legitimate_truncation_rate")
+            completed_factor = panel.get(
+                "maximum_observed_completed_output_expansion_factor"
+            )
+            panel_lower_bound = panel.get(
+                "maximum_legitimate_truncation_lower_bound"
+            )
+            lines.append(
+                f"| `{panel_name}` | {panel['records']} | "
+                f"{panel['legitimate_truncations']} | "
+                f"{rate:.4%} | {interval_text} | "
+                f"{panel['probable_truncations']} | "
+                f"{completed_factor:.6f} | "
+                f"{panel_lower_bound:.6f} |"
+                if rate is not None
+                and completed_factor is not None
+                and panel_lower_bound is not None
+                else f"| `{panel_name}` | {panel['records']} | "
+                f"{panel['legitimate_truncations']} | "
+                f"{rate:.4%} | {interval_text} | "
+                f"{panel['probable_truncations']} | "
+                f"{completed_factor if completed_factor is not None else 'n/a'} | "
+                f"{panel_lower_bound if panel_lower_bound is not None else 'n/a'} |"
+            )
+        lines.append("")
+    lines.extend(["## Responses by truncation class", ""])
     class_ids = summary["prompt_unit_ids_by_truncation_class"]
     for class_name in (
         CONFIRMED_RUNAWAY,
@@ -1464,6 +1697,7 @@ def write_reports(
     )
 
 
+# This function validates the editable configuration block before any expensive tokenizer or artifact work begins.
 def validate_config(config: Mapping[str, Any]) -> None:
     required = {
         "prompt_manifest",
@@ -1495,6 +1729,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("CONFIG model_path must not be empty.")
 
 
+# This is the main function: it loads the tokenizer, analyzes Step 17, calculates the recommendation, and writes reports.
 def main() -> int:
     try:
         validate_config(CONFIG)

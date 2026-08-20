@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("build_prompt_manifest_sample.py")
@@ -90,32 +93,33 @@ class PayloadBudgetSamplerTests(unittest.TestCase):
         units = synthetic_units()
         _, report = sampler.payload_budget_stratified_sample(
             units,
-            sample_size=48,
-            representative_size=24,
+            sample_size=120,
+            representative_size=96,
             seed="quota-test",
             max_per_parent=2,
             minimum_per_stratum=2,
         )
         representative = report["panels"]["representative"]
         self.assertEqual(
-            len(representative["shape_output_quartile_counts"]),
-            12,
+            len(representative["shape_output_complexity_quartile_counts"]),
+            48,
         )
         self.assertTrue(
             all(
                 count >= 2
                 for count in representative[
-                    "shape_output_quartile_counts"
+                    "shape_output_complexity_quartile_counts"
                 ].values()
             )
         )
-        self.assertEqual(
-            report["panels"]["stress"]["component_counts"],
-            {
-                "payload_only_high_output": 12,
-                "mixed_high_output": 6,
-                "payload_capable_high_replacement_hex": 6,
-            },
+        component_counts = report["panels"]["stress"]["component_counts"]
+        self.assertEqual(sum(component_counts.values()), 24)
+        self.assertIn("payload_capable_many_editable_regions", component_counts)
+        self.assertIn(
+            "payload_capable_high_total_replacement_hex", component_counts
+        )
+        self.assertIn(
+            "payload_capable_high_multi_patch_risk", component_counts
         )
 
     def test_replacement_hex_limit_extraction(self) -> None:
@@ -124,6 +128,98 @@ class PayloadBudgetSamplerTests(unittest.TestCase):
             sampler.maximum_replacement_hex_chars(unit),
             40 * 64,
         )
+        self.assertEqual(sampler.total_replacement_hex_chars(unit), 40 * 64)
+        self.assertEqual(sampler.payload_replacement_limit_count(unit), 1)
+
+    def test_automatic_size_meets_hypergeometric_detection_target(self) -> None:
+        population = 65_058
+        prevalence = 88 / population
+        sample_size = sampler.required_representative_sample_size(
+            population,
+            prevalence,
+            0.95,
+        )
+        qualifying = 88
+        self.assertLessEqual(
+            sampler.probability_of_zero_hits(
+                population, qualifying, sample_size
+            ),
+            0.05,
+        )
+        self.assertGreater(
+            sampler.probability_of_zero_hits(
+                population, qualifying, sample_size - 1
+            ),
+            0.05,
+        )
+        self.assertGreater(sample_size, 2_000)
+        self.assertLess(sample_size, 2_300)
+
+    def test_adaptive_stress_reserves_half_for_matching_profiles(self) -> None:
+        units = synthetic_units()
+        focus = [units[-1]]
+        _, report = sampler.payload_budget_stratified_sample(
+            units,
+            sample_size=48,
+            representative_size=24,
+            seed="adaptive-test",
+            max_per_parent=2,
+            minimum_per_stratum=1,
+            adaptive_focus_units=focus,
+        )
+        stress = report["panels"]["stress"]
+        self.assertEqual(report["adaptive_focus_prompt_count"], 1)
+        self.assertEqual(
+            stress["component_counts"][
+                "adaptive_legitimate_truncation_profiles"
+            ],
+            12,
+        )
+
+    def test_cli_automatic_mode_embeds_panel_design(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "full.json"
+            output = root / "sample.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "schema_version": "prompt_units_manifest_v2",
+                            "total_prompt_count": 120,
+                        },
+                        "prompt_units": synthetic_units(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                str(SCRIPT),
+                "--input-manifest",
+                str(source),
+                "--output-manifest",
+                str(output),
+                "--sample-method",
+                "payload_budget_stratified",
+                "--minimum-detectable-prevalence",
+                "0.1",
+                "--confidence-level",
+                "0.8",
+                "--stress-size",
+                "10",
+            ]
+            with patch.object(sys, "argv", argv):
+                sampler.main()
+            sample = json.loads(output.read_text(encoding="utf-8"))
+            design = sample["metadata"]["calibration_sample"][
+                "sample_size_design"
+            ]
+            self.assertEqual(design["mode"], "automatic_detection_probability")
+            self.assertEqual(design["population_size"], 120)
+            self.assertEqual(design["stress_size"], 10)
+            self.assertEqual(
+                len(sample["prompt_units"]), design["total_sample_size"]
+            )
 
 
 if __name__ == "__main__":

@@ -103,7 +103,17 @@ class CalibrationTests(unittest.TestCase):
             (run_dir / "parsed").mkdir()
             unit_id = "flow_group_000001_fragment_0001"
             manifest = {
-                "metadata": {"schema_version": "prompt_units_manifest_v2"},
+                "metadata": {
+                    "schema_version": "prompt_units_manifest_v2",
+                    "calibration_sample": {
+                        "payload_budget_panels": {
+                            "representative": {
+                                "prompt_unit_ids": [unit_id]
+                            },
+                            "stress": {"prompt_unit_ids": []},
+                        }
+                    },
+                },
                 "prompt_units": [
                     {
                         "prompt_unit_id": unit_id,
@@ -160,6 +170,7 @@ class CalibrationTests(unittest.TestCase):
             )
             self.assertEqual(provenance["metadata_files_analyzed"], 1)
             self.assertFalse(records[0]["probable_truncation"])
+            self.assertEqual(records[0]["calibration_panel"], "representative")
             self.assertEqual(
                 records[0]["truncation_class"],
                 calibration.COMPLETED_VALID_RESPONSE,
@@ -213,6 +224,42 @@ class CalibrationTests(unittest.TestCase):
             self.assertIn("chars_per_token_estimate", report_text)
             self.assertIn("output_token_estimation_safety_factor", report_text)
             self.assertIn("Selected-JSON-expansion-derived raw output factor", report_text)
+            self.assertIn("## Calibration panels", report_text)
+            self.assertEqual(
+                summary["panel_summaries"]["representative"]["records"], 1
+            )
+
+    def test_panel_summaries_keep_stress_prevalence_diagnostic(self) -> None:
+        records = [
+            {
+                "calibration_panel": "representative",
+                "status": "accepted",
+                "truncation_class": calibration.COMPLETED_VALID_RESPONSE,
+                "probable_truncation": False,
+                "observed_output_expansion_factor": 1.2,
+            },
+            {
+                "calibration_panel": "stress",
+                "status": "failed",
+                "truncation_class": calibration.LEGITIMATE_TRUNCATION,
+                "probable_truncation": True,
+                "legitimate_truncation_factor_lower_bound": 1.5,
+            },
+        ]
+        panels = calibration.build_panel_summaries(records)
+        self.assertEqual(
+            panels["representative"]["role"],
+            "population_prevalence_estimation",
+        )
+        self.assertEqual(
+            panels["stress"]["role"],
+            "targeted_tail_and_failure_discovery",
+        )
+        self.assertEqual(panels["stress"]["legitimate_truncation_rate"], 1.0)
+        self.assertIn(
+            "not a representative prevalence estimate",
+            panels["stress"]["prevalence_interpretation"],
+        )
 
     def test_recommendation_excludes_probable_truncations(self) -> None:
         accepted = {
