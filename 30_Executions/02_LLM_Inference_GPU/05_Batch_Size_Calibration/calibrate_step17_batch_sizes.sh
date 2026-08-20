@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+GPU_EXECUTION_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 EXPERIMENT_ID="${EXPERIMENT_ID:-}"
 GROUPING_LABEL="${GROUPING_LABEL:-}"
 CONFIG_PATH="${CONFIG_PATH:-}"
@@ -12,9 +14,9 @@ CALIBRATION_ROOT="${CALIBRATION_ROOT:-${CLOUD_ROOT}/02_OutputFiles/batch_calibra
 LIMIT_PROMPTS_S17="${LIMIT_PROMPTS_S17:-1500}"
 BATCH_SIZES="${BATCH_SIZES:-16 32 64 96 128 160 188 224 256 320}"
 SAMPLE_METHOD="${SAMPLE_METHOD:-editable_count_stratified}"
-RUNNER="${RUNNER:-${CLOUD_ROOT}/04_Steps/run_step16_17.sh}"
-COMPARATOR="${COMPARATOR:-${CLOUD_ROOT}/04_Steps/compare_step17_batch_calibration.py}"
-SAMPLE_BUILDER="${SAMPLE_BUILDER:-${CLOUD_ROOT}/04_Steps/build_prompt_manifest_sample.py}"
+RUNNER="${RUNNER:-${GPU_EXECUTION_ROOT}/02_Orchestration/run_step16_17.sh}"
+COMPARATOR="${COMPARATOR:-${SCRIPT_DIR}/compare_step17_batch_calibration.py}"
+SAMPLE_BUILDER="${SAMPLE_BUILDER:-${GPU_EXECUTION_ROOT}/03_Sampling/build_prompt_sample.py}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 RUNTIME_MAX_MODEL_LEN="${RUNTIME_MAX_MODEL_LEN:-12288}"
 VLLM_DTYPE="${VLLM_DTYPE:-auto}"

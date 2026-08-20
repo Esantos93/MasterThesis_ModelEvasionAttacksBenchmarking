@@ -88,7 +88,8 @@ QWEN32_PROMPT_DIR=""
 # END CONFIGURATION
 # =============================================================================
 
-RUNNER="${CLOUD_ROOT}/04_Steps/run_step16_17.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+RUNNER="${RUNNER:-${SCRIPT_DIR}/run_step16_17.sh}"
 CONFIG_ROOT="${CLOUD_ROOT}/04_Steps/setups"
 QUEUE_ID="queue_$(date -u +%Y%m%d_%H%M%S)_${RUN_LABEL}_${RUN_MODE}"
 QUEUE_LOG_DIR="${CLOUD_ROOT}/02_OutputFiles/multi_model_logs/${QUEUE_ID}"

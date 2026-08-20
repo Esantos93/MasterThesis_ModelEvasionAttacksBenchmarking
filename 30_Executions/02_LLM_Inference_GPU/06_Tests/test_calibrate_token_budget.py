@@ -8,8 +8,12 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("calibrate_prompt_token_budget.py")
-SPEC = importlib.util.spec_from_file_location("calibrate_prompt_token_budget", SCRIPT)
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "04_Token_Budget_Calibration"
+    / "calibrate_token_budget.py"
+)
+SPEC = importlib.util.spec_from_file_location("calibrate_token_budget", SCRIPT)
 assert SPEC and SPEC.loader
 calibration = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = calibration

@@ -9,8 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).with_name("build_prompt_manifest_sample.py")
-SPEC = importlib.util.spec_from_file_location("build_prompt_manifest_sample", SCRIPT)
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "03_Sampling"
+    / "build_prompt_sample.py"
+)
+SPEC = importlib.util.spec_from_file_location("build_prompt_sample", SCRIPT)
 assert SPEC and SPEC.loader
 sampler = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = sampler

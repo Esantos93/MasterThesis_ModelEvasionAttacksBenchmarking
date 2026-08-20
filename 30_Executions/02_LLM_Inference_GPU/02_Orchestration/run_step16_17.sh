@@ -18,6 +18,9 @@ set -Eeuo pipefail
 #       Step17/summarize_llm_runtime.py
 #       common/
 #       setups/*.json
+#       01_Compression/compression_step_16.sh
+#       01_Compression/compression_step_17.sh
+#       02_Orchestration/run_step16_17.sh
 
 CLOUD_ROOT="${CLOUD_ROOT:-/tf/thesis_Santos}"
 VLLM_VENV="${VLLM_VENV:-${CLOUD_ROOT}/.venv-vllm}"
@@ -112,9 +115,10 @@ fi
 STEP16_DIR="${CLOUD_ROOT}/04_Steps/Step16"
 STEP17_DIR="${CLOUD_ROOT}/04_Steps/Step17"
 EXECUTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+GPU_EXECUTION_ROOT="$(cd "${EXECUTION_DIR}/.." && pwd -P)"
 EXPERIMENT_OUTPUT_DIR="${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}"
-STEP16_COMPRESSION_SCRIPT="${EXECUTION_DIR}/compression/compression_step_16.sh"
-STEP17_COMPRESSION_SCRIPT="${EXECUTION_DIR}/compression/compression_step_17.sh"
+STEP16_COMPRESSION_SCRIPT="${GPU_EXECUTION_ROOT}/01_Compression/compression_step_16.sh"
+STEP17_COMPRESSION_SCRIPT="${GPU_EXECUTION_ROOT}/01_Compression/compression_step_17.sh"
 STEP16_ARCHIVE="${STEP16_ARCHIVE:-${EXPERIMENT_OUTPUT_DIR}/step16_prompts_${RUN_ID}.tar.gz}"
 STEP17_ARCHIVE="${STEP17_ARCHIVE:-${EXPERIMENT_OUTPUT_DIR}/step17_llm_outputs_${RUN_ID}.tar.gz}"
 LOG_DIR="${CLOUD_ROOT}/02_OutputFiles/${EXPERIMENT_ID}/logs/${RUN_ID}"
