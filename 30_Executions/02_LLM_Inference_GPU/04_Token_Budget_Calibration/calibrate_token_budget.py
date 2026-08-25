@@ -50,9 +50,14 @@ CALIBRATION_RUN_ID = STEP17_RUN_ID
 
 # Paths derived from the values above. They normally require no manual edits.
 EXPERIMENT_OUTPUT_DIR = CLOUD_ROOT / "02_OutputFiles" / EXPERIMENT_ID
+
 STEP16_PROMPT_DIR = (
-    EXPERIMENT_OUTPUT_DIR / "06_prompts" / GROUPING_LABEL / STEP16_RUN_ID
+    EXPERIMENT_OUTPUT_DIR
+    / "06_prompts"
+    / GROUPING_LABEL
+    / STEP16_RUN_ID
 )
+
 STEP17_RUN_DIR = (
     EXPERIMENT_OUTPUT_DIR
     / "07_llm_outputs"
