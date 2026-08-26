@@ -25,6 +25,16 @@ PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION = (
     "If no useful and valid header edit exists, return header_edits as an empty list and set abstention to "
     f'"{NO_USEFUL_HEADER_EDIT_ABSTENTION}". Otherwise, return the edits and omit abstention.'
 )
+PROMPT_ENGINEERING_PAYLOAD_IDS_CONTEXT_INSTRUCTION = (
+    "Use ids_context only as non-editable evidence to select payload patches that reduce Snort 3 detection "
+    "while preserving protocol validity and malicious functionality. Never modify ids_context, copy it into "
+    "a replacement, or propose header edits."
+)
+NO_USEFUL_PAYLOAD_EDIT_ABSTENTION = "no_useful_payload_edit"
+PROMPT_ENGINEERING_PAYLOAD_ABSTENTION_INSTRUCTION = (
+    "If no useful and valid payload edit exists, return patches as an empty list and set abstention to "
+    f'"{NO_USEFUL_PAYLOAD_EDIT_ABSTENTION}". Otherwise, return the patches and omit abstention.'
+)
 
 PROMPT_INPUT_JSON_DATA_PROFILES: dict[str, dict[str, Any]] = {
     "baseline_input_profile_v1": {
@@ -134,6 +144,19 @@ PROMPT_INSTRUCTIONS_PROFILES["prompt_engineering_instructions_profile_v1"] = [
     PROMPT_ENGINEERING_IDS_CONTEXT_INSTRUCTION,
     *[
         PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION
+        if line == BASELINE_NO_CHANGE_INSTRUCTION
+        else line
+        for line in PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"][1:]
+    ],
+]
+
+# Payload-only Prompt Engineering keeps the established IDS-aware role and data projection,
+# but aligns the actionable guidance and explicit abstention with payload patches.
+PROMPT_INSTRUCTIONS_PROFILES["prompt_engineering_instructions_profile_v2"] = [
+    PROMPT_ENGINEERING_ROLE_INSTRUCTION,
+    PROMPT_ENGINEERING_PAYLOAD_IDS_CONTEXT_INSTRUCTION,
+    *[
+        PROMPT_ENGINEERING_PAYLOAD_ABSTENTION_INSTRUCTION
         if line == BASELINE_NO_CHANGE_INSTRUCTION
         else line
         for line in PROMPT_INSTRUCTIONS_PROFILES["baseline_instructions_profile_v1"][1:]
@@ -447,7 +470,9 @@ def build_patch_output_skeleton(
         f'  "prompt_unit_id": "{prompt_unit_id}",',
     ]
     if has_editable_payload:
-        output_skeleton_lines.append('  "patches": []' + ("," if has_editable_headers else ""))
+        output_skeleton_lines.append(
+            '  "patches": []' + ("," if has_editable_headers or abstention_reason else "")
+        )
     if has_editable_headers:
         output_skeleton_lines.append('  "header_edits": []' + ("," if abstention_reason else ""))
     if abstention_reason:
@@ -481,13 +506,20 @@ def build_compact_patch_prompt_parts(
         has_editable_headers=has_editable_headers,
         has_editable_payload=has_editable_payload,
     )
-    abstention_reason = (
-        NO_USEFUL_HEADER_EDIT_ABSTENTION
-        if has_editable_headers
+    if (
+        has_editable_headers
         and not has_editable_payload
         and PROMPT_ENGINEERING_ABSTENTION_INSTRUCTION in active_instruction_lines
-        else None
-    )
+    ):
+        abstention_reason = NO_USEFUL_HEADER_EDIT_ABSTENTION
+    elif (
+        has_editable_payload
+        and not has_editable_headers
+        and PROMPT_ENGINEERING_PAYLOAD_ABSTENTION_INSTRUCTION in active_instruction_lines
+    ):
+        abstention_reason = NO_USEFUL_PAYLOAD_EDIT_ABSTENTION
+    else:
+        abstention_reason = None
     output_skeleton = build_patch_output_skeleton(
         parent_group_id=prompt_source_unit["parent_group_id"],
         prompt_unit_id=prompt_source_unit["prompt_unit_id"],
@@ -496,11 +528,16 @@ def build_compact_patch_prompt_parts(
         abstention_reason=abstention_reason,
     )
     json_prompt_input_text = json.dumps(json_prompt_input, indent=2, sort_keys=True)
-    output_skeleton_instruction = (
-        "Only when no useful and valid header edit exists, return this abstention JSON object:\n"
-        if abstention_reason
-        else "Return this JSON object:\n"
-    )
+    if abstention_reason == NO_USEFUL_HEADER_EDIT_ABSTENTION:
+        output_skeleton_instruction = (
+            "Only when no useful and valid header edit exists, return this abstention JSON object:\n"
+        )
+    elif abstention_reason == NO_USEFUL_PAYLOAD_EDIT_ABSTENTION:
+        output_skeleton_instruction = (
+            "Only when no useful and valid payload edit exists, return this abstention JSON object:\n"
+        )
+    else:
+        output_skeleton_instruction = "Return this JSON object:\n"
     fixed_prompt_text = (
         "\n".join(active_instruction_lines)
         + "\n"

@@ -311,6 +311,13 @@ def build_prompt_engineering_header_prompt_package() -> dict:
     return package
 
 
+def build_prompt_engineering_payload_prompt_package() -> dict:
+    package = build_prompt_package()
+    package["expected_output_format"]["optional_top_level_keys"] = ["abstention"]
+    package["expected_output_format"]["recognized_abstention_reasons"] = ["no_useful_payload_edit"]
+    return package
+
+
 #This test case covers Step 17 response JSON parsing before contract validation.
 class ModelJsonParsingTest(unittest.TestCase):
     def test_strict_json_response_is_parsed(self) -> None:
@@ -460,6 +467,23 @@ class AbstentionValidationTest(unittest.TestCase):
     def test_recognized_abstention_without_edits_is_conscious(self) -> None:
         output = self.build_output(header_edits=[], abstention_marker="no_useful_header_edit")
         result = run_llm_batch.validate_patch_output(output, build_prompt_engineering_header_prompt_package())
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["output_decision"], "conscious_abstention")
+        self.assertTrue(result["abstention_recognized"])
+
+    def test_recognized_payload_abstention_without_edits_is_conscious(self) -> None:
+        output = {
+            "schema_version": "patch_output_v1",
+            "parent_group_id": "parent_001",
+            "prompt_unit_id": "unit_001",
+            "patches": [],
+            "abstention": "no_useful_payload_edit",
+        }
+        result = run_llm_batch.validate_patch_output(
+            output,
+            build_prompt_engineering_payload_prompt_package(),
+        )
 
         self.assertTrue(result["accepted"])
         self.assertEqual(result["output_decision"], "conscious_abstention")

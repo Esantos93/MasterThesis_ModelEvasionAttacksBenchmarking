@@ -39,6 +39,7 @@ PATCH_OUTPUT_SCHEMA_VERSION = "patch_output_v1"
 PATCH_PROMPT_CONTRACT = "patch_output"
 ACTIVE_SOURCE_MODIFICATION_UNIT_SCHEMA_VERSION = "compact_modification_unit_v3"
 NO_USEFUL_HEADER_EDIT_ABSTENTION = "no_useful_header_edit"
+NO_USEFUL_PAYLOAD_EDIT_ABSTENTION = "no_useful_payload_edit"
 FIELD_ALIASES = {
     "region_type": ["region_type", "type"],
     "operation": ["operation", "op"],
@@ -1408,8 +1409,12 @@ def validate_patch_output(parsed_output: Any, prompt_package: dict[str, Any]) ->
         recognized_abstention_reasons = []
     raw_abstention = parsed_output.get("abstention")
     abstention_present = "abstention" in parsed_output
+    supported_abstention_reasons = {
+        NO_USEFUL_HEADER_EDIT_ABSTENTION,
+        NO_USEFUL_PAYLOAD_EDIT_ABSTENTION,
+    }
     abstention_recognized = (
-        raw_abstention == NO_USEFUL_HEADER_EDIT_ABSTENTION
+        raw_abstention in supported_abstention_reasons
         and raw_abstention in recognized_abstention_reasons
     )
     if patches:

@@ -639,6 +639,36 @@ class Step16V3Test(unittest.TestCase):
             },
         )
 
+    def test_prompt_engineering_v2_is_payload_only_and_exposes_payload_abstention(self) -> None:
+        unit = build_v3_payload_modification_unit()
+        unit["ids_context"] = build_ids_context()
+        profile_name, instruction_lines = prompt_projection.load_prompt_instructions_profile(
+            "prompt_engineering_instructions_profile_v2"
+        )
+        parts = prompt_projection.build_compact_patch_prompt_parts(
+            prompt_unit=unit,
+            prompt_input_structure=prompt_projection.load_prompt_input_json_data_structure(
+                "prompt_engineering_input_profile_v1"
+            ),
+            instruction_lines=instruction_lines,
+        )
+
+        self.assertEqual(profile_name, "prompt_engineering_instructions_profile_v2")
+        self.assertIn('"ids_context"', parts["content"])
+        self.assertIn(
+            prompt_projection.PROMPT_ENGINEERING_PAYLOAD_IDS_CONTEXT_INSTRUCTION,
+            parts["content"],
+        )
+        self.assertIn(
+            prompt_projection.PROMPT_ENGINEERING_PAYLOAD_ABSTENTION_INSTRUCTION,
+            parts["content"],
+        )
+        self.assertNotIn(prompt_projection.PROMPT_ENGINEERING_IDS_CONTEXT_INSTRUCTION, parts["content"])
+        self.assertNotIn("Header edits target", parts["content"])
+        self.assertNotIn('"header_edits"', parts["output_skeleton"])
+        self.assertEqual(parts["abstention_reason"], "no_useful_payload_edit")
+        self.assertEqual(json.loads(parts["output_skeleton"])["abstention"], "no_useful_payload_edit")
+
     def test_payload_full_region_v3_preserves_canonical_stream_bounds(self) -> None:
         unit = build_v3_payload_modification_unit()
         canonical_region = unit["canonical_payload_regions"][0]
