@@ -1,0 +1,74 @@
+{
+  "experiment": {
+    "experiment_id": "22_exp_payload_only_prompt_engineering_flow_context_gemma-4-26B-A4B-it",
+    "description": "Payload-only CICIDS2017 Prompt Engineering experiment using Flow-context-aware grouping, compact PRE Snort context, and the canonical payload-only modification strategy. Model used google/gemma-4-26B-A4B-it.",
+    "output_root": "/home/santos/Experiments"
+  },
+  "dataset": {
+    "pcap_path": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Thursday-WorkingHours.pcap",
+    "flow_csv_dir": "/home/santos/Desktop/Data_Sets/02_CICIDS2017/Flows",
+    "attack_labels": [
+      "Web Attack - Brute Force",
+      "Web Attack - XSS",
+      "Web Attack - Sql Injection",
+      "Infiltration"
+    ]
+  },
+  "snort": {
+    "snort_binary": "/usr/local/bin/snort",
+    "config_path": "/usr/local/etc/snort/snort.lua",
+    "enable_ruleset": true,
+    "ruleset_path": "/usr/local/etc/snort/rules/include.rules",
+    "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states",
+    "detector_policy_label": "max-detect-ips",
+    "detection_policy_options": [
+      {
+        "label": "connectivity-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-connectivity-ips.states"
+      },
+      {
+        "label": "balanced-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-balanced-ips.states"
+      },
+      {
+        "label": "security-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-security-ips.states"
+      },
+      {
+        "label": "max-detect-ips",
+        "rules_policy_path": "/usr/local/etc/snort/rules/CiscoFullSet/rulestates-max-detect-ips.states"
+      }
+    ],
+    "plugin_path": "/usr/local/etc/snort/so_rules",
+    "daq_dir": "/usr/local/lib/daq",
+    "snaplen": 65535,
+    "enable_builtin_rules": true
+  },
+  "llm": {
+    "model_name": "google/gemma-4-26B-A4B-it",
+    "model_path": "/models_root/gemma-4-26B-A4B-it/",
+    "prompt_version": "compact_patch_prompting_v2",
+    "prompt_input_json_data_profile": "prompt_engineering_input_profile_v1",
+    "prompt_instructions_profile": "prompt_engineering_instructions_profile_v2",
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "prompt_target_context": 8192,
+    "runtime_max_model_len": 12288,
+    "token_budget": {
+      "policy": "compact_patch_token_budget_v2",
+      "chars_per_token_estimate": 1.5,
+      "output_token_estimation_safety_factor": 2.25
+    },
+    "payload_window_left_context_bytes": 128,
+    "payload_window_right_context_bytes": 128
+  },
+  "pipeline": {
+    "target_os": "Ubuntu",
+    "grouping_policy": "flow_context_aware",
+    "grouping_unit": "physical_packet",
+    "modification_strategy": "canonical_payload_only_strategy_v1",
+    "header_editability_policy": "conservative_header_editability_v1",
+    "pre_llm_traffic_selection_policy": "conservative_v1",
+    "post_llm_traffic_validation_policy": "reject_invalid_v1"
+  }
+}
