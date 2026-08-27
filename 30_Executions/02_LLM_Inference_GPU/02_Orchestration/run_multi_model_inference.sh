@@ -46,6 +46,7 @@ CONTINUE_ON_ERROR=1
 
 # Shared runtime controls. Each model's runtime context is read from its config.
 STEP17_BACKEND="vllm"
+MODEL_DIR="/models_root"
 VLLM_DTYPE="auto"
 VLLM_GPU_MEMORY_UTILIZATION="0.9"
 TRUST_REMOTE_CODE=0
@@ -297,6 +298,7 @@ print(value)
   RUN_ID="${run_id}" \
   CONFIG_PATH="${config_path}" \
   GROUP_DIR="${group_dir}" \
+  MODEL_DIR="${MODEL_DIR}" \
   MODEL_PATH="${model_path}" \
   PROMPT_DIR="${prompt_dir}" \
   STEP17_BACKEND="${STEP17_BACKEND}" \
