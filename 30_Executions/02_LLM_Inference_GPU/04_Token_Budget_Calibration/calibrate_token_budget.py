@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v5"
+REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v6"
 
 COMPLETED_VALID_RESPONSE = "completed_valid_response"
 CONFIRMED_RUNAWAY = "confirmed_runaway"
@@ -291,6 +291,57 @@ def extract_complete_top_level_json_objects(
     return candidates, candidate_start
 
 
+# This function recovers complete patch objects even when their enclosing response is truncated.
+def extract_complete_nested_patch_objects(raw_text: str) -> list[dict[str, Any]]:
+    """Return complete patch-shaped objects found at any JSON nesting depth.
+
+    A length-censored response may leave the top-level object incomplete after
+    already emitting the same complete patch multiple times. Top-level-only
+    parsing cannot see that repetition, so the causal classifier inspects every
+    balanced object and retains only objects that have the core patch fields.
+    """
+    object_starts: list[int] = []
+    candidates: list[dict[str, Any]] = []
+    in_string = False
+    escaped = False
+
+    for index, character in enumerate(raw_text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            object_starts.append(index)
+        elif character == "}" and object_starts:
+            start = object_starts.pop()
+            try:
+                value = json.loads(raw_text[start : index + 1])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, dict):
+                continue
+            if {"region_id", "operation", "replacement"}.issubset(value):
+                candidates.append(value)
+    return candidates
+
+
+# This function counts exact duplicate completed patches in a possibly incomplete response.
+def duplicate_completed_patch_count(raw_text: str) -> tuple[int, int]:
+    patches = extract_complete_nested_patch_objects(raw_text)
+    signatures = [
+        json.dumps(patch, sort_keys=True, separators=(",", ":"))
+        for patch in patches
+    ]
+    duplicate_count = len(signatures) - len(set(signatures))
+    return len(patches), duplicate_count
+
+
 # This function removes a Markdown JSON fence before structural inspection when one is present.
 def strip_json_fence(text: str) -> str:
     stripped = text.strip()
@@ -449,6 +500,17 @@ def classify_truncation_cause(
         "replacement_exceeds_limit"
     ):
         evidence.append("replacement_exceeds_declared_limit_before_cutoff")
+        return CONFIRMED_RUNAWAY, evidence, partial_replacement
+
+    completed_patch_count, duplicate_patch_count = (
+        duplicate_completed_patch_count(raw_text)
+    )
+    evidence.append(f"complete_nested_patch_count={completed_patch_count}")
+    if duplicate_patch_count > 0:
+        evidence.append(
+            f"duplicate_completed_patch_count={duplicate_patch_count}"
+        )
+        evidence.append("repeated_completed_patch_inside_incomplete_response")
         return CONFIRMED_RUNAWAY, evidence, partial_replacement
 
     structure = scan_json_structure(raw_text)

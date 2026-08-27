@@ -447,6 +447,47 @@ class CalibrationTests(unittest.TestCase):
         )
         self.assertEqual(category, calibration.AMBIGUOUS_TRUNCATION)
 
+    def test_repeated_nested_patch_in_incomplete_response_is_runaway(self) -> None:
+        unit = self.payload_unit(max_hex_chars=20)
+        patch = (
+            '{"region_id":"payload-1",'
+            '"operation":"replace_byte_range","replacement":"aabb"}'
+        )
+        raw = '{"patches":[' + patch + "," + patch + ",{" 
+        category, evidence, _ = calibration.classify_truncation_cause(
+            probable_truncation=True,
+            finish_reason="length",
+            status="failed",
+            raw_text=raw,
+            unit=unit,
+            selected_json_present=False,
+        )
+        self.assertEqual(category, calibration.CONFIRMED_RUNAWAY)
+        self.assertIn("complete_nested_patch_count=2", evidence)
+        self.assertIn("duplicate_completed_patch_count=1", evidence)
+
+    def test_distinct_nested_patches_can_remain_legitimate_truncation(self) -> None:
+        unit = self.payload_unit(max_hex_chars=20)
+        first = (
+            '{"region_id":"payload-1",'
+            '"operation":"replace_byte_range","replacement":"aabb"}'
+        )
+        second = (
+            '{"region_id":"payload-1",'
+            '"operation":"replace_byte_range","replacement":"ccdd"}'
+        )
+        raw = '{"patches":[' + first + "," + second + ",{" 
+        category, evidence, _ = calibration.classify_truncation_cause(
+            probable_truncation=True,
+            finish_reason="length",
+            status="failed",
+            raw_text=raw,
+            unit=unit,
+            selected_json_present=False,
+        )
+        self.assertEqual(category, calibration.LEGITIMATE_TRUNCATION)
+        self.assertIn("complete_nested_patch_count=2", evidence)
+
     def test_embedded_config_is_complete(self) -> None:
         calibration.validate_config(calibration.CONFIG)
         required_paths = {
