@@ -25,9 +25,9 @@ SKIP_STEP16=0
 # SKIP_STEP16 and SKIP_STEP17 cannot both be 1.
 SKIP_STEP17=0
 
-# Experiment category + _fixed-sized-006 o  _flow_context_aware. This is used to create a unique run ID and log directory.
-# Ejemplo: baseline_fixed-sized-006 o baseline_flow_context_aware
-RUN_LABEL="baseline_flow_context_aware"
+# Experiment modification strategy + category + _fixed-sized-006 o  _flow_context_aware. This is used to create a unique run ID and log directory.
+# Ejemplo: hybrid_baseline_fixed-sized-006, hybrid_baseline_flow-context-aware o payload-only_prompt-engineering_flow-context-aware
+RUN_LABEL="hybrid_baseline_flow_context_aware"
 
 # Select the models to execute: 1 = enabled, 0 = disabled.
 ENABLE_LLAMA31=1
