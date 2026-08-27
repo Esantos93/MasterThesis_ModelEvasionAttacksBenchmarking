@@ -488,6 +488,78 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(category, calibration.LEGITIMATE_TRUNCATION)
         self.assertIn("complete_nested_patch_count=2", evidence)
 
+    def test_overlapping_completed_ranges_are_non_budget_invalid(self) -> None:
+        unit = self.payload_unit(max_hex_chars=40)
+        unit["input_traceability"]["editable_regions"][0].update(
+            {
+                "canonical_region_id": "canonical-1",
+                "start_offset_bytes": 0,
+                "end_offset_bytes": 10,
+                "length_bytes": 10,
+            }
+        )
+        first = (
+            '{"canonical_region_id":"canonical-1","region_id":"payload-1",'
+            '"operation":"replace_byte_range",'
+            '"offset_from_region_start_bytes":0,"length_bytes":6,'
+            '"replacement":"aabb"}'
+        )
+        second = (
+            '{"canonical_region_id":"canonical-1","region_id":"payload-1",'
+            '"operation":"replace_byte_range",'
+            '"offset_from_region_start_bytes":5,"length_bytes":3,'
+            '"replacement":"ccdd"}'
+        )
+        raw = '{"patches":[' + first + "," + second
+        category, evidence, _ = calibration.classify_truncation_cause(
+            probable_truncation=True,
+            finish_reason="length",
+            status="failed",
+            raw_text=raw,
+            unit=unit,
+            selected_json_present=False,
+        )
+        self.assertEqual(category, calibration.IN_BUDGET_INVALID_RESPONSE)
+        self.assertIn("overlapping_completed_patch_pair_count=1", evidence)
+
+    def test_partial_repeated_replace_region_after_overlaps_is_runaway(self) -> None:
+        unit = self.payload_unit(max_hex_chars=80)
+        region = unit["input_traceability"]["editable_regions"][0]
+        region.update(
+            {
+                "canonical_region_id": "canonical-1",
+                "allowed_operations": ["replace_region"],
+                "start_offset_bytes": 0,
+                "end_offset_bytes": 10,
+                "length_bytes": 10,
+            }
+        )
+        first = (
+            '{"canonical_region_id":"canonical-1","region_id":"payload-1",'
+            '"operation":"replace_region","replacement":"aabbccddeeff0011"}'
+        )
+        second = (
+            '{"canonical_region_id":"canonical-1","region_id":"payload-1",'
+            '"operation":"replace_region","replacement":"1122334455667788"}'
+        )
+        partial = (
+            '{"canonical_region_id":"canonical-1","region_id":"payload-1",'
+            '"operation":"replace_region","replacement":"aabbccddeeff0011'
+        )
+        raw = '{"patches":[' + first + "," + second + "," + partial
+        category, evidence, _ = calibration.classify_truncation_cause(
+            probable_truncation=True,
+            finish_reason="length",
+            status="failed",
+            raw_text=raw,
+            unit=unit,
+            selected_json_present=False,
+        )
+        self.assertEqual(category, calibration.CONFIRMED_RUNAWAY)
+        self.assertIn("overlapping_completed_patch_pair_count=1", evidence)
+        self.assertIn("partial_patch_overlaps_completed_patch=0", evidence)
+        self.assertIn("partial_patch_repeats_completed_patch=0", evidence)
+
     def test_embedded_config_is_complete(self) -> None:
         calibration.validate_config(calibration.CONFIG)
         required_paths = {

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v6"
+REPORT_SCHEMA_VERSION = "prompt_token_budget_postflight_v7"
 
 COMPLETED_VALID_RESPONSE = "completed_valid_response"
 CONFIRMED_RUNAWAY = "confirmed_runaway"
@@ -342,6 +342,151 @@ def duplicate_completed_patch_count(raw_text: str) -> tuple[int, int]:
     return len(patches), duplicate_count
 
 
+# This function maps a complete or partial patch to its canonical byte interval when possible.
+def payload_patch_interval(
+    patch: Mapping[str, Any],
+    unit: Mapping[str, Any],
+) -> tuple[str, int, int] | None:
+    """Return ``(canonical target, start, end)`` using half-open offsets.
+
+    ``replace_byte_range`` offsets are local to the declared editable region,
+    whereas overlap validation concerns the canonical payload coordinate space.
+    The editable-region start is therefore added before comparing two patches.
+    A ``replace_region`` occupies the complete declared editable region.
+    """
+    region_id = patch.get("region_id")
+    if region_id is None:
+        return None
+    region = editable_payload_limits(unit).get(str(region_id))
+    canonical_region_id = patch.get("canonical_region_id")
+    if canonical_region_id is None and region is not None:
+        canonical_region_id = region.get("canonical_region_id")
+    target = str(canonical_region_id or region_id)
+    operation = patch.get("operation")
+
+    region_start = as_int(region.get("start_offset_bytes")) if region else None
+    region_end = as_int(region.get("end_offset_bytes")) if region else None
+    region_length = as_int(region.get("length_bytes")) if region else None
+    if region_start is None:
+        region_start = 0
+    if region_end is None and region_length is not None:
+        region_end = region_start + region_length
+
+    if operation == "replace_region":
+        if region_end is None:
+            return None
+        return target, region_start, region_end
+    if operation == "replace_byte_range":
+        local_start = as_int(patch.get("offset_from_region_start_bytes"))
+        length = as_int(patch.get("length_bytes"))
+        if local_start is None or length is None or length < 0:
+            return None
+        start = region_start + local_start
+        return target, start, start + length
+    return None
+
+
+# This function detects completed payload patches that violate the non-overlap contract.
+def overlapping_completed_patch_pairs(
+    patches: Sequence[Mapping[str, Any]],
+    unit: Mapping[str, Any],
+) -> list[tuple[int, int]]:
+    intervals = [payload_patch_interval(patch, unit) for patch in patches]
+    overlaps: list[tuple[int, int]] = []
+    for left_index, left in enumerate(intervals):
+        for right_index in range(left_index + 1, len(intervals)):
+            right = intervals[right_index]
+            if left is None or right is None or left[0] != right[0]:
+                continue
+            if max(left[1], right[1]) < min(left[2], right[2]):
+                overlaps.append((left_index, right_index))
+    return overlaps
+
+
+# This function recovers patch fields from the deepest incomplete JSON object.
+def extract_incomplete_nested_patch(raw_text: str) -> dict[str, Any] | None:
+    object_starts: list[int] = []
+    in_string = False
+    escaped = False
+    for index, character in enumerate(raw_text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            object_starts.append(index)
+        elif character == "}" and object_starts:
+            object_starts.pop()
+    # A patch object is nested inside the top-level response. If only that
+    # response object remains open, its already-completed patch fields must not
+    # be mistaken for a new partial patch.
+    if len(object_starts) < 2:
+        return None
+
+    fragment = raw_text[object_starts[-1] :]
+    patch: dict[str, Any] = {}
+    for field in (
+        "canonical_region_id",
+        "region_id",
+        "region_type",
+        "operation",
+        "replacement_format",
+    ):
+        values = extracted_string_values(fragment, field)
+        if values:
+            patch[field] = values[-1]
+    for field in ("offset_from_region_start_bytes", "length_bytes"):
+        match = re.search(rf'"{field}"\s*:\s*(\d+)', fragment)
+        if match:
+            patch[field] = int(match.group(1))
+    replacement = re.search(r'"replacement"\s*:\s*"([0-9A-Fa-f]*)', fragment)
+    if replacement:
+        patch["replacement"] = replacement.group(1)
+    if not {"region_id", "operation"}.issubset(patch):
+        return None
+    return patch
+
+
+# This function detects an incomplete patch that repeats or overlaps an earlier complete patch.
+def partial_patch_repetition_evidence(
+    partial_patch: Mapping[str, Any] | None,
+    completed_patches: Sequence[Mapping[str, Any]],
+    unit: Mapping[str, Any],
+) -> list[str]:
+    if partial_patch is None:
+        return []
+    evidence: list[str] = []
+    partial_interval = payload_patch_interval(partial_patch, unit)
+    partial_replacement = partial_patch.get("replacement")
+    for index, completed in enumerate(completed_patches):
+        completed_interval = payload_patch_interval(completed, unit)
+        same_operation = partial_patch.get("operation") == completed.get("operation")
+        if (
+            partial_interval is not None
+            and completed_interval is not None
+            and partial_interval[0] == completed_interval[0]
+            and max(partial_interval[1], completed_interval[1])
+            < min(partial_interval[2], completed_interval[2])
+        ):
+            evidence.append(f"partial_patch_overlaps_completed_patch={index}")
+        completed_replacement = completed.get("replacement")
+        if (
+            same_operation
+            and isinstance(partial_replacement, str)
+            and len(partial_replacement) >= 16
+            and isinstance(completed_replacement, str)
+            and completed_replacement.startswith(partial_replacement)
+        ):
+            evidence.append(f"partial_patch_repeats_completed_patch={index}")
+    return evidence
+
+
 # This function removes a Markdown JSON fence before structural inspection when one is present.
 def strip_json_fence(text: str) -> str:
     stripped = text.strip()
@@ -502,8 +647,14 @@ def classify_truncation_cause(
         evidence.append("replacement_exceeds_declared_limit_before_cutoff")
         return CONFIRMED_RUNAWAY, evidence, partial_replacement
 
-    completed_patch_count, duplicate_patch_count = (
-        duplicate_completed_patch_count(raw_text)
+    completed_patches = extract_complete_nested_patch_objects(raw_text)
+    completed_patch_count = len(completed_patches)
+    completed_patch_signatures = [
+        json.dumps(patch, sort_keys=True, separators=(",", ":"))
+        for patch in completed_patches
+    ]
+    duplicate_patch_count = len(completed_patch_signatures) - len(
+        set(completed_patch_signatures)
     )
     evidence.append(f"complete_nested_patch_count={completed_patch_count}")
     if duplicate_patch_count > 0:
@@ -512,6 +663,24 @@ def classify_truncation_cause(
         )
         evidence.append("repeated_completed_patch_inside_incomplete_response")
         return CONFIRMED_RUNAWAY, evidence, partial_replacement
+
+    overlap_pairs = overlapping_completed_patch_pairs(completed_patches, unit)
+    if overlap_pairs:
+        evidence.append(f"overlapping_completed_patch_pair_count={len(overlap_pairs)}")
+        evidence.append("completed_payload_patches_violate_non_overlap_contract")
+
+    incomplete_patch = extract_incomplete_nested_patch(raw_text)
+    repeated_partial_evidence = partial_patch_repetition_evidence(
+        incomplete_patch,
+        completed_patches,
+        unit,
+    )
+    if repeated_partial_evidence:
+        evidence.extend(repeated_partial_evidence)
+        evidence.append("repeated_or_overlapping_partial_patch_after_completed_patch")
+        return CONFIRMED_RUNAWAY, evidence, partial_replacement
+    if overlap_pairs:
+        return IN_BUDGET_INVALID_RESPONSE, evidence, partial_replacement
 
     structure = scan_json_structure(raw_text)
     if incomplete_start is None or not structure.structurally_incomplete:
